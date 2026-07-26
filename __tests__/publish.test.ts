@@ -1,0 +1,409 @@
+import { execFileSync } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import express, { Express } from "express";
+import request from "supertest";
+
+/**
+ * Publish pipeline integration tests — TECH_SPEC_V1.md §3.3, §4.1, §4.2, §6.8
+ * (task #439 DoD). Exercises the real routers + services against a throwaway
+ * Postgres 15 cluster (unix-socket-only, under /tmp, per agent-pre-checks.md).
+ *
+ * No AWS is touched: the Cognito verifier is mocked so `requireAdmin` passes with
+ * a bearer token, and CDN resolution is exercised through the configured
+ * `cdn_domain` secret (no S3/CloudFront call is made). The `pg` client is given
+ * an explicit `user` because — unlike psql — it does not infer the OS user.
+ *
+ * Covered: publish → content → 304 flow, empty-state 200, validation refusal,
+ * restore rebuilds the working set, and prune-at-50 behavior.
+ */
+
+jest.mock("../src/aws/cognitoAuth", () => ({
+  verifyAdminIdToken: jest.fn(),
+}));
+
+import { verifyAdminIdToken } from "../src/aws/cognitoAuth";
+import { initDb, closeDb, getDb } from "../src/db/db";
+import adminSectionsRouter from "../src/routers/adminSectionsRouter";
+import adminPublishRouter from "../src/routers/adminPublishRouter";
+import contentRouter from "../src/routers/contentRouter";
+import { failure } from "../src/utils/envelope";
+
+const mockVerify = verifyAdminIdToken as jest.Mock;
+
+const PG_BIN = "/usr/lib/postgresql/15/bin";
+const PG_PORT = "55439"; // distinct from other tasks' throwaway clusters
+const PG_SOCKET_DIR = "/tmp";
+const PG_USER = "node";
+const TEST_DB = "portfolio_v6_publish_test";
+const DATA_DIR = path.join(os.tmpdir(), "pgtest_task439");
+const CDN_DOMAIN = "media-test.benkile.com";
+
+const ADMIN_PAYLOAD = { sub: "admin-sub-439", "cognito:groups": ["admins"] };
+const AUTH = ["Authorization", "Bearer good.token"] as const;
+
+function pgBin(name: string): string {
+  return path.join(PG_BIN, name);
+}
+
+function startCluster(): void {
+  if (fs.existsSync(DATA_DIR)) {
+    try {
+      execFileSync(pgBin("pg_ctl"), ["-D", DATA_DIR, "stop", "-m", "immediate"], {
+        stdio: "ignore",
+      });
+    } catch {
+      /* not running */
+    }
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  }
+  execFileSync(pgBin("initdb"), ["-D", DATA_DIR, "-U", PG_USER], {
+    stdio: "ignore",
+  });
+  execFileSync(
+    pgBin("pg_ctl"),
+    [
+      "-D",
+      DATA_DIR,
+      "-o",
+      `-k ${PG_SOCKET_DIR} -p ${PG_PORT} -c listen_addresses=''`,
+      "-w",
+      "start",
+    ],
+    { stdio: "ignore" }
+  );
+  execFileSync(
+    pgBin("createdb"),
+    ["-h", PG_SOCKET_DIR, "-p", PG_PORT, "-U", PG_USER, TEST_DB],
+    { stdio: "ignore" }
+  );
+}
+
+function stopCluster(): void {
+  try {
+    execFileSync(pgBin("pg_ctl"), ["-D", DATA_DIR, "stop", "-m", "immediate"], {
+      stdio: "ignore",
+    });
+  } catch {
+    /* already stopped */
+  }
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+}
+
+function buildApp(): Express {
+  const app = express();
+  app.use(express.json());
+  app.set("secrets", {
+    cognito_user_pool_id: "us-east-1_testpool",
+    cognito_client_id: "test-client-id",
+    cdn_domain: CDN_DOMAIN,
+  });
+  app.use("/api/content", contentRouter);
+  app.use("/api/admin", adminSectionsRouter);
+  app.use("/api/admin", adminPublishRouter);
+  app.use((err: Error, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    res.status(500).json(failure(err.message));
+  });
+  return app;
+}
+
+let app: Express;
+
+beforeAll(async () => {
+  startCluster();
+  await initDb(
+    {
+      host: PG_SOCKET_DIR,
+      port: parseInt(PG_PORT, 10),
+      user: PG_USER,
+      password: "",
+      database: TEST_DB,
+      ssl: false,
+    },
+    { runMigrations: true }
+  );
+  app = buildApp();
+}, 60000);
+
+afterAll(async () => {
+  await closeDb();
+  stopCluster();
+}, 30000);
+
+beforeEach(async () => {
+  mockVerify.mockReset();
+  mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
+  await getDb()("section_items").del();
+  await getDb()("sections").del();
+  await getDb()("page_versions").del();
+  await getDb()("media_assets").del();
+});
+
+// ---- helpers ---------------------------------------------------------------
+
+async function createSection(body: Record<string, unknown>) {
+  return request(app).post("/api/admin/sections").set(...AUTH).send(body);
+}
+
+async function createItem(sectionId: string, data: Record<string, unknown>) {
+  return request(app)
+    .post(`/api/admin/sections/${sectionId}/items`)
+    .set(...AUTH)
+    .send({ data });
+}
+
+async function insertMedia(id: string, s3Key: string) {
+  await getDb()("media_assets").insert({
+    id,
+    s3_key: s3Key,
+    mime: "image/webp",
+    bytes: 1234,
+    confirmed_at: getDb().fn.now(),
+  });
+}
+
+// ---- empty state (§4.1) ----------------------------------------------------
+
+describe("GET /api/content — empty state (§4.1)", () => {
+  it("returns 200 with an empty sections array when nothing was ever published", async () => {
+    const res = await request(app).get("/api/content");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.data).toMatchObject({
+      version: 0,
+      published_at: null,
+      sections: [],
+      media: {},
+    });
+    expect(res.headers.etag).toBe('W/"v0"');
+  });
+});
+
+// ---- publish → content → 304 (§3.3, §4.1, §6.8) ----------------------------
+
+describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
+  it("publishes the working set, serves it with resolved media URLs, and 304s on If-None-Match", async () => {
+    const MEDIA_ID = "11111111-1111-1111-1111-111111111111";
+    await insertMedia(MEDIA_ID, "media/hero.webp");
+
+    const hero = (
+      await createSection({
+        type: "hero",
+        data: { title: "Ben Kile", tagline: "builder", background_media_id: MEDIA_ID },
+      })
+    ).body.data;
+    const portfolio = (await createSection({ type: "portfolio", data: {} })).body.data;
+    await createItem(portfolio.id, {
+      title: "Proj",
+      intro: "i",
+      description: "d",
+      media_id: MEDIA_ID,
+      tech_icons: ["ts"],
+      links: [{ type: "repo", label: "code", url: "https://example.com" }],
+    });
+
+    // Publish → version 1, attributed to the admin sub.
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+    expect(pub.body.data.version).toBe(1);
+
+    // Content reflects the published document, media resolved to CDN URLs (§6.8).
+    const content = await request(app).get("/api/content");
+    expect(content.status).toBe(200);
+    expect(content.body.data.version).toBe(1);
+    expect(content.body.data.sections).toHaveLength(2);
+    expect(content.body.data.sections[0].id).toBe(hero.id);
+    expect(content.body.data.sections[0].type).toBe("hero");
+    // Section/item data still references media by id.
+    expect(content.body.data.sections[0].data.background_media_id).toBe(MEDIA_ID);
+    expect(content.body.data.sections[1].items).toHaveLength(1);
+    // The media map resolves the id to an absolute CDN URL via toCdnUrl.
+    expect(content.body.data.media[MEDIA_ID]).toBe(
+      `https://${CDN_DOMAIN}/media/hero.webp`
+    );
+    expect(content.headers.etag).toBe('W/"v1"');
+    expect(content.headers["cache-control"]).toContain("must-revalidate");
+
+    // 304 on a matching If-None-Match, no body.
+    const notModified = await request(app)
+      .get("/api/content")
+      .set("If-None-Match", 'W/"v1"');
+    expect(notModified.status).toBe(304);
+    expect(notModified.text).toBeFalsy();
+
+    // A stale validator still gets a full 200.
+    const stale = await request(app)
+      .get("/api/content")
+      .set("If-None-Match", 'W/"v0"');
+    expect(stale.status).toBe(200);
+    expect(stale.body.data.version).toBe(1);
+  });
+
+  it("excludes hidden sections/items from the published document", async () => {
+    const visible = (await createSection({ type: "hero", data: { title: "Shown" } })).body.data;
+    const hidden = (await createSection({ type: "about", data: { body: "secret" } })).body.data;
+    await request(app)
+      .patch(`/api/admin/sections/${hidden.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: hidden.updated_at, is_hidden: true });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    expect(content.body.data.sections).toHaveLength(1);
+    expect(content.body.data.sections[0].id).toBe(visible.id);
+  });
+});
+
+// ---- validation refusal (§3.9) ---------------------------------------------
+
+describe("publish validation refusal (§3.9)", () => {
+  it("refuses to publish when any section in the working set is invalid (400)", async () => {
+    // Create a valid hero, then corrupt its data directly in the DB so the row
+    // is invalid at publish time (the write path would have rejected it).
+    const hero = (await createSection({ type: "hero", data: { title: "ok" } })).body.data;
+    await getDb()("sections").where({ id: hero.id }).update({ data: { tagline: "no title" } });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(400);
+    expect(pub.body).toMatchObject({ status: "error", error: true });
+
+    // Nothing was published.
+    const content = await request(app).get("/api/content");
+    expect(content.body.data.version).toBe(0);
+    const count = await getDb()("page_versions").count<{ count: string }[]>("* as count");
+    expect(Number(count[0].count)).toBe(0);
+  });
+});
+
+// ---- restore rewrites the working set (§4.2) -------------------------------
+
+describe("restore (§4.2)", () => {
+  it("re-publishes an old version and rebuilds the working set from it", async () => {
+    // Version 1: a hero titled "First".
+    const hero = (await createSection({ type: "hero", data: { title: "First" } })).body.data;
+    const v1 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(v1.body.data.version).toBe(1);
+
+    // Edit the draft, add a section, publish version 2.
+    await request(app)
+      .patch(`/api/admin/sections/${hero.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: hero.updated_at, data: { title: "Second" } });
+    await createSection({ type: "contact", data: {} });
+    const v2 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(v2.body.data.version).toBe(2);
+
+    // Working set currently has 2 sections with title "Second".
+    let ws = (await request(app).get("/api/admin/sections").set(...AUTH)).body.data.sections;
+    expect(ws).toHaveLength(2);
+
+    // Restore version 1 → new version 3, working set rebuilt from v1's document.
+    const restore = await request(app)
+      .post("/api/admin/versions/1/restore")
+      .set(...AUTH)
+      .send({});
+    expect(restore.status).toBe(201);
+    expect(restore.body.data.version).toBe(3);
+
+    // Content is now version 3, whose document equals version 1's sections.
+    const content = await request(app).get("/api/content");
+    expect(content.body.data.version).toBe(3);
+    expect(content.body.data.sections).toHaveLength(1);
+    expect(content.body.data.sections[0].data.title).toBe("First");
+
+    // The working set was rebuilt to match the restored document.
+    ws = (await request(app).get("/api/admin/sections").set(...AUTH)).body.data.sections;
+    expect(ws).toHaveLength(1);
+    expect(ws[0].id).toBe(hero.id);
+    expect(ws[0].type).toBe("hero");
+    expect(ws[0].data).toEqual({ title: "First" });
+    expect(ws[0].position).toBe(0);
+
+    // A publish immediately after restore snapshots the restored working set,
+    // not the discarded draft — proving the rebuild is authoritative.
+    const v4 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(v4.body.data.version).toBe(4);
+    expect(v4.body.data.document.sections).toHaveLength(1);
+    expect(v4.body.data.document.sections[0].data.title).toBe("First");
+  });
+
+  it("returns 404 restoring a version that does not exist", async () => {
+    const res = await request(app)
+      .post("/api/admin/versions/99/restore")
+      .set(...AUTH)
+      .send({});
+    expect(res.status).toBe(404);
+  });
+});
+
+// ---- version history & prune-at-50 (§3.3, §4.2) ----------------------------
+
+describe("versions & prune-at-50 (§3.3 / §4.2)", () => {
+  it("lists version history newest-first", async () => {
+    await createSection({ type: "hero", data: { title: "H" } });
+    await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    await request(app).post("/api/admin/publish").set(...AUTH).send({});
+
+    const res = await request(app).get("/api/admin/versions").set(...AUTH);
+    expect(res.status).toBe(200);
+    const versions = res.body.data.versions;
+    expect(versions.map((x: { version: number }) => x.version)).toEqual([2, 1]);
+    expect(versions[0].published_by).toBe(ADMIN_PAYLOAD.sub);
+  });
+
+  it("retains only the most recent 50 versions", async () => {
+    await createSection({ type: "hero", data: { title: "H" } });
+    // Publish 55 times; a portfolio page never does this, but retention must hold.
+    for (let i = 0; i < 55; i++) {
+      const res = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+      expect(res.status).toBe(201);
+    }
+
+    const rows = await getDb()("page_versions")
+      .select("version")
+      .orderBy("version", "asc");
+    expect(rows).toHaveLength(50);
+    // The oldest surviving version is 6 (versions 1–5 pruned), newest is 55.
+    expect(rows[0].version).toBe(6);
+    expect(rows[rows.length - 1].version).toBe(55);
+  });
+});
+
+// ---- draft preview (§4.2 †, §7) --------------------------------------------
+
+describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
+  it("serializes the draft in exactly the /api/content shape", async () => {
+    const MEDIA_ID = "22222222-2222-2222-2222-222222222222";
+    await insertMedia(MEDIA_ID, "media/draft.webp");
+    await createSection({
+      type: "hero",
+      data: { title: "Draft", background_media_id: MEDIA_ID },
+    });
+
+    // Nothing published yet — preview still serves the draft.
+    const preview = await request(app).get("/api/admin/preview").set(...AUTH);
+    expect(preview.status).toBe(200);
+    const draft = preview.body.data;
+    expect(draft.version).toBeNull();
+    expect(draft.published_at).toBeNull();
+    expect(draft.sections).toHaveLength(1);
+    expect(draft.sections[0].type).toBe("hero");
+    expect(draft.sections[0]).toHaveProperty("id");
+    expect(draft.sections[0]).toHaveProperty("items");
+    expect(draft.media[MEDIA_ID]).toBe(`https://${CDN_DOMAIN}/media/draft.webp`);
+
+    // Same key set as a published /api/content document (shape parity, §4.1).
+    await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    const content = await request(app).get("/api/content");
+    expect(Object.keys(draft).sort()).toEqual(Object.keys(content.body.data).sort());
+  });
+
+  it("rejects an unauthenticated preview with 401", async () => {
+    const res = await request(app).get("/api/admin/preview");
+    expect(res.status).toBe(401);
+  });
+});

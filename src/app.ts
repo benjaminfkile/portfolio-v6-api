@@ -5,6 +5,8 @@ import healthRouter from "./routers/healthRouter";
 import schemaRouter from "./routers/schemaRouter";
 import adminAuthRouter from "./routers/adminAuthRouter";
 import adminSectionsRouter from "./routers/adminSectionsRouter";
+import adminPublishRouter from "./routers/adminPublishRouter";
+import contentRouter from "./routers/contentRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -28,12 +30,17 @@ app.get("/", (req: Request, res: Response) => {
 
 app.use("/api/health", healthRouter);
 app.use("/api/schema", schemaRouter);
-// Preview-token mint route (§7) and the sections/items CRUD (§4.2). Both mount
-// under /api/admin; adminAuthRouter owns the preview-token route, and requests
-// it does not match fall through to adminSectionsRouter (each guards its own
-// routes with requireAdmin). Later tasks (439–441) add their routers likewise.
+// Public content endpoint (§4.1): latest published snapshot, media resolved to
+// CDN URLs, ETag/304 caching.
+app.use("/api/content", contentRouter);
+// Preview-token mint route (§7), the sections/items CRUD (§4.2), and the publish
+// pipeline (§4.2: publish/versions/restore/preview). All mount under /api/admin;
+// each router guards its own routes with requireAdmin() (or, for the preview
+// route, requireAdminOrPreviewToken()), and requests one router does not match
+// fall through to the next. Later tasks (440–441) add their routers likewise.
 app.use("/api/admin", adminAuthRouter);
 app.use("/api/admin", adminSectionsRouter);
+app.use("/api/admin", adminPublishRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
