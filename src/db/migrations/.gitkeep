@@ -1,0 +1,2 @@
+# Knex migrations live here (added by task 436). Keep this directory tracked so
+# the migrationSource path resolves before the first migration exists.
