@@ -10,6 +10,8 @@ import adminMediaRouter from "./routers/adminMediaRouter";
 import adminPostsRouter from "./routers/adminPostsRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
+import statusRouter from "./routers/statusRouter";
+import nowPlayingRouter from "./routers/nowPlayingRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -39,6 +41,12 @@ app.use("/api/content", contentRouter);
 // Public blog endpoints (§4.1): published post summaries with keyset pagination
 // and one published post (published_body only, media resolved, ETag).
 app.use("/api/posts", postsRouter);
+// Public live-section endpoints (§3.5, §4.6): the gateway-health proxy and the
+// Spotify now-playing proxy. Both serve from a ~30s in-memory cache and DEGRADE
+// rather than error — an unreachable upstream yields a degraded/idle payload, a
+// 200, never a 5xx. No Spotify token ever appears in a response (§4.6).
+app.use("/api/status", statusRouter);
+app.use("/api/now-playing", nowPlayingRouter);
 // Preview-token mint route (§7), the sections/items CRUD (§4.2), and the publish
 // pipeline (§4.2: publish/versions/restore/preview). All mount under /api/admin;
 // each router guards its own routes with requireAdmin() (or, for the preview
