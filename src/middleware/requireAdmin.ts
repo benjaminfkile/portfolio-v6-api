@@ -17,14 +17,15 @@ declare global {
 }
 
 /**
- * Header (case-insensitive) and query param the preview token is accepted on.
+ * Header (case-insensitive) and query params the preview token is accepted on.
  *
- * DOCUMENTED CHOICE (§7): the primary transport is the `?preview=<token>` query
- * param, because the public site receives the token in its iframe URL and has no
- * bearer/Authorization plumbing. The `X-Preview-Token` header is also accepted
- * for callers (e.g. server-side fetches) that would rather not put it in the URL.
+ * DOCUMENTED CHOICE (§7): the primary transport is the `?token=<token>` query
+ * param — it is what the public site's preview fetches send (`lib/api.ts`), kept
+ * distinct from the public site's own `?preview=` page parameter. `?preview=` is
+ * also accepted for tolerance, and the `X-Preview-Token` header for callers
+ * (e.g. server-side fetches) that would rather not put the token in the URL.
  */
-export const PREVIEW_TOKEN_QUERY_PARAM = "preview";
+export const PREVIEW_TOKEN_QUERY_PARAMS = ["token", "preview"] as const;
 export const PREVIEW_TOKEN_HEADER = "x-preview-token";
 
 function getSecrets(req: Request): IAppSecrets | undefined {
@@ -114,9 +115,11 @@ function extractPreviewToken(req: Request): string | undefined {
   if (typeof headerVal === "string" && headerVal.length > 0) {
     return headerVal;
   }
-  const queryVal = req.query[PREVIEW_TOKEN_QUERY_PARAM];
-  if (typeof queryVal === "string" && queryVal.length > 0) {
-    return queryVal;
+  for (const param of PREVIEW_TOKEN_QUERY_PARAMS) {
+    const queryVal = req.query[param];
+    if (typeof queryVal === "string" && queryVal.length > 0) {
+      return queryVal;
+    }
   }
   return undefined;
 }

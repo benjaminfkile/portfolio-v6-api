@@ -381,17 +381,17 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
 
     // Draft is invisible publicly.
     expect((await request(app).get("/api/posts/journey")).status).toBe(404);
-    expect((await request(app).get("/api/posts")).body.data.posts).toHaveLength(0);
+    expect((await request(app).get("/api/posts")).body.posts).toHaveLength(0);
 
     // Publish → visible with published_body only.
     await publish(id);
     const pubView = await request(app).get("/api/posts/journey");
     expect(pubView.status).toBe(200);
-    expect(pubView.body.data.slug).toBe("journey");
-    expect(pubView.body.data.body).toEqual([{ type: "paragraph", text: "published body" }]);
-    expect(pubView.body.data).not.toHaveProperty("draft_body");
-    expect(pubView.body.data).not.toHaveProperty("published_body");
-    expect((await request(app).get("/api/posts")).body.data.posts).toHaveLength(1);
+    expect(pubView.body.slug).toBe("journey");
+    expect(pubView.body.body).toEqual([{ type: "paragraph", text: "published body" }]);
+    expect(pubView.body).not.toHaveProperty("draft_body");
+    expect(pubView.body).not.toHaveProperty("published_body");
+    expect((await request(app).get("/api/posts")).body.posts).toHaveLength(1);
 
     // Edit the draft body → public copy is UNCHANGED until re-publish (§3.6).
     let cur = await request(app).get(`/api/admin/posts/${id}`).set(...AUTH);
@@ -403,17 +403,17 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
         draft_body: [PARA("secret draft edit")],
       });
     const stillOld = await request(app).get("/api/posts/journey");
-    expect(stillOld.body.data.body).toEqual([{ type: "paragraph", text: "published body" }]);
+    expect(stillOld.body.body).toEqual([{ type: "paragraph", text: "published body" }]);
 
     // Re-publish → public now reflects the edit.
     await publish(id);
     const republished = await request(app).get("/api/posts/journey");
-    expect(republished.body.data.body).toEqual([{ type: "paragraph", text: "secret draft edit" }]);
+    expect(republished.body.body).toEqual([{ type: "paragraph", text: "secret draft edit" }]);
 
     // Unpublish → 404 again.
     await request(app).post(`/api/admin/posts/${id}/unpublish`).set(...AUTH).send({});
     expect((await request(app).get("/api/posts/journey")).status).toBe(404);
-    expect((await request(app).get("/api/posts")).body.data.posts).toHaveLength(0);
+    expect((await request(app).get("/api/posts")).body.posts).toHaveLength(0);
   });
 
   it("resolves cover + in-body media to CDN URLs and supports ETag/304", async () => {
@@ -434,8 +434,8 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
 
     const res = await request(app).get("/api/posts/with-media");
     expect(res.status).toBe(200);
-    expect(res.body.data.cover).toBe(`https://${CDN_DOMAIN}/media/cover.webp`);
-    expect(res.body.data.media[INLINE]).toBe(`https://${CDN_DOMAIN}/media/inline.webp`);
+    expect(res.body.cover).toBe(`https://${CDN_DOMAIN}/media/cover.webp`);
+    expect(res.body.media[INLINE]).toBe(`https://${CDN_DOMAIN}/media/inline.webp`);
     expect(res.headers.etag).toBeTruthy();
 
     // 304 on a matching If-None-Match.
@@ -447,7 +447,7 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
 
     // Summaries carry the resolved cover + tags, never a body.
     const summaries = await request(app).get("/api/posts");
-    const summary = summaries.body.data.posts[0];
+    const summary = summaries.body.posts[0];
     expect(summary.cover).toBe(`https://${CDN_DOMAIN}/media/cover.webp`);
     expect(summary.tags).toEqual(["photo"]);
     expect(summary).not.toHaveProperty("body");
@@ -475,21 +475,21 @@ describe("cursor pagination (§4.1)", () => {
     // Page 1: two newest (p5, p4).
     const page1 = await request(app).get("/api/posts?limit=2");
     expect(page1.status).toBe(200);
-    expect(page1.body.data.posts.map((p: { slug: string }) => p.slug)).toEqual(["p5", "p4"]);
-    expect(page1.body.data.next_cursor).toBeTruthy();
+    expect(page1.body.posts.map((p: { slug: string }) => p.slug)).toEqual(["p5", "p4"]);
+    expect(page1.body.next_cursor).toBeTruthy();
 
     // Page 2: next two (p3, p2).
     const page2 = await request(app).get(
-      `/api/posts?limit=2&cursor=${encodeURIComponent(page1.body.data.next_cursor)}`
+      `/api/posts?limit=2&cursor=${encodeURIComponent(page1.body.next_cursor)}`
     );
-    expect(page2.body.data.posts.map((p: { slug: string }) => p.slug)).toEqual(["p3", "p2"]);
+    expect(page2.body.posts.map((p: { slug: string }) => p.slug)).toEqual(["p3", "p2"]);
 
     // Page 3: last one (p1), no further cursor.
     const page3 = await request(app).get(
-      `/api/posts?limit=2&cursor=${encodeURIComponent(page2.body.data.next_cursor)}`
+      `/api/posts?limit=2&cursor=${encodeURIComponent(page2.body.next_cursor)}`
     );
-    expect(page3.body.data.posts.map((p: { slug: string }) => p.slug)).toEqual(["p1"]);
-    expect(page3.body.data.next_cursor).toBeNull();
+    expect(page3.body.posts.map((p: { slug: string }) => p.slug)).toEqual(["p1"]);
+    expect(page3.body.next_cursor).toBeNull();
   });
 
   it("filters by tag and rejects an invalid cursor (400)", async () => {
@@ -499,7 +499,7 @@ describe("cursor pagination (§4.1)", () => {
     await publish(b.body.data.id);
 
     const res = await request(app).get("/api/posts?tag=ts");
-    expect(res.body.data.posts.map((p: { slug: string }) => p.slug)).toEqual(["tagged"]);
+    expect(res.body.posts.map((p: { slug: string }) => p.slug)).toEqual(["tagged"]);
 
     expect((await request(app).get("/api/posts?cursor=%%%not-base64%%%")).status).toBe(400);
   });
@@ -523,8 +523,8 @@ describe("GET /api/admin/preview/posts/:id — draft serialization (§4.2 / §7)
       .get(`/api/admin/preview/posts/${id}`)
       .set(...AUTH);
     expect(asAdmin.status).toBe(200);
-    expect(asAdmin.body.data.body).toHaveLength(2);
-    expect(asAdmin.body.data.media[INLINE]).toBe(
+    expect(asAdmin.body.body).toHaveLength(2);
+    expect(asAdmin.body.media[INLINE]).toBe(
       `https://${CDN_DOMAIN}/media/draft-inline.webp`
     );
 
@@ -534,7 +534,7 @@ describe("GET /api/admin/preview/posts/:id — draft serialization (§4.2 / §7)
       `/api/admin/preview/posts/${id}?preview=${token}`
     );
     expect(asPreview.status).toBe(200);
-    expect(asPreview.body.data.body[1]).toEqual({ type: "paragraph", text: "draft only" });
+    expect(asPreview.body.body[1]).toEqual({ type: "paragraph", text: "draft only" });
 
     // No token at all → 401.
     expect((await request(app).get(`/api/admin/preview/posts/${id}`)).status).toBe(401);

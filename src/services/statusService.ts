@@ -16,17 +16,25 @@
  * can always answer 200 and never a 5xx.
  */
 
-/** One curated service entry in the /api/status payload. */
+/**
+ * One curated service entry in the /api/status payload. The shape is the
+ * public-site contract (`portfolio-v6/src/lib/api.ts` `ServiceStatus`): a name,
+ * a boolean `ok`, and an optional response time.
+ */
 export interface StatusServiceEntry {
   name: string;
-  status: "up" | "degraded";
+  ok: boolean;
   /** Optional upstream response time, surfaced only when the gateway reports it. */
   response_time_ms?: number;
 }
 
-/** The curated /api/status payload (§3.5). */
+/**
+ * The curated /api/status payload (§3.5), matching the public site's
+ * `StatusResponse`: `degraded` is the overall flag (gateway 5xx/503 or any
+ * service down), `services` the per-service breakdown.
+ */
 export interface StatusPayload {
-  status: "up" | "degraded";
+  degraded: boolean;
   services: StatusServiceEntry[];
 }
 
@@ -99,14 +107,14 @@ function normalizeEntry(
   if (raw == null || typeof raw !== "object") {
     // A bare status value keyed by service name (e.g. { "wmsfo": "up" }).
     if (raw === undefined) return null;
-    return { name: fallbackName, status: normalizeStatus(raw) };
+    return { name: fallbackName, ok: normalizeStatus(raw) === "up" };
   }
   const rec = raw as Record<string, unknown>;
   const name =
     firstString(rec.name, rec.service, rec.id, rec.key) ?? fallbackName;
-  const status = normalizeStatus(
+  const ok = normalizeStatus(
     rec.status ?? rec.health ?? rec.state ?? rec.ok
-  );
+  ) === "up";
   const responseTime = firstNumber(
     rec.response_time_ms,
     rec.responseTimeMs,
@@ -117,7 +125,7 @@ function normalizeEntry(
     rec.duration_ms,
     rec.durationMs
   );
-  const entry: StatusServiceEntry = { name, status };
+  const entry: StatusServiceEntry = { name, ok };
   if (responseTime !== undefined) entry.response_time_ms = responseTime;
   return entry;
 }
@@ -151,15 +159,16 @@ export function mapGatewayResponse(
   body: unknown
 ): StatusPayload {
   const services = extractServices(body);
-  const anyDegraded = services.some((s) => s.status === "degraded");
-  const overall: "up" | "degraded" =
-    httpStatus === 503 || httpStatus >= 500 || anyDegraded ? "degraded" : "up";
-  return { status: overall, services };
+  const anyDegraded = services.some((s) => !s.ok);
+  return {
+    degraded: httpStatus === 503 || httpStatus >= 500 || anyDegraded,
+    services,
+  };
 }
 
 /** The payload returned when the gateway is unreachable or unparseable (§3.5). */
 function degradedFallback(): StatusPayload {
-  return { status: "degraded", services: [] };
+  return { degraded: true, services: [] };
 }
 
 async function fetchStatus(gatewayHealthUrl: string): Promise<StatusPayload> {

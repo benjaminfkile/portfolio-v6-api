@@ -1,6 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
 import { IAppSecrets } from "../interfaces";
-import { success } from "../utils/envelope";
 import { getLatestContent } from "../services/publishService";
 
 /**
@@ -40,7 +39,8 @@ contentRouter.get(
         return res.status(304).end();
       }
 
-      res.status(200).json(success(content));
+      // Raw resource, not the admin envelope (§4.1 example vs §4.3).
+      res.status(200).json(content);
     } catch (err) {
       next(err as Error);
     }

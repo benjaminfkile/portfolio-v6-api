@@ -309,19 +309,15 @@ describe("GET /api/now-playing (§4.6) — public, never leaks a token, never 5x
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      status: "ok",
-      error: false,
-      data: {
-        playing: true,
-        track: {
-          title: "Some Song",
-          artists: ["Artist One", "Artist Two"],
-          album: "Some Album",
-          art_url: "https://i.scdn.co/image/abc",
-          url: "https://open.spotify.com/track/xyz",
-          progress_ms: 83000,
-          duration_ms: 214000,
-        },
+      playing: true,
+      track: {
+        title: "Some Song",
+        artists: ["Artist One", "Artist Two"],
+        album: "Some Album",
+        art_url: "https://i.scdn.co/image/abc",
+        url: "https://open.spotify.com/track/xyz",
+        progress_ms: 83000,
+        duration_ms: 214000,
       },
     });
 
@@ -338,10 +334,6 @@ describe("GET /api/now-playing (§4.6) — public, never leaks a token, never 5x
     const res = await request(app).get("/api/now-playing");
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      status: "ok",
-      error: false,
-      data: { playing: false },
-    });
+    expect(res.body).toEqual({ playing: false });
   });
 });

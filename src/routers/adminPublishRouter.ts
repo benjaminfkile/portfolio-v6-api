@@ -113,14 +113,16 @@ adminPublishRouter.post(
  * GET /api/admin/preview † (§4.2, §7). Serializes the DRAFT working set in
  * exactly the /api/content shape, with media resolved to CDN URLs. Behind
  * `requireAdminOrPreviewToken()` so the public preview iframe can reach it with a
- * preview token (the public bundle has no Cognito SDK, §2.1).
+ * preview token (the public bundle has no Cognito SDK, §2.1). Because the
+ * consumer is the PUBLIC site's renderer, the body is raw like /api/content —
+ * not the admin envelope (§4.1 vs §4.3).
  */
 adminPublishRouter.get(
   "/preview",
   requireAdminOrPreviewToken(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      res.status(200).json(success(await getDraftContent(cdnDomain(req))));
+      res.status(200).json(await getDraftContent(cdnDomain(req)));
     } catch (err) {
       next(err as Error);
     }

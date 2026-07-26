@@ -1,6 +1,5 @@
 import express, { Request, Response } from "express";
 import { IAppSecrets } from "../interfaces";
-import { success } from "../utils/envelope";
 import {
   getNowPlaying,
   NowPlaying,
@@ -31,13 +30,14 @@ function spotifyConfig(req: Request): SpotifyConfig {
 
 nowPlayingRouter.get("/", async (req: Request, res: Response) => {
   // Never 5xx (§3.5). `getNowPlaying` maps every failure to `{ playing: false }`;
-  // the catch is belt-and-braces for a truly unexpected throw.
+  // the catch is belt-and-braces for a truly unexpected throw. Public reads
+  // return the resource raw (§4.1) — the envelope is the admin convention (§4.3).
   try {
     const payload = await getNowPlaying(spotifyConfig(req));
-    res.status(200).json(success(payload));
+    res.status(200).json(payload);
   } catch (err) {
     console.error("[nowPlayingRouter] unexpected error; serving idle:", err);
-    res.status(200).json(success(NOT_PLAYING));
+    res.status(200).json(NOT_PLAYING);
   }
 });
 

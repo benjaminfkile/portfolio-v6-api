@@ -82,7 +82,14 @@ adminPostsRouter.get(
   requireAdminOrPreviewToken(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      send(res, await getDraftPostPreview(req.params.id, cdnDomain(req)));
+      // Consumed by the PUBLIC site's renderer in preview mode, so the success
+      // body is raw like /api/posts/:slug — not the admin envelope (§4.1 vs §4.3).
+      const result = await getDraftPostPreview(req.params.id, cdnDomain(req));
+      if (result.ok) {
+        res.status(200).json(result.data);
+      } else {
+        res.status(statusForCode(result.code)).json(failure(result.message));
+      }
     } catch (err) {
       next(err as Error);
     }

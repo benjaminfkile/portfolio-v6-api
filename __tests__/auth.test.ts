@@ -185,6 +185,16 @@ describe("requireAdminOrPreviewToken() — §4.2 / §7", () => {
     return res.body.data.token as string;
   }
 
+  it("accepts a valid preview token via the ?token= query param — the public site's transport (lib/api.ts)", async () => {
+    const app = buildTestApp();
+    const token = await mintToken(app);
+
+    const res = await request(app).get("/preview-route").query({ token });
+
+    expect(res.status).toBe(200);
+    expect(res.body.adminSub).toBeNull();
+  });
+
   it("accepts a valid preview token via the ?preview= query param (read-only, no adminSub)", async () => {
     const app = buildTestApp();
     const token = await mintToken(app);

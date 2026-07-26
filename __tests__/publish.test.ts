@@ -170,8 +170,7 @@ describe("GET /api/content — empty state (§4.1)", () => {
   it("returns 200 with an empty sections array when nothing was ever published", async () => {
     const res = await request(app).get("/api/content");
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe("ok");
-    expect(res.body.data).toMatchObject({
+    expect(res.body).toMatchObject({
       version: 0,
       published_at: null,
       sections: [],
@@ -212,15 +211,15 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     // Content reflects the published document, media resolved to CDN URLs (§6.8).
     const content = await request(app).get("/api/content");
     expect(content.status).toBe(200);
-    expect(content.body.data.version).toBe(1);
-    expect(content.body.data.sections).toHaveLength(2);
-    expect(content.body.data.sections[0].id).toBe(hero.id);
-    expect(content.body.data.sections[0].type).toBe("hero");
+    expect(content.body.version).toBe(1);
+    expect(content.body.sections).toHaveLength(2);
+    expect(content.body.sections[0].id).toBe(hero.id);
+    expect(content.body.sections[0].type).toBe("hero");
     // Section/item data still references media by id.
-    expect(content.body.data.sections[0].data.background_media_id).toBe(MEDIA_ID);
-    expect(content.body.data.sections[1].items).toHaveLength(1);
+    expect(content.body.sections[0].data.background_media_id).toBe(MEDIA_ID);
+    expect(content.body.sections[1].items).toHaveLength(1);
     // The media map resolves the id to an absolute CDN URL via toCdnUrl.
-    expect(content.body.data.media[MEDIA_ID]).toBe(
+    expect(content.body.media[MEDIA_ID]).toBe(
       `https://${CDN_DOMAIN}/media/hero.webp`
     );
     expect(content.headers.etag).toBe('W/"v1"');
@@ -238,7 +237,7 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
       .get("/api/content")
       .set("If-None-Match", 'W/"v0"');
     expect(stale.status).toBe(200);
-    expect(stale.body.data.version).toBe(1);
+    expect(stale.body.version).toBe(1);
   });
 
   it("excludes hidden sections/items from the published document", async () => {
@@ -253,8 +252,8 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     expect(pub.status).toBe(201);
 
     const content = await request(app).get("/api/content");
-    expect(content.body.data.sections).toHaveLength(1);
-    expect(content.body.data.sections[0].id).toBe(visible.id);
+    expect(content.body.sections).toHaveLength(1);
+    expect(content.body.sections[0].id).toBe(visible.id);
   });
 });
 
@@ -273,7 +272,7 @@ describe("publish validation refusal (§3.9)", () => {
 
     // Nothing was published.
     const content = await request(app).get("/api/content");
-    expect(content.body.data.version).toBe(0);
+    expect(content.body.version).toBe(0);
     const count = await getDb()("page_versions").count<{ count: string }[]>("* as count");
     expect(Number(count[0].count)).toBe(0);
   });
@@ -311,9 +310,9 @@ describe("restore (§4.2)", () => {
 
     // Content is now version 3, whose document equals version 1's sections.
     const content = await request(app).get("/api/content");
-    expect(content.body.data.version).toBe(3);
-    expect(content.body.data.sections).toHaveLength(1);
-    expect(content.body.data.sections[0].data.title).toBe("First");
+    expect(content.body.version).toBe(3);
+    expect(content.body.sections).toHaveLength(1);
+    expect(content.body.sections[0].data.title).toBe("First");
 
     // The working set was rebuilt to match the restored document.
     ws = (await request(app).get("/api/admin/sections").set(...AUTH)).body.data.sections;
@@ -387,7 +386,7 @@ describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
     // Nothing published yet — preview still serves the draft.
     const preview = await request(app).get("/api/admin/preview").set(...AUTH);
     expect(preview.status).toBe(200);
-    const draft = preview.body.data;
+    const draft = preview.body;
     expect(draft.version).toBeNull();
     expect(draft.published_at).toBeNull();
     expect(draft.sections).toHaveLength(1);
@@ -399,7 +398,7 @@ describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
     // Same key set as a published /api/content document (shape parity, §4.1).
     await request(app).post("/api/admin/publish").set(...AUTH).send({});
     const content = await request(app).get("/api/content");
-    expect(Object.keys(draft).sort()).toEqual(Object.keys(content.body.data).sort());
+    expect(Object.keys(draft).sort()).toEqual(Object.keys(content.body).sort());
   });
 
   it("rejects an unauthenticated preview with 401", async () => {

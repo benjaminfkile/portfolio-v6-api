@@ -1,6 +1,5 @@
 import express, { Request, Response } from "express";
 import { IAppSecrets } from "../interfaces";
-import { success } from "../utils/envelope";
 import { getStatus, StatusPayload } from "../services/statusService";
 
 /**
@@ -15,7 +14,7 @@ import { getStatus, StatusPayload } from "../services/statusService";
 const statusRouter = express.Router();
 
 /** Fallback used only if `getStatus` itself somehow rejects (it should not). */
-const DEGRADED: StatusPayload = { status: "degraded", services: [] };
+const DEGRADED: StatusPayload = { degraded: true, services: [] };
 
 function gatewayHealthUrl(req: Request): string {
   const secrets = req.app.get("secrets") as IAppSecrets | undefined;
@@ -29,12 +28,14 @@ function gatewayHealthUrl(req: Request): string {
 statusRouter.get("/", async (req: Request, res: Response) => {
   // No `next(err)` path: this endpoint must never 5xx (§3.5). `getStatus` already
   // maps every upstream failure to a degraded payload; the catch is belt-and-braces.
+  // Public reads return the resource raw (§4.1 example) — the envelope is the
+  // admin-route convention (§4.3); the public site parses these bodies directly.
   try {
     const payload = await getStatus(gatewayHealthUrl(req));
-    res.status(200).json(success(payload));
+    res.status(200).json(payload);
   } catch (err) {
     console.error("[statusRouter] unexpected error; serving degraded:", err);
-    res.status(200).json(success(DEGRADED));
+    res.status(200).json(DEGRADED);
   }
 });
 

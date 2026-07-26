@@ -52,10 +52,10 @@ describe("mapGatewayResponse (§3.5)", () => {
       ],
     });
     expect(payload).toEqual({
-      status: "up",
+      degraded: false,
       services: [
-        { name: "wmsfo-api", status: "up", response_time_ms: 12 },
-        { name: "file-manager", status: "up", response_time_ms: 8 },
+        { name: "wmsfo-api", ok: true, response_time_ms: 12 },
+        { name: "file-manager", ok: true, response_time_ms: 8 },
       ],
     });
   });
@@ -67,10 +67,10 @@ describe("mapGatewayResponse (§3.5)", () => {
         { name: "3gixhub", status: "down" },
       ],
     });
-    expect(payload.status).toBe("degraded");
+    expect(payload.degraded).toBe(true);
     expect(payload.services).toEqual([
-      { name: "wmsfo-api", status: "up" },
-      { name: "3gixhub", status: "degraded" },
+      { name: "wmsfo-api", ok: true },
+      { name: "3gixhub", ok: false },
     ]);
   });
 
@@ -81,10 +81,10 @@ describe("mapGatewayResponse (§3.5)", () => {
         "lease-tracker": { status: "healthy" },
       },
     });
-    expect(payload.status).toBe("up");
+    expect(payload.degraded).toBe(false);
     expect(payload.services).toEqual([
-      { name: "wmsfo-api", status: "up", response_time_ms: 5 },
-      { name: "lease-tracker", status: "up" },
+      { name: "wmsfo-api", ok: true, response_time_ms: 5 },
+      { name: "lease-tracker", ok: true },
     ]);
   });
 
@@ -92,7 +92,7 @@ describe("mapGatewayResponse (§3.5)", () => {
     const payload = mapGatewayResponse(200, {
       services: [{ name: "a", status: "up" }, { name: "b", status: "degraded" }],
     });
-    expect(payload.status).toBe("degraded");
+    expect(payload.degraded).toBe(true);
   });
 });
 
@@ -108,7 +108,7 @@ describe("getStatus caching (§3.5 ~30s)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(mockFetch).toHaveBeenCalledWith(GATEWAY_URL, expect.any(Object));
     expect(second).toEqual(first);
-    expect(first.status).toBe("up");
+    expect(first.degraded).toBe(false);
   });
 
   it("collapses concurrent cache-miss callers into a single upstream fetch", async () => {
@@ -153,7 +153,7 @@ describe("getStatus degradation (§3.5 degrade rather than error)", () => {
 
     const payload = await getStatus(GATEWAY_URL);
 
-    expect(payload).toEqual({ status: "degraded", services: [] });
+    expect(payload).toEqual({ degraded: true, services: [] });
   });
 
   it("degrades when the upstream body will not parse as JSON", async () => {
@@ -166,12 +166,12 @@ describe("getStatus degradation (§3.5 degrade rather than error)", () => {
     } as unknown as Response);
 
     const payload = await getStatus(GATEWAY_URL);
-    expect(payload).toEqual({ status: "up", services: [] });
+    expect(payload).toEqual({ degraded: false, services: [] });
   });
 });
 
 describe("GET /api/status (§3.5) — public, never 5xx", () => {
-  it("serves the curated payload in the success envelope on a healthy gateway", async () => {
+  it("serves the curated payload raw — no envelope on public reads (§4.1/§4.3)", async () => {
     mockFetch.mockResolvedValue(
       jsonResponse(200, { services: [{ name: "wmsfo-api", status: "up" }] })
     );
@@ -180,9 +180,8 @@ describe("GET /api/status (§3.5) — public, never 5xx", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      status: "ok",
-      error: false,
-      data: { status: "up", services: [{ name: "wmsfo-api", status: "up" }] },
+      degraded: false,
+      services: [{ name: "wmsfo-api", ok: true }],
     });
   });
 
@@ -194,9 +193,9 @@ describe("GET /api/status (§3.5) — public, never 5xx", () => {
     const res = await request(app).get("/api/status");
 
     expect(res.status).toBe(200);
-    expect(res.body.data.status).toBe("degraded");
-    expect(res.body.data.services).toEqual([
-      { name: "3gixhub", status: "degraded" },
+    expect(res.body.degraded).toBe(true);
+    expect(res.body.services).toEqual([
+      { name: "3gixhub", ok: false },
     ]);
   });
 
@@ -206,6 +205,6 @@ describe("GET /api/status (§3.5) — public, never 5xx", () => {
     const res = await request(app).get("/api/status");
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ status: "degraded", services: [] });
+    expect(res.body).toEqual({ degraded: true, services: [] });
   });
 });

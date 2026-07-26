@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import { IAppSecrets } from "../interfaces";
-import { success, failure } from "../utils/envelope";
+import { failure } from "../utils/envelope";
 import {
   PostFailureCode,
   getPublishedPost,
@@ -73,7 +73,7 @@ postsRouter.get(
           .status(statusForCode(result.code))
           .json(failure(result.message));
       }
-      res.status(200).json(success(result.data));
+      res.status(200).json(result.data);
     } catch (err) {
       next(err as Error);
     }
@@ -104,7 +104,7 @@ postsRouter.get(
         return res.status(304).end();
       }
 
-      res.status(200).json(success(result.data.post));
+      res.status(200).json(result.data.post);
     } catch (err) {
       next(err as Error);
     }
