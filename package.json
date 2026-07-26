@@ -1,0 +1,44 @@
+{
+  "name": "portfolio-v6-api",
+  "version": "1.0.0",
+  "description": "portfolio-v6 API — TypeScript/Express/Postgres skeleton (spec TECH_SPEC_V1.md).",
+  "main": "index.ts",
+  "scripts": {
+    "dev": "tsc-watch --onSuccess \"node dist/index.js\"",
+    "build": "rimraf dist && tsc",
+    "start": "npm run build && node dist/index.js",
+    "test": "jest --runInBand --detectOpenHandles",
+    "migrate:latest": "knex --knexfile knexfile.ts migrate:latest",
+    "migrate:rollback": "knex --knexfile knexfile.ts migrate:rollback",
+    "migrate:make": "knex --knexfile knexfile.ts migrate:make --migrations-directory src/db/migrations -x ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "3.664.0",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.18.2",
+    "helmet": "6.0.0",
+    "knex": "2.5.1",
+    "morgan": "1.10.0",
+    "pg": "8.11.3",
+    "rimraf": "5.0.5"
+  },
+  "devDependencies": {
+    "@types/cors": "2.8.17",
+    "@types/express": "4.17.21",
+    "@types/jest": "29.5.12",
+    "@types/morgan": "1.9.9",
+    "@types/node": "20.11.30",
+    "@types/pg": "8.11.0",
+    "@types/supertest": "2.0.16",
+    "jest": "29.7.0",
+    "supertest": "6.3.4",
+    "ts-jest": "29.1.2",
+    "ts-node": "10.9.2",
+    "tsc-watch": "6.0.4",
+    "typescript": "4.9.5"
+  }
+}
