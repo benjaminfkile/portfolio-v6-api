@@ -2,6 +2,7 @@ import express, { Express, NextFunction, Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import healthRouter from "./routers/healthRouter";
+import schemaRouter from "./routers/schemaRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -24,6 +25,7 @@ app.get("/", (req: Request, res: Response) => {
 });
 
 app.use("/api/health", healthRouter);
+app.use("/api/schema", schemaRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
