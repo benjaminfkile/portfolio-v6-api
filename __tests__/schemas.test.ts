@@ -1,0 +1,353 @@
+import {
+  linkSchema,
+  ALLOWED_LINK_PROTOCOLS,
+  blockSchema,
+  blockArraySchema,
+  CODE_LANGUAGES,
+  isSupportedLanguage,
+  timelineItemSchema,
+  skillsItemSchema,
+  portfolioItemSchema,
+  heroData,
+  statusData,
+  blogData,
+  nowPlayingData,
+  contactData,
+  SECTION_DATA_SCHEMAS,
+  SECTION_TYPES,
+  postMetadataSchema,
+  postSchema,
+  slugSchema,
+} from "../src/schemas";
+
+describe("Link schema (§3.4) — protocol allowlist", () => {
+  it("accepts http and https URLs with a required label", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "repo",
+        label: "portfolio-v6-api",
+        url: "https://github.com/x/y",
+      }).success
+    ).toBe(true);
+    expect(
+      linkSchema.safeParse({
+        type: "prod",
+        label: "Live site",
+        url: "http://example.com",
+      }).success
+    ).toBe(true);
+  });
+
+  it("rejects javascript: URLs (stored-XSS vector)", () => {
+    const res = linkSchema.safeParse({
+      type: "other",
+      label: "evil",
+      url: "javascript:alert(document.cookie)",
+    });
+    expect(res.success).toBe(false);
+  });
+
+  it.each(["data:text/html,x", "file:///etc/passwd", "ftp://host/f"])(
+    "rejects the non-http(s) protocol %s",
+    (url) => {
+      expect(
+        linkSchema.safeParse({ type: "other", label: "l", url }).success
+      ).toBe(false);
+    }
+  );
+
+  it("only allows http: and https: protocols", () => {
+    expect([...ALLOWED_LINK_PROTOCOLS]).toEqual(["http:", "https:"]);
+  });
+
+  it("requires a non-empty label (never derived from type)", () => {
+    expect(
+      linkSchema.safeParse({ type: "repo", label: "", url: "https://a.com" })
+        .success
+    ).toBe(false);
+    expect(
+      linkSchema.safeParse({ type: "repo", url: "https://a.com" }).success
+    ).toBe(false);
+  });
+
+  it("rejects an unknown link type", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "wormhole",
+        label: "l",
+        url: "https://a.com",
+      }).success
+    ).toBe(false);
+  });
+});
+
+describe("Block discriminated union (§3.7)", () => {
+  const valid = [
+    { type: "heading", level: 2, text: "Title" },
+    { type: "paragraph", text: "Some **bold** prose" },
+    { type: "code", language: "typescript", code: "const x = 1;" },
+    { type: "code", language: "typescript", code: "x", filename: "src/app.ts" },
+    {
+      type: "media",
+      media_id: "11111111-1111-1111-1111-111111111111",
+      caption: "a photo",
+    },
+    { type: "list", ordered: true, items: ["a", "b"] },
+    { type: "quote", text: "words", attribution: "someone" },
+    {
+      type: "links",
+      links: [{ type: "docs", label: "Docs", url: "https://d.com" }],
+    },
+    { type: "divider" },
+  ];
+
+  it.each(valid)("accepts a valid %# block", (block) => {
+    expect(blockSchema.safeParse(block).success).toBe(true);
+  });
+
+  it("covers all eight block types", () => {
+    const types = new Set(valid.map((b) => b.type));
+    expect(types).toEqual(
+      new Set([
+        "heading",
+        "paragraph",
+        "code",
+        "media",
+        "list",
+        "quote",
+        "links",
+        "divider",
+      ])
+    );
+  });
+
+  it("rejects an unknown block type", () => {
+    expect(blockSchema.safeParse({ type: "carousel" }).success).toBe(false);
+  });
+
+  it("rejects a heading with an out-of-range level", () => {
+    expect(
+      blockSchema.safeParse({ type: "heading", level: 1, text: "x" }).success
+    ).toBe(false);
+  });
+
+  it("rejects a links block containing a javascript: URL", () => {
+    expect(
+      blockSchema.safeParse({
+        type: "links",
+        links: [{ type: "other", label: "x", url: "javascript:alert(1)" }],
+      }).success
+    ).toBe(false);
+  });
+
+  it("rejects a whole body that contains a single invalid block", () => {
+    const body = [
+      { type: "heading", level: 3, text: "ok" },
+      { type: "paragraph", text: "still ok" },
+      { type: "bogus", data: 1 },
+    ];
+    const res = blockArraySchema.safeParse(body);
+    expect(res.success).toBe(false);
+  });
+
+  it("accepts a valid multi-block body", () => {
+    const body = [
+      { type: "heading", level: 2, text: "Intro" },
+      { type: "paragraph", text: "hi" },
+      { type: "divider" },
+    ];
+    expect(blockArraySchema.safeParse(body).success).toBe(true);
+  });
+});
+
+describe("code block language allowlist (§3.7 pass-through)", () => {
+  it("exports the allowlist and flags membership", () => {
+    expect(CODE_LANGUAGES).toContain("typescript");
+    expect(isSupportedLanguage("typescript")).toBe(true);
+    expect(isSupportedLanguage("brainfuck")).toBe(false);
+  });
+
+  it("accepts an unknown language at the validation level (renders as plain text)", () => {
+    // Pass-through: unknown language must NOT fail validation.
+    expect(
+      blockSchema.safeParse({
+        type: "code",
+        language: "brainfuck",
+        code: "+[.]",
+      }).success
+    ).toBe(true);
+  });
+
+  it("still requires a non-empty language string", () => {
+    expect(
+      blockSchema.safeParse({ type: "code", language: "", code: "x" }).success
+    ).toBe(false);
+  });
+});
+
+describe("section item schemas (§3.4 table)", () => {
+  it("timeline item — valid and invalid", () => {
+    expect(
+      timelineItemSchema.safeParse({
+        date_range: "2020–2022",
+        title: "Role",
+        description: "did things",
+      }).success
+    ).toBe(true);
+    // missing required title
+    expect(
+      timelineItemSchema.safeParse({
+        date_range: "2020",
+        description: "x",
+      }).success
+    ).toBe(false);
+  });
+
+  it("skills item — valid and invalid proficiency", () => {
+    expect(
+      skillsItemSchema.safeParse({
+        title: "TypeScript",
+        description: "strong",
+        icon_source: "devicon:typescript",
+        proficiency: 90,
+      }).success
+    ).toBe(true);
+    expect(
+      skillsItemSchema.safeParse({
+        title: "TypeScript",
+        description: "strong",
+        icon_source: "devicon:typescript",
+        proficiency: 900,
+      }).success
+    ).toBe(false);
+  });
+
+  it("portfolio item — valid with links, rejects bad media_id and js link", () => {
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "short",
+        description: "long",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        tech_icons: ["react", "node"],
+        links: [{ type: "repo", label: "Code", url: "https://github.com/x" }],
+      }).success
+    ).toBe(true);
+
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "short",
+        description: "long",
+        media_id: "not-a-uuid",
+        tech_icons: [],
+        links: [],
+      }).success
+    ).toBe(false);
+
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "short",
+        description: "long",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        tech_icons: [],
+        links: [{ type: "repo", label: "x", url: "javascript:alert(1)" }],
+      }).success
+    ).toBe(false);
+  });
+});
+
+describe("section data schemas (§3.4/§3.5/§3.8)", () => {
+  it("has a schema for every registry section type", () => {
+    for (const t of SECTION_TYPES) {
+      expect(SECTION_DATA_SCHEMAS[t]).toBeDefined();
+    }
+    expect(Object.keys(SECTION_DATA_SCHEMAS).sort()).toEqual(
+      [...SECTION_TYPES].sort()
+    );
+  });
+
+  it("hero — valid and rejects missing title", () => {
+    expect(heroData.safeParse({ title: "Ben", tagline: "builder" }).success).toBe(
+      true
+    );
+    expect(heroData.safeParse({ tagline: "no title" }).success).toBe(false);
+  });
+
+  it("status — services list, optional response times", () => {
+    expect(
+      statusData.safeParse({
+        services: ["gateway", "portfolio-v6-api"],
+        show_response_times: true,
+      }).success
+    ).toBe(true);
+    expect(statusData.safeParse({ services: "not-an-array" }).success).toBe(
+      false
+    );
+  });
+
+  it("blog — positive integer limit", () => {
+    expect(blogData.safeParse({ limit: 5, tag: "eng" }).success).toBe(true);
+    expect(blogData.safeParse({ limit: 0 }).success).toBe(false);
+  });
+
+  it("now_playing — idle enum only hide|message", () => {
+    expect(nowPlayingData.safeParse({ idle: "hide" }).success).toBe(true);
+    expect(
+      nowPlayingData.safeParse({ idle: "message", idle_message: "away" }).success
+    ).toBe(true);
+    expect(nowPlayingData.safeParse({ idle: "explode" }).success).toBe(false);
+  });
+
+  it("contact — optional links honour the protocol allowlist", () => {
+    expect(
+      contactData.safeParse({
+        heading: "Contact",
+        links: [{ type: "other", label: "Email", url: "https://x.com" }],
+      }).success
+    ).toBe(true);
+    expect(
+      contactData.safeParse({
+        links: [{ type: "other", label: "Email", url: "javascript:1" }],
+      }).success
+    ).toBe(false);
+  });
+});
+
+describe("post metadata schema (§3.6)", () => {
+  it("accepts a valid post and applies defaults", () => {
+    const res = postMetadataSchema.safeParse({
+      slug: "hello-world",
+      title: "Hello World",
+    });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.excerpt).toBe("");
+      expect(res.data.tags).toEqual([]);
+    }
+  });
+
+  it("rejects an invalid slug", () => {
+    expect(slugSchema.safeParse("Hello World").success).toBe(false);
+    expect(slugSchema.safeParse("hello--world").success).toBe(false);
+    expect(slugSchema.safeParse("hello-world-2").success).toBe(true);
+  });
+
+  it("full post schema validates the draft_body blocks", () => {
+    expect(
+      postSchema.safeParse({
+        slug: "post",
+        title: "Post",
+        draft_body: [{ type: "paragraph", text: "hi" }],
+      }).success
+    ).toBe(true);
+    expect(
+      postSchema.safeParse({
+        slug: "post",
+        title: "Post",
+        draft_body: [{ type: "nope" }],
+      }).success
+    ).toBe(false);
+  });
+});
