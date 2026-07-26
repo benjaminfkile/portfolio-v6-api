@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import healthRouter from "./routers/healthRouter";
 import schemaRouter from "./routers/schemaRouter";
+import adminAuthRouter from "./routers/adminAuthRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -26,6 +27,9 @@ app.get("/", (req: Request, res: Response) => {
 
 app.use("/api/health", healthRouter);
 app.use("/api/schema", schemaRouter);
+// Preview-token mint route (§7). The CRUD routers (tasks 438–441) mount their
+// own admin routes under /api/admin later; only the mint endpoint is wired now.
+app.use("/api/admin", adminAuthRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
