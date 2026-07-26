@@ -4,6 +4,7 @@ import helmet from "helmet";
 import healthRouter from "./routers/healthRouter";
 import schemaRouter from "./routers/schemaRouter";
 import adminAuthRouter from "./routers/adminAuthRouter";
+import adminSectionsRouter from "./routers/adminSectionsRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -27,9 +28,12 @@ app.get("/", (req: Request, res: Response) => {
 
 app.use("/api/health", healthRouter);
 app.use("/api/schema", schemaRouter);
-// Preview-token mint route (§7). The CRUD routers (tasks 438–441) mount their
-// own admin routes under /api/admin later; only the mint endpoint is wired now.
+// Preview-token mint route (§7) and the sections/items CRUD (§4.2). Both mount
+// under /api/admin; adminAuthRouter owns the preview-token route, and requests
+// it does not match fall through to adminSectionsRouter (each guards its own
+// routes with requireAdmin). Later tasks (439–441) add their routers likewise.
 app.use("/api/admin", adminAuthRouter);
+app.use("/api/admin", adminSectionsRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
