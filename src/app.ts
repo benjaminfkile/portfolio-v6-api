@@ -7,7 +7,9 @@ import adminAuthRouter from "./routers/adminAuthRouter";
 import adminSectionsRouter from "./routers/adminSectionsRouter";
 import adminPublishRouter from "./routers/adminPublishRouter";
 import adminMediaRouter from "./routers/adminMediaRouter";
+import adminPostsRouter from "./routers/adminPostsRouter";
 import contentRouter from "./routers/contentRouter";
+import postsRouter from "./routers/postsRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -34,6 +36,9 @@ app.use("/api/schema", schemaRouter);
 // Public content endpoint (§4.1): latest published snapshot, media resolved to
 // CDN URLs, ETag/304 caching.
 app.use("/api/content", contentRouter);
+// Public blog endpoints (§4.1): published post summaries with keyset pagination
+// and one published post (published_body only, media resolved, ETag).
+app.use("/api/posts", postsRouter);
 // Preview-token mint route (§7), the sections/items CRUD (§4.2), and the publish
 // pipeline (§4.2: publish/versions/restore/preview). All mount under /api/admin;
 // each router guards its own routes with requireAdmin() (or, for the preview
@@ -45,6 +50,9 @@ app.use("/api/admin", adminPublishRouter);
 // Media pipeline (§4.2, §6.7–§6.9): presigned uploads, confirm, library, delete,
 // GC sweep. All S3 access is isolated in src/aws/s3Service.ts.
 app.use("/api/admin", adminMediaRouter);
+// Blog admin pipeline (§4.2, §3.6, §3.7): post CRUD, publish/unpublish lifecycle,
+// and the draft-body preview route (requireAdminOrPreviewToken).
+app.use("/api/admin", adminPostsRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
