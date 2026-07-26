@@ -9,6 +9,6 @@
     "skipLibCheck": true,
     "outDir": "dist"
   },
-  "include": ["src", "index.ts", "knexfile.ts"],
+  "include": ["src", "index.ts", "knexfile.ts", "scripts"],
   "exclude": ["dist", "node_modules", "__tests__"]
 }
