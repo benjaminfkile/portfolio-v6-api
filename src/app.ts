@@ -6,6 +6,7 @@ import schemaRouter from "./routers/schemaRouter";
 import adminAuthRouter from "./routers/adminAuthRouter";
 import adminSectionsRouter from "./routers/adminSectionsRouter";
 import adminPublishRouter from "./routers/adminPublishRouter";
+import adminMediaRouter from "./routers/adminMediaRouter";
 import contentRouter from "./routers/contentRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
@@ -41,6 +42,9 @@ app.use("/api/content", contentRouter);
 app.use("/api/admin", adminAuthRouter);
 app.use("/api/admin", adminSectionsRouter);
 app.use("/api/admin", adminPublishRouter);
+// Media pipeline (§4.2, §6.7–§6.9): presigned uploads, confirm, library, delete,
+// GC sweep. All S3 access is isolated in src/aws/s3Service.ts.
+app.use("/api/admin", adminMediaRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.

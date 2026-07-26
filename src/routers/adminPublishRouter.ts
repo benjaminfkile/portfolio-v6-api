@@ -10,6 +10,7 @@ import {
   restoreVersion,
   getDraftContent,
 } from "../services/publishService";
+import { runGcSafely } from "../services/mediaService";
 
 /**
  * Admin publish router — TECH_SPEC_V1.md §4.2, §3.3, §7.
@@ -58,7 +59,12 @@ adminPublishRouter.post(
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      send(res, await publish(req.adminSub ?? "unknown"), 201);
+      const result = await publish(req.adminSub ?? "unknown");
+      // Version pruning is what creates most orphans, so a successful publish is
+      // the natural GC trigger — run the sweep in the same request (§6.9). It is
+      // fire-and-safe: a sweep failure must not fail an already-committed publish.
+      if (result.ok) await runGcSafely();
+      send(res, result, 201);
     } catch (err) {
       next(err as Error);
     }
@@ -92,7 +98,11 @@ adminPublishRouter.post(
       if (!Number.isInteger(v)) {
         return res.status(400).json(failure("version must be an integer"));
       }
-      send(res, await restoreVersion(v, req.adminSub ?? "unknown"), 201);
+      const result = await restoreVersion(v, req.adminSub ?? "unknown");
+      // Restore re-publishes and prunes versions, so it orphans media the same
+      // way a plain publish does — sweep here too (§6.9).
+      if (result.ok) await runGcSafely();
+      send(res, result, 201);
     } catch (err) {
       next(err as Error);
     }
