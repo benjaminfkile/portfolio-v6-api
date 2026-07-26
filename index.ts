@@ -6,6 +6,7 @@ import morgan from "morgan";
 import app from "./src/app";
 import { loadConfig } from "./src/config/loadConfig";
 import { buildDbConnection, initDb } from "./src/db/db";
+import { initS3 } from "./src/aws/s3Service";
 
 process.on("uncaughtException", (err) => {
   console.error("[Fatal] Uncaught exception:", err);
@@ -19,6 +20,12 @@ export async function start(): Promise<http.Server> {
   const { appSecrets } = config;
 
   app.set("secrets", appSecrets);
+
+  // Resolve the S3 client + bucket once at boot (§6.7). Construction is lazy —
+  // no AWS call is made here; credentials/region resolve only on the first S3
+  // request, which under IS_LOCAL never happens.
+  process.env.AWS_REGION = process.env.AWS_REGION || appSecrets.aws_region;
+  initS3(appSecrets.s3_bucket_name);
 
   const morganFormat = appSecrets.node_env === "production" ? "tiny" : "common";
   app.use(morgan(morganFormat));
