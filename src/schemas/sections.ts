@@ -39,7 +39,7 @@ export const aboutData = z
   .object({
     heading: z.string().optional(),
     // Constrained inline markdown; raw HTML is never stored (§3.7 conventions).
-    body: z.string(),
+    body: z.string().default(""),
   })
   .strict();
 

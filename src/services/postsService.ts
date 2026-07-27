@@ -1,6 +1,7 @@
 import { Knex } from "knex";
 import { getDb } from "../db/db";
 import { blockArraySchema, draftBlockArraySchema, slugSchema, BlockArray } from "../schemas";
+import { stripEmptyStrings } from "../utils/draftData";
 import { collectMediaIds } from "../utils/mediaRefs";
 import { resolveMediaMap, toCdnUrl } from "../utils/cdn";
 
@@ -130,7 +131,8 @@ function validateBody(value: unknown): PostResult<BlockArray> {
  * completeness gate.
  */
 function validateDraftBody(value: unknown): PostResult<BlockArray> {
-  const parsed = draftBlockArraySchema.safeParse(value);
+  const cleaned = Array.isArray(value) ? value.map(stripEmptyStrings) : value;
+  const parsed = draftBlockArraySchema.safeParse(cleaned);
   if (!parsed.success) {
     return fail(
       "validation",

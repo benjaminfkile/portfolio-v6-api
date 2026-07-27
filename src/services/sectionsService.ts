@@ -1,3 +1,4 @@
+import { stripEmptyStrings } from "../utils/draftData";
 import { Knex } from "knex";
 import { getDb } from "../db/db";
 import {
@@ -92,7 +93,7 @@ function validateSectionData(
   data: unknown
 ): ServiceResult<Record<string, unknown>> {
   const schema = DRAFT_SECTION_DATA_SCHEMAS[type];
-  const parsed = schema.safeParse(data ?? {});
+  const parsed = schema.safeParse(stripEmptyStrings(data ?? {}));
   if (!parsed.success) {
     return fail("validation", `Invalid data for section type "${type}": ${parsed.error.message}`);
   }
@@ -114,7 +115,7 @@ function validateItemData(
     );
   }
   const schema = DRAFT_ITEM_SCHEMAS[sectionType];
-  const parsed = schema.safeParse(data ?? {});
+  const parsed = schema.safeParse(stripEmptyStrings(data ?? {}));
   if (!parsed.success) {
     return fail(
       "validation",

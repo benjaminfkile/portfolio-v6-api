@@ -14,7 +14,7 @@ export const timelineItemSchema = z
   .object({
     date_range: z.string().min(1),
     title: z.string().min(1),
-    description: z.string(),
+    description: z.string().default(""),
     media_id: z.string().uuid().optional(),
   })
   .strict();
@@ -22,7 +22,7 @@ export const timelineItemSchema = z
 export const skillsItemSchema = z
   .object({
     title: z.string().min(1),
-    description: z.string(),
+    description: z.string().default(""),
     icon_source: z.string().min(1),
     // A 0–100 proficiency scale; the renderer maps it to a meter.
     proficiency: z.number().min(0).max(100),
@@ -32,8 +32,8 @@ export const skillsItemSchema = z
 export const portfolioItemSchema = z
   .object({
     title: z.string().min(1),
-    intro: z.string(),
-    description: z.string(),
+    intro: z.string().default(""),
+    description: z.string().default(""),
     media_id: z.string().uuid(),
     playback_rate: z.number().positive().optional(),
     transform_value: z.string().optional(),

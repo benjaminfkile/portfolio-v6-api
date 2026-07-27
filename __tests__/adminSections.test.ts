@@ -410,6 +410,14 @@ describe("Zod validation on writes (§3.9)", () => {
 
     const empty = await createSection({ type: "hero", data: {} });
     expect(empty.status).toBe(201);
+
+    // The admin create flow sends empty strings for untouched text fields —
+    // draft validation strips them rather than failing min-length (§3.9).
+    const emptyStrings = await createSection({
+      type: "hero",
+      data: { title: "", tagline: "" },
+    });
+    expect(emptyStrings.status).toBe(201);
   });
 
   it("rejects a WRONG-TYPED field with a 400 envelope even on a draft (§3.9)", async () => {
