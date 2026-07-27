@@ -3,7 +3,9 @@ import { getDb } from "../db/db";
 import {
   SECTION_TYPES,
   SECTION_DATA_SCHEMAS,
+  DRAFT_SECTION_DATA_SCHEMAS,
   ITEM_SCHEMAS,
+  DRAFT_ITEM_SCHEMAS,
   SectionType,
 } from "../schemas";
 
@@ -80,14 +82,16 @@ function isItemBearing(type: SectionType): type is keyof typeof ITEM_SCHEMAS {
 }
 
 /**
- * Validate a section `data` blob against its type's canonical Zod schema (§3.9).
- * Returns the parsed value or a validation failure.
+ * Validate a section `data` blob against its type's DRAFT-LENIENT schema
+ * (§3.9: invalid content can reach a draft, never production). Provided fields
+ * must be well-typed and unknown keys are rejected, but nothing is required —
+ * publish enforces completeness against the canonical schemas.
  */
 function validateSectionData(
   type: SectionType,
   data: unknown
 ): ServiceResult<Record<string, unknown>> {
-  const schema = SECTION_DATA_SCHEMAS[type];
+  const schema = DRAFT_SECTION_DATA_SCHEMAS[type];
   const parsed = schema.safeParse(data ?? {});
   if (!parsed.success) {
     return fail("validation", `Invalid data for section type "${type}": ${parsed.error.message}`);
@@ -109,7 +113,7 @@ function validateItemData(
       `Section type "${sectionType}" does not support items`
     );
   }
-  const schema = ITEM_SCHEMAS[sectionType];
+  const schema = DRAFT_ITEM_SCHEMAS[sectionType];
   const parsed = schema.safeParse(data ?? {});
   if (!parsed.success) {
     return fail(

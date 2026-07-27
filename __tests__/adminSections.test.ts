@@ -402,12 +402,26 @@ describe("cascade delete (§3.2)", () => {
 });
 
 describe("Zod validation on writes (§3.9)", () => {
-  it("rejects invalid section data with a 400 envelope", async () => {
-    // hero requires a non-empty `title`; omit it.
-    const res = await createSection({ type: "hero", data: { tagline: "no title" } });
+  it("accepts an INCOMPLETE draft (missing required fields) — drafts are lenient (§3.9)", async () => {
+    // hero's canonical schema requires `title`, but draft writes only require
+    // provided fields to be well-typed; completeness is enforced at publish.
+    const res = await createSection({ type: "hero", data: { tagline: "no title yet" } });
+    expect(res.status).toBe(201);
+
+    const empty = await createSection({ type: "hero", data: {} });
+    expect(empty.status).toBe(201);
+  });
+
+  it("rejects a WRONG-TYPED field with a 400 envelope even on a draft (§3.9)", async () => {
+    const res = await createSection({ type: "hero", data: { title: 123 } });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ status: "error", error: true });
     expect(typeof res.body.errorMsg).toBe("string");
+  });
+
+  it("rejects an unknown data key with a 400 (schemas stay strict on drafts)", async () => {
+    const res = await createSection({ type: "hero", data: { totally_unknown: "x" } });
+    expect(res.status).toBe(400);
   });
 
   it("rejects an unknown section type with a 400", async () => {

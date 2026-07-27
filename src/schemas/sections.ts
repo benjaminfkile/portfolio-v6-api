@@ -107,6 +107,26 @@ export const SECTION_DATA_SCHEMAS = {
   contact: contactData,
 } satisfies Record<SectionType, z.ZodTypeAny>;
 
+/**
+ * Draft-lenient variants (§3.9: "Invalid content can reach a draft; it can
+ * never reach production"). Admin WRITES validate against these — every
+ * provided field must be well-typed (and unknown keys are still rejected via
+ * .strict()), but nothing is required, so the admin's create-empty-then-edit
+ * flow works. Publish validates the canonical schemas above and is the gate
+ * that enforces completeness.
+ */
+export const DRAFT_SECTION_DATA_SCHEMAS: Record<SectionType, z.ZodTypeAny> = {
+  hero: heroData.partial(),
+  about: aboutData.partial(),
+  timeline: timelineData.partial(),
+  skills: skillsData.partial(),
+  portfolio: portfolioData.partial(),
+  status: statusData.partial(),
+  blog: blogData.partial(),
+  now_playing: nowPlayingData.partial(),
+  contact: contactData.partial(),
+};
+
 export type HeroData = z.infer<typeof heroData>;
 export type AboutData = z.infer<typeof aboutData>;
 export type StatusData = z.infer<typeof statusData>;

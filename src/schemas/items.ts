@@ -57,3 +57,14 @@ export const ITEM_SCHEMAS = {
 } as const;
 
 export type ItemBearingSectionType = keyof typeof ITEM_SCHEMAS;
+
+/**
+ * Draft-lenient item variants (§3.9): provided fields must be well-typed
+ * (unknown keys still rejected), nothing required. Publish enforces the
+ * canonical schemas above.
+ */
+export const DRAFT_ITEM_SCHEMAS = {
+  timeline: timelineItemSchema.partial(),
+  skills: skillsItemSchema.partial(),
+  portfolio: portfolioItemSchema.partial(),
+} as const;

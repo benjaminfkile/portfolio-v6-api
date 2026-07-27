@@ -1,6 +1,6 @@
 import { Knex } from "knex";
 import { getDb } from "../db/db";
-import { blockArraySchema, slugSchema, BlockArray } from "../schemas";
+import { blockArraySchema, draftBlockArraySchema, slugSchema, BlockArray } from "../schemas";
 import { collectMediaIds } from "../utils/mediaRefs";
 import { resolveMediaMap, toCdnUrl } from "../utils/cdn";
 
@@ -120,6 +120,24 @@ function validateBody(value: unknown): PostResult<BlockArray> {
     );
   }
   return ok(parsed.data);
+}
+
+/**
+ * Draft-lenient body validation for admin WRITES (§3.9: invalid content can
+ * reach a draft, never production): every block needs a known `type` and
+ * well-typed provided fields, but nothing else is required — a half-filled
+ * block saves fine. `publishPost` validates the canonical union and is the
+ * completeness gate.
+ */
+function validateDraftBody(value: unknown): PostResult<BlockArray> {
+  const parsed = draftBlockArraySchema.safeParse(value);
+  if (!parsed.success) {
+    return fail(
+      "validation",
+      `Invalid draft_body block(s): ${parsed.error.message}`
+    );
+  }
+  return ok(parsed.data as BlockArray);
 }
 
 function validateTitle(value: unknown): PostResult<string> {
@@ -273,7 +291,7 @@ export async function createPost(
   const cover = validateCover(input.cover_media_id);
   if (!cover.ok) return cover;
   const body =
-    input.draft_body === undefined ? ok([]) : validateBody(input.draft_body);
+    input.draft_body === undefined ? ok([]) : validateDraftBody(input.draft_body);
   if (!body.ok) return body;
 
   const db = getDb();
@@ -393,7 +411,7 @@ export async function updatePost(
       patch.cover_media_id = cover.data;
     }
     if (has("draft_body")) {
-      const body = validateBody(input.draft_body);
+      const body = validateDraftBody(input.draft_body);
       if (!body.ok) return body;
       patch.draft_body = JSON.stringify(body.data);
     }

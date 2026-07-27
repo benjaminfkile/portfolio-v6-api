@@ -136,3 +136,25 @@ export type Block = z.infer<typeof blockSchema>;
 /** An ordered array of blocks — the shape of `draft_body`/`published_body`. */
 export const blockArraySchema = z.array(blockSchema);
 export type BlockArray = z.infer<typeof blockArraySchema>;
+
+/**
+ * Draft-lenient block union (§3.9: invalid content can reach a draft, never
+ * production). The `type` discriminator stays required so every block is
+ * routable/renderable; every other field is optional but must be well-typed
+ * when present (unknown keys still rejected via .strict()). Draft WRITES
+ * (post create/PATCH) validate against this; publish uses the canonical
+ * union above and enforces completeness.
+ */
+export const draftBlockSchema = z.discriminatedUnion("type", [
+  headingBlockSchema.partial().required({ type: true }),
+  paragraphBlockSchema.partial().required({ type: true }),
+  codeBlockSchema.partial().required({ type: true }),
+  mediaBlockSchema.partial().required({ type: true }),
+  listBlockSchema.partial().required({ type: true }),
+  quoteBlockSchema.partial().required({ type: true }),
+  linksBlockSchema.partial().required({ type: true }),
+  dividerBlockSchema.partial().required({ type: true }),
+]);
+
+export const draftBlockArraySchema = z.array(draftBlockSchema);
+export type DraftBlockArray = z.infer<typeof draftBlockArraySchema>;
