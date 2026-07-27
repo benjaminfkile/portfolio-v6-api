@@ -17,6 +17,15 @@ import { failure } from "./utils/envelope";
 
 const app: Express = express();
 
+// Express auto-generates weak ETags for every response by default. The browser
+// then revalidates with If-None-Match and Express answers 304 — which axios
+// treats as an error (non-2xx), breaking the admin ("could not load the working
+// set" on any repeat GET). Conditional caching is wanted ONLY where we manage
+// it explicitly with version-keyed ETags (/api/content, /api/posts/:slug —
+// §3.3/§4.1); those set their own ETag headers and handle If-None-Match
+// themselves, so disabling the automatic one changes nothing for them.
+app.set("etag", false);
+
 app.use(helmet());
 
 // CORS is enabled only for direct local access (IS_LOCAL). In production the
@@ -47,6 +56,12 @@ app.use("/api/posts", postsRouter);
 // 200, never a 5xx. No Spotify token ever appears in a response (§4.6).
 app.use("/api/status", statusRouter);
 app.use("/api/now-playing", nowPlayingRouter);
+// Admin responses are live editing state and must never be cached or
+// revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
+app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 // Preview-token mint route (§7), the sections/items CRUD (§4.2), and the publish
 // pipeline (§4.2: publish/versions/restore/preview). All mount under /api/admin;
 // each router guards its own routes with requireAdmin() (or, for the preview
