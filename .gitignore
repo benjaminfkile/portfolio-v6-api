@@ -2,3 +2,7 @@ node_modules/
 dist/
 coverage/
 *.log
+
+# local env (holds dev DB credentials)
+.env
+.env.local
