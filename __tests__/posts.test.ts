@@ -434,8 +434,14 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
 
     const res = await request(app).get("/api/posts/with-media");
     expect(res.status).toBe(200);
-    expect(res.body.cover).toBe(`https://${CDN_DOMAIN}/media/cover.webp`);
-    expect(res.body.media[INLINE]).toBe(`https://${CDN_DOMAIN}/media/inline.webp`);
+    expect(res.body.cover).toEqual({
+      url: `https://${CDN_DOMAIN}/media/cover.webp`,
+      alt: null,
+    });
+    expect(res.body.media[INLINE]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/inline.webp`,
+      alt: null,
+    });
     expect(res.headers.etag).toBeTruthy();
 
     // 304 on a matching If-None-Match.
@@ -448,7 +454,10 @@ describe("public post lifecycle (§4.1 / §3.6)", () => {
     // Summaries carry the resolved cover + tags, never a body.
     const summaries = await request(app).get("/api/posts");
     const summary = summaries.body.posts[0];
-    expect(summary.cover).toBe(`https://${CDN_DOMAIN}/media/cover.webp`);
+    expect(summary.cover).toEqual({
+      url: `https://${CDN_DOMAIN}/media/cover.webp`,
+      alt: null,
+    });
     expect(summary.tags).toEqual(["photo"]);
     expect(summary).not.toHaveProperty("body");
     expect(summary).not.toHaveProperty("draft_body");
@@ -524,9 +533,10 @@ describe("GET /api/admin/preview/posts/:id — draft serialization (§4.2 / §7)
       .set(...AUTH);
     expect(asAdmin.status).toBe(200);
     expect(asAdmin.body.body).toHaveLength(2);
-    expect(asAdmin.body.media[INLINE]).toBe(
-      `https://${CDN_DOMAIN}/media/draft-inline.webp`
-    );
+    expect(asAdmin.body.media[INLINE]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/draft-inline.webp`,
+      alt: null,
+    });
 
     // Preview-token path (no admin bearer).
     const token = mintPreviewToken().token;

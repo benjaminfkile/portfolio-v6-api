@@ -10,7 +10,7 @@ import {
   SectionWithItems,
   getWorkingSet,
 } from "./sectionsService";
-import { resolveMediaMap } from "../utils/cdn";
+import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
 /**
  * Publish pipeline — TECH_SPEC_V1.md §3.3, §3.9, §4.1, §4.2, §6.8.
@@ -82,7 +82,7 @@ export interface ContentResponse {
   version: number;
   published_at: string | null;
   sections: SerializedSection[];
-  media: Record<string, string>;
+  media: Record<string, MediaRef>;
 }
 
 const SECTIONS = "sections";
@@ -208,14 +208,30 @@ async function buildMediaKeyMap(
   collectMediaIds(sections, ids);
   if (ids.size === 0) return {};
 
-  const rows = await qb<{ id: string; s3_key: string }>(MEDIA_ASSETS)
+  const rows = await qb<{ id: string; s3_key: string; alt: string | null }>(
+    MEDIA_ASSETS
+  )
     .whereIn("id", Array.from(ids))
-    .select("id", "s3_key");
+    .select("id", "s3_key", "alt");
 
   const map: Record<string, string> = {};
   for (const row of rows) {
     map[row.id] = row.s3_key;
   }
+  return map;
+}
+
+/** Read-time alt lookup for a set of media ids (deleted rows resolve to null). */
+async function fetchAlts(
+  qb: Knex,
+  ids: string[]
+): Promise<Record<string, string | null>> {
+  if (ids.length === 0) return {};
+  const rows = await qb<{ id: string; alt: string | null }>(MEDIA_ASSETS)
+    .whereIn("id", ids)
+    .select("id", "alt");
+  const map: Record<string, string | null> = {};
+  for (const row of rows) map[row.id] = row.alt;
   return map;
 }
 
@@ -306,11 +322,13 @@ export async function getLatestContent(cdnDomain: string): Promise<ContentRespon
   }
 
   const doc = row.document;
+  const keyMap = doc.media ?? {};
+  const alts = await fetchAlts(db, Object.keys(keyMap));
   return {
     version: doc.version,
     published_at: doc.published_at,
     sections: doc.sections,
-    media: resolveMediaMap(cdnDomain, doc.media ?? {}),
+    media: resolveMediaMap(cdnDomain, keyMap, alts),
   };
 }
 
@@ -437,7 +455,7 @@ export async function getDraftContent(cdnDomain: string): Promise<{
   version: null;
   published_at: null;
   sections: SerializedSection[];
-  media: Record<string, string>;
+  media: Record<string, MediaRef>;
 }> {
   const workingSet = await getWorkingSet();
   // Filter hidden sections/items exactly as publish does, so the preview matches
@@ -455,10 +473,11 @@ export async function getDraftContent(cdnDomain: string): Promise<{
     }));
 
   const keyMap = await buildMediaKeyMap(getDb(), sections);
+  const alts = await fetchAlts(getDb(), Object.keys(keyMap));
   return {
     version: null,
     published_at: null,
     sections,
-    media: resolveMediaMap(cdnDomain, keyMap),
+    media: resolveMediaMap(cdnDomain, keyMap, alts),
   };
 }

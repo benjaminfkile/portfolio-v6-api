@@ -3,7 +3,7 @@ import { getDb } from "../db/db";
 import { blockArraySchema, draftBlockArraySchema, slugSchema, BlockArray } from "../schemas";
 import { stripEmptyStrings } from "../utils/draftData";
 import { collectMediaIds } from "../utils/mediaRefs";
-import { resolveMediaMap, toCdnUrl } from "../utils/cdn";
+import { resolveMediaMap, toCdnUrl, MediaRef } from "../utils/cdn";
 
 /**
  * Blog posts service — TECH_SPEC_V1.md §3.6, §3.7, §4.1, §4.2, §4.5.
@@ -70,7 +70,7 @@ export interface PostSummary {
   slug: string;
   title: string;
   excerpt: string;
-  cover: string | null;
+  cover: MediaRef | null;
   tags: string[];
   published_at: string;
 }
@@ -80,11 +80,11 @@ export interface PublicPost {
   slug: string;
   title: string;
   excerpt: string;
-  cover: string | null;
+  cover: MediaRef | null;
   tags: string[];
   published_at: string;
   body: BlockArray;
-  media: Record<string, string>;
+  media: Record<string, MediaRef>;
 }
 
 // ---- Optimistic concurrency (§4.5) ------------------------------------------
@@ -184,13 +184,17 @@ async function resolveCover(
   db: Knex,
   coverId: string | null,
   cdnDomain: string
-): Promise<string | null> {
+): Promise<MediaRef | null> {
   if (!coverId) return null;
-  const row = await db<{ id: string; s3_key: string }>(MEDIA_ASSETS)
+  const row = await db<{ id: string; s3_key: string; alt: string | null }>(
+    MEDIA_ASSETS
+  )
     .where({ id: coverId })
-    .select("s3_key")
+    .select("s3_key", "alt")
     .first();
-  return row ? toCdnUrl(cdnDomain, row.s3_key) : null;
+  return row
+    ? { url: toCdnUrl(cdnDomain, row.s3_key), alt: row.alt ?? null }
+    : null;
 }
 
 /**
@@ -202,16 +206,22 @@ async function buildBodyMediaMap(
   db: Knex,
   body: BlockArray,
   cdnDomain: string
-): Promise<Record<string, string>> {
+): Promise<Record<string, MediaRef>> {
   const ids = new Set<string>();
   collectMediaIds(body, ids);
   if (ids.size === 0) return {};
-  const rows = await db<{ id: string; s3_key: string }>(MEDIA_ASSETS)
+  const rows = await db<{ id: string; s3_key: string; alt: string | null }>(
+    MEDIA_ASSETS
+  )
     .whereIn("id", Array.from(ids))
-    .select("id", "s3_key");
+    .select("id", "s3_key", "alt");
   const keyMap: Record<string, string> = {};
-  for (const row of rows) keyMap[row.id] = row.s3_key;
-  return resolveMediaMap(cdnDomain, keyMap);
+  const alts: Record<string, string | null> = {};
+  for (const row of rows) {
+    keyMap[row.id] = row.s3_key;
+    alts[row.id] = row.alt ?? null;
+  }
+  return resolveMediaMap(cdnDomain, keyMap, alts);
 }
 
 // ---- Admin: list (§4.2 GET /api/admin/posts) --------------------------------
@@ -613,11 +623,17 @@ export async function listPublishedPosts(
     new Set(page.map((r) => r.cover_media_id).filter((v): v is string => !!v))
   );
   const coverKeyMap: Record<string, string> = {};
+  const coverAlts: Record<string, string | null> = {};
   if (coverIds.length > 0) {
-    const coverRows = await db<{ id: string; s3_key: string }>(MEDIA_ASSETS)
+    const coverRows = await db<{ id: string; s3_key: string; alt: string | null }>(
+      MEDIA_ASSETS
+    )
       .whereIn("id", coverIds)
-      .select("id", "s3_key");
-    for (const c of coverRows) coverKeyMap[c.id] = c.s3_key;
+      .select("id", "s3_key", "alt");
+    for (const c of coverRows) {
+      coverKeyMap[c.id] = c.s3_key;
+      coverAlts[c.id] = c.alt ?? null;
+    }
   }
 
   const posts: PostSummary[] = page.map((r) => ({
@@ -626,7 +642,10 @@ export async function listPublishedPosts(
     excerpt: r.excerpt,
     cover:
       r.cover_media_id && coverKeyMap[r.cover_media_id]
-        ? toCdnUrl(cdnDomain, coverKeyMap[r.cover_media_id])
+        ? {
+            url: toCdnUrl(cdnDomain, coverKeyMap[r.cover_media_id]),
+            alt: coverAlts[r.cover_media_id] ?? null,
+          }
         : null,
     tags: r.tags ?? [],
     published_at: new Date(r.published_at as Date).toISOString(),
@@ -693,11 +712,11 @@ export interface PostPreview {
   slug: string;
   title: string;
   excerpt: string;
-  cover: string | null;
+  cover: MediaRef | null;
   tags: string[];
   published_at: string | null;
   body: BlockArray;
-  media: Record<string, string>;
+  media: Record<string, MediaRef>;
 }
 
 /**

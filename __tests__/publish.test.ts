@@ -218,10 +218,11 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     // Section/item data still references media by id.
     expect(content.body.sections[0].data.background_media_id).toBe(MEDIA_ID);
     expect(content.body.sections[1].items).toHaveLength(1);
-    // The media map resolves the id to an absolute CDN URL via toCdnUrl.
-    expect(content.body.media[MEDIA_ID]).toBe(
-      `https://${CDN_DOMAIN}/media/hero.webp`
-    );
+    // The media map resolves the id to a MediaRef ({ url, alt }) via resolveMediaMap.
+    expect(content.body.media[MEDIA_ID]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/hero.webp`,
+      alt: null,
+    });
     expect(content.headers.etag).toBe('W/"v1"');
     expect(content.headers["cache-control"]).toContain("must-revalidate");
 
@@ -393,7 +394,10 @@ describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
     expect(draft.sections[0].type).toBe("hero");
     expect(draft.sections[0]).toHaveProperty("id");
     expect(draft.sections[0]).toHaveProperty("items");
-    expect(draft.media[MEDIA_ID]).toBe(`https://${CDN_DOMAIN}/media/draft.webp`);
+    expect(draft.media[MEDIA_ID]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/draft.webp`,
+      alt: null,
+    });
 
     // Same key set as a published /api/content document (shape parity, §4.1).
     await request(app).post("/api/admin/publish").set(...AUTH).send({});

@@ -16,16 +16,29 @@ export function toCdnUrl(cdnDomain: string, key: string): string {
 }
 
 /**
+ * A resolved media reference as the public site consumes it: the absolute CDN
+ * URL plus the asset's alt text (`media_assets.alt`, §3.2 — the a11y floor of
+ * §14.2 depends on it reaching the renderer).
+ */
+export interface MediaRef {
+  url: string;
+  alt: string | null;
+}
+
+/**
  * Resolve a media lookup map of `media_id → s3_key` (as stored in a published or
- * draft document) to `media_id → absolute CDN URL` for a read-time response.
+ * draft document) to `media_id → { url, alt }` for a read-time response. `alts`
+ * comes from a read-time media_assets lookup; ids absent there resolve with a
+ * null alt (e.g. the asset row was deleted after publish).
  */
 export function resolveMediaMap(
   cdnDomain: string,
-  keyMap: Record<string, string>
-): Record<string, string> {
-  const resolved: Record<string, string> = {};
+  keyMap: Record<string, string>,
+  alts: Record<string, string | null> = {}
+): Record<string, MediaRef> {
+  const resolved: Record<string, MediaRef> = {};
   for (const [id, key] of Object.entries(keyMap)) {
-    resolved[id] = toCdnUrl(cdnDomain, key);
+    resolved[id] = { url: toCdnUrl(cdnDomain, key), alt: alts[id] ?? null };
   }
   return resolved;
 }
