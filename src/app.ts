@@ -8,6 +8,7 @@ import adminSectionsRouter from "./routers/adminSectionsRouter";
 import adminPublishRouter from "./routers/adminPublishRouter";
 import adminMediaRouter from "./routers/adminMediaRouter";
 import adminPostsRouter from "./routers/adminPostsRouter";
+import adminSpotifyRouter from "./routers/adminSpotifyRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
@@ -76,6 +77,10 @@ app.use("/api/admin", adminMediaRouter);
 // Blog admin pipeline (§4.2, §3.6, §3.7): post CRUD, publish/unpublish lifecycle,
 // and the draft-body preview route (requireAdminOrPreviewToken).
 app.use("/api/admin", adminPostsRouter);
+// Spotify reconnect flow (§4.6): status/connect/disconnect are requireAdmin();
+// the OAuth callback is guarded by its single-use state instead of a bearer
+// token, since it arrives as a browser redirect from Spotify.
+app.use("/api/admin", adminSpotifyRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.

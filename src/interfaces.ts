@@ -17,6 +17,14 @@ export interface IAppSecrets {
   spotify_client_id: string;
   spotify_client_secret: string;
   spotify_refresh_token: string;
+  /**
+   * Redirect URI for the admin Spotify reconnect flow (adminSpotifyRouter) —
+   * must EXACTLY match a Redirect URI registered on the Spotify app. Optional:
+   * deployed installs set it in the stored secret (it embeds the public API
+   * origin, an infra value that never lives in this repo); locally it defaults
+   * to the loopback callback (see spotifyOAuthService.resolveRedirectUri).
+   */
+  spotify_redirect_uri?: string;
   gateway_health_url?: string;
 }
 

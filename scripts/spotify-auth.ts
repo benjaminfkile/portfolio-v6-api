@@ -3,9 +3,14 @@
  *
  * Walks the OAuth 2.0 authorization-code flow to obtain a **refresh token** for the
  * `user-read-currently-playing` scope, which client-credentials auth cannot grant.
- * Run it ONCE, locally, on the owner's machine; store the printed refresh token
- * (with the client id and secret) in Secrets Manager (§9.3). Refresh tokens do not
- * expire; if one is ever revoked, re-run this to mint a new one (§4.6).
+ * Run it locally, on the owner's machine; store the printed refresh token (with the
+ * client id and secret) in Secrets Manager (§9.3).
+ *
+ * NOTE: since Spotify's June 2026 policy change, refresh tokens EXPIRE 180 days
+ * after the authorization (refreshing does not extend it). Prefer the admin
+ * "reconnect Spotify" flow (adminSpotifyRouter), which stores the new token
+ * without touching Secrets Manager; this script remains as the manual fallback
+ * and must be re-run before each expiry if the static secret is what's in use.
  *
  * Prerequisites:
  *   - A Spotify app in the developer dashboard whose Redirect URI is EXACTLY
@@ -149,7 +154,11 @@ function main(): void {
           console.log("\n=== Spotify refresh token (store in Secrets Manager, §9.3) ===\n");
           console.log(tokens.refresh_token);
           console.log("\nGranted scope:", tokens.scope ?? SCOPE);
-          console.log("\nDone. This token does not expire; keep it secret.\n");
+          console.log(
+            "\nDone. Keep it secret. NOTE: Spotify expires refresh tokens 180 " +
+              "days after authorization — re-run this (or use the admin " +
+              "reconnect flow) before then.\n"
+          );
           finish(200, "Success. Refresh token printed to the terminal. You can close this tab.");
         })
         .catch((err: unknown) => {

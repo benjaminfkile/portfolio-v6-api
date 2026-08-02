@@ -117,10 +117,19 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
     });
 
     if (!res.ok) {
-      // A revoked refresh token surfaces here as 400 invalid_grant (§4.6). We do
-      // not echo the body — it can contain nothing sensitive, but keeping the log
-      // to the status code guarantees no credential ever leaks into logs.
-      throw new Error(`Spotify token refresh failed with status ${res.status}`);
+      // A revoked OR expired refresh token surfaces here as 400 invalid_grant —
+      // since Spotify's June 2026 policy change, refresh tokens die 180 days
+      // after authorization, so this is now a routine state, not just sabotage.
+      // We do not echo the body — keeping the log to the status code guarantees
+      // no credential ever leaks into logs.
+      const hint =
+        res.status === 400
+          ? " (invalid_grant: the refresh token is likely expired or revoked —" +
+            " reconnect Spotify from the admin Integrations page)"
+          : "";
+      throw new Error(
+        `Spotify token refresh failed with status ${res.status}${hint}`
+      );
     }
 
     const body = (await res.json()) as {
@@ -266,9 +275,19 @@ export async function getNowPlaying(config: SpotifyConfig): Promise<NowPlaying> 
   }
 }
 
-/** Test-only: clear the in-memory token, cache, and any in-flight fetch. */
-export function _resetSpotifyStateForTests(): void {
+/**
+ * Clear the in-memory access token and the ~30s cache. Called by the admin
+ * reconnect flow after storing a new refresh token so the very next
+ * /api/now-playing request runs on the new authorization instead of riding out
+ * the old token/cache.
+ */
+export function clearSpotifyRuntimeState(): void {
   accessToken = null;
   cache = null;
   inFlight = null;
+}
+
+/** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */
+export function _resetSpotifyStateForTests(): void {
+  clearSpotifyRuntimeState();
 }
