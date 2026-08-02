@@ -26,6 +26,7 @@ jest.mock("../src/aws/cognitoAuth", () => ({
 import { verifyAdminIdToken } from "../src/aws/cognitoAuth";
 import { initDb, closeDb, getDb } from "../src/db/db";
 import adminSectionsRouter from "../src/routers/adminSectionsRouter";
+import adminPagesRouter from "../src/routers/adminPagesRouter";
 import adminPublishRouter from "../src/routers/adminPublishRouter";
 import contentRouter from "../src/routers/contentRouter";
 import { failure } from "../src/utils/envelope";
@@ -101,6 +102,7 @@ function buildApp(): Express {
   });
   app.use("/api/content", contentRouter);
   app.use("/api/admin", adminSectionsRouter);
+  app.use("/api/admin", adminPagesRouter);
   app.use("/api/admin", adminPublishRouter);
   app.use((err: Error, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (res.headersSent) return next(err);
@@ -166,6 +168,13 @@ async function createSection(body: Record<string, unknown>) {
     .send({ ...body, page_id });
 }
 
+async function createPage(body: Record<string, unknown>) {
+  return request(app)
+    .post("/api/admin/pages")
+    .set(...AUTH)
+    .send(body);
+}
+
 async function createItem(sectionId: string, data: Record<string, unknown>) {
   return request(app)
     .post(`/api/admin/sections/${sectionId}/items`)
@@ -186,13 +195,13 @@ async function insertMedia(id: string, s3Key: string) {
 // ---- empty state (§4.1) ----------------------------------------------------
 
 describe("GET /api/content — empty state (§4.1)", () => {
-  it("returns 200 with an empty sections array when nothing was ever published", async () => {
+  it("returns 200 with an empty pages array when nothing was ever published", async () => {
     const res = await request(app).get("/api/content");
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       version: 0,
       published_at: null,
-      sections: [],
+      pages: [],
       media: {},
     });
     expect(res.headers.etag).toBe('W/"v0"');
@@ -231,12 +240,19 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     const content = await request(app).get("/api/content");
     expect(content.status).toBe(200);
     expect(content.body.version).toBe(1);
-    expect(content.body.sections).toHaveLength(2);
-    expect(content.body.sections[0].id).toBe(hero.id);
-    expect(content.body.sections[0].type).toBe("hero");
+    // v1.1 pages shape: a single `home` page carrying the two sections (§3.10).
+    expect(content.body.pages).toHaveLength(1);
+    const homePage = content.body.pages[0];
+    expect(homePage.slug).toBe("home");
+    expect(homePage.title).toBe("Home");
+    expect(homePage.nav_label).toBe("Home");
+    expect(homePage.nav_position).toBe(0);
+    expect(homePage.sections).toHaveLength(2);
+    expect(homePage.sections[0].id).toBe(hero.id);
+    expect(homePage.sections[0].type).toBe("hero");
     // Section/item data still references media by id.
-    expect(content.body.sections[0].data.background_media_id).toBe(MEDIA_ID);
-    expect(content.body.sections[1].items).toHaveLength(1);
+    expect(homePage.sections[0].data.background_media_id).toBe(MEDIA_ID);
+    expect(homePage.sections[1].items).toHaveLength(1);
     // The media map resolves the id to a MediaRef ({ url, alt }) via resolveMediaMap.
     expect(content.body.media[MEDIA_ID]).toEqual({
       url: `https://${CDN_DOMAIN}/media/hero.webp`,
@@ -272,8 +288,9 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     expect(pub.status).toBe(201);
 
     const content = await request(app).get("/api/content");
-    expect(content.body.sections).toHaveLength(1);
-    expect(content.body.sections[0].id).toBe(visible.id);
+    expect(content.body.pages).toHaveLength(1);
+    expect(content.body.pages[0].sections).toHaveLength(1);
+    expect(content.body.pages[0].sections[0].id).toBe(visible.id);
   });
 });
 
@@ -295,6 +312,192 @@ describe("publish validation refusal (§3.9)", () => {
     expect(content.body.version).toBe(0);
     const count = await getDb()("page_versions").count<{ count: string }[]>("* as count");
     expect(Number(count[0].count)).toBe(0);
+  });
+});
+
+// ---- pages-level publish validation (§3.10 / §3.9) -------------------------
+
+describe("publish pages validation (§3.10)", () => {
+  it("refuses to publish when no page has slug 'home' (400)", async () => {
+    // A single non-home page with a valid section — still unpublishable: a site
+    // with no home page cannot be published (§3.10).
+    const about = (await createPage({ slug: "about", title: "About" })).body.data;
+    await createSection({ type: "hero", data: { title: "x" }, page_id: about.id });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(400);
+    expect(pub.body).toMatchObject({ status: "error", error: true });
+    expect(pub.body.errorMsg).toMatch(/home/i);
+
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(0);
+  });
+
+  it("refuses to publish when there is no non-hidden page (400)", async () => {
+    // The only page is `home`, but it is hidden — zero non-hidden pages, so the
+    // published document would be empty. Refuse (§3.10).
+    const home = (
+      await createPage({ slug: "home", title: "Home", nav_label: "Home" })
+    ).body.data;
+    await request(app)
+      .patch(`/api/admin/pages/${home.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: home.updated_at, is_hidden: true });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(400);
+    expect(pub.body.errorMsg).toMatch(/non-hidden/i);
+
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(0);
+  });
+
+  it("excludes a hidden page from the published document", async () => {
+    const home = (
+      await createPage({ slug: "home", title: "Home", nav_label: "Home" })
+    ).body.data;
+    await createSection({ type: "hero", data: { title: "Home hero" }, page_id: home.id });
+
+    const secret = (
+      await createPage({ slug: "secret", title: "Secret" })
+    ).body.data;
+    await createSection({ type: "about", data: { body: "hidden page body" }, page_id: secret.id });
+    await request(app)
+      .patch(`/api/admin/pages/${secret.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: secret.updated_at, is_hidden: true });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    // Only the non-hidden `home` page is serialized (§3.10).
+    const content = await request(app).get("/api/content");
+    expect(content.body.pages).toHaveLength(1);
+    expect(content.body.pages[0].slug).toBe("home");
+    expect(content.body.pages.map((p: { slug: string }) => p.slug)).not.toContain("secret");
+  });
+
+  it("publishes multiple pages → /api/content pages shape with media resolved across all pages", async () => {
+    const HOME_MEDIA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const PROJ_MEDIA = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    await insertMedia(HOME_MEDIA, "media/home-hero.webp");
+    await insertMedia(PROJ_MEDIA, "media/proj.webp");
+
+    const home = (
+      await createPage({ slug: "home", title: "Ben Kile", nav_label: "Home", nav_position: 0 })
+    ).body.data;
+    await createSection({
+      type: "hero",
+      data: { title: "Ben Kile", background_media_id: HOME_MEDIA },
+      page_id: home.id,
+    });
+
+    const projects = (
+      await createPage({
+        slug: "projects",
+        title: "Projects",
+        nav_label: "Projects",
+        nav_position: 1,
+      })
+    ).body.data;
+    const portfolio = (
+      await createSection({ type: "portfolio", data: {}, page_id: projects.id })
+    ).body.data;
+    await createItem(portfolio.id, {
+      title: "Proj",
+      intro: "i",
+      description: "d",
+      media_id: PROJ_MEDIA,
+      tech_icons: ["ts"],
+      links: [{ type: "repo", label: "code", url: "https://example.com" }],
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(1);
+    // Two pages, ordered by nav_position (§3.10).
+    expect(content.body.pages.map((p: { slug: string }) => p.slug)).toEqual([
+      "home",
+      "projects",
+    ]);
+    expect(content.body.pages[0].nav_label).toBe("Home");
+    expect(content.body.pages[0].sections[0].type).toBe("hero");
+    expect(content.body.pages[1].sections[0].type).toBe("portfolio");
+    expect(content.body.pages[1].sections[0].items).toHaveLength(1);
+
+    // Media from BOTH pages is collected and resolved to CDN URLs (§6.8).
+    expect(content.body.media[HOME_MEDIA]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/home-hero.webp`,
+      alt: null,
+    });
+    expect(content.body.media[PROJ_MEDIA]).toEqual({
+      url: `https://${CDN_DOMAIN}/media/proj.webp`,
+      alt: null,
+    });
+  });
+});
+
+// ---- legacy (pre-v1.1) restore back-compat (§3.10) -------------------------
+
+describe("restore of a legacy flat document (§3.10 back-compat)", () => {
+  it("wraps a hand-inserted legacy `sections` document into a `home` page and emits the v1.1 shape", async () => {
+    const LEGACY_SECTION_ID = "33333333-3333-3333-3333-333333333333";
+    const legacyDoc = {
+      version: 1,
+      published_at: "2026-01-01T00:00:00.000Z",
+      // Pre-v1.1 flat shape: a top-level `sections` array, no `pages`.
+      sections: [
+        { id: LEGACY_SECTION_ID, type: "hero", data: { title: "Legacy" }, items: [] },
+      ],
+      media: {},
+    };
+    await getDb()("page_versions").insert({
+      version: 1,
+      document: legacyDoc as never,
+      published_at: legacyDoc.published_at,
+      published_by: "seed",
+    });
+
+    // Restore the legacy version → new version 2, emitted in the v1.1 pages shape.
+    const restore = await request(app)
+      .post("/api/admin/versions/1/restore")
+      .set(...AUTH)
+      .send({});
+    expect(restore.status).toBe(201);
+    expect(restore.body.data.version).toBe(2);
+    const doc = restore.body.data.document;
+    expect(doc.pages).toHaveLength(1);
+    expect(doc.pages[0].slug).toBe("home");
+    expect(doc.pages[0].title).toBe("Home");
+    expect(doc.pages[0].nav_label).toBe("Home");
+    expect(doc.pages[0].nav_position).toBe(0);
+    expect(doc.pages[0].sections).toHaveLength(1);
+    expect(doc.pages[0].sections[0].id).toBe(LEGACY_SECTION_ID);
+    expect(doc.pages[0].sections[0].data.title).toBe("Legacy");
+
+    // The working set was rebuilt: a single `home` page owns the wrapped sections.
+    const pagesList = (
+      await request(app).get("/api/admin/pages").set(...AUTH)
+    ).body.data.pages;
+    expect(pagesList).toHaveLength(1);
+    expect(pagesList[0].slug).toBe("home");
+
+    const ws = (
+      await request(app).get("/api/admin/sections").set(...AUTH)
+    ).body.data.sections;
+    expect(ws).toHaveLength(1);
+    expect(ws[0].id).toBe(LEGACY_SECTION_ID);
+    expect(ws[0].page_id).toBe(pagesList[0].id);
+    expect(ws[0].data).toEqual({ title: "Legacy" });
+
+    // /api/content now serves the v1.1 pages shape, never the legacy flat shape.
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(2);
+    expect(content.body).not.toHaveProperty("sections");
+    expect(content.body.pages[0].slug).toBe("home");
+    expect(content.body.pages[0].sections[0].data.title).toBe("Legacy");
   });
 });
 
@@ -331,8 +534,9 @@ describe("restore (§4.2)", () => {
     // Content is now version 3, whose document equals version 1's sections.
     const content = await request(app).get("/api/content");
     expect(content.body.version).toBe(3);
-    expect(content.body.sections).toHaveLength(1);
-    expect(content.body.sections[0].data.title).toBe("First");
+    expect(content.body.pages).toHaveLength(1);
+    expect(content.body.pages[0].sections).toHaveLength(1);
+    expect(content.body.pages[0].sections[0].data.title).toBe("First");
 
     // The working set was rebuilt to match the restored document.
     ws = (await request(app).get("/api/admin/sections").set(...AUTH)).body.data.sections;
@@ -346,8 +550,9 @@ describe("restore (§4.2)", () => {
     // not the discarded draft — proving the rebuild is authoritative.
     const v4 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
     expect(v4.body.data.version).toBe(4);
-    expect(v4.body.data.document.sections).toHaveLength(1);
-    expect(v4.body.data.document.sections[0].data.title).toBe("First");
+    expect(v4.body.data.document.pages).toHaveLength(1);
+    expect(v4.body.data.document.pages[0].sections).toHaveLength(1);
+    expect(v4.body.data.document.pages[0].sections[0].data.title).toBe("First");
   });
 
   it("returns 404 restoring a version that does not exist", async () => {
@@ -409,10 +614,13 @@ describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
     const draft = preview.body;
     expect(draft.version).toBeNull();
     expect(draft.published_at).toBeNull();
-    expect(draft.sections).toHaveLength(1);
-    expect(draft.sections[0].type).toBe("hero");
-    expect(draft.sections[0]).toHaveProperty("id");
-    expect(draft.sections[0]).toHaveProperty("items");
+    // v1.1 pages shape: the draft's single `home` page carrying the hero (§3.10).
+    expect(draft.pages).toHaveLength(1);
+    expect(draft.pages[0].slug).toBe("home");
+    expect(draft.pages[0].sections).toHaveLength(1);
+    expect(draft.pages[0].sections[0].type).toBe("hero");
+    expect(draft.pages[0].sections[0]).toHaveProperty("id");
+    expect(draft.pages[0].sections[0]).toHaveProperty("items");
     expect(draft.media[MEDIA_ID]).toEqual({
       url: `https://${CDN_DOMAIN}/media/draft.webp`,
       alt: null,
