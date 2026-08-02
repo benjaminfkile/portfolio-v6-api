@@ -5,12 +5,10 @@ import {
   ITEM_SCHEMAS,
   SECTION_TYPES,
   SectionType,
+  pageSchema,
 } from "../schemas";
-import {
-  SectionWithItems,
-  getWorkingSet,
-  resolveDefaultPageId,
-} from "./sectionsService";
+import { SectionWithItems, getWorkingSet } from "./sectionsService";
+import { listPages, PageRow } from "./pagesService";
 import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
 /**
@@ -61,30 +59,60 @@ export interface SerializedSection {
 }
 
 /**
- * The stored `page_versions.document`. References media by id and carries a
- * lookup map of `media_id → s3_key` (§6.8) — never absolute URLs, so the
- * document stays domain-agnostic. `version`/`published_at` are echoed inside the
- * document as well as held in their own columns.
+ * A serialized page inside a published/draft document — §3.10 / §4.1. Carries the
+ * page's identity + nav metadata and its ordered, VISIBLE sections. `nav_label`
+ * is null for a page that is served at its slug but absent from the nav (§3.10).
+ */
+export interface SerializedPage {
+  id: string;
+  slug: string;
+  title: string;
+  nav_label: string | null;
+  nav_position: number;
+  sections: SerializedSection[];
+}
+
+/**
+ * The stored `page_versions.document` (v1.1 pages shape, §3.10). References media
+ * by id and carries a lookup map of `media_id → s3_key` (§6.8) — never absolute
+ * URLs, so the document stays domain-agnostic. `version`/`published_at` are
+ * echoed inside the document as well as held in their own columns.
  */
 export interface PageDocument {
+  version: number;
+  published_at: string | null;
+  pages: SerializedPage[];
+  media: Record<string, string>;
+}
+
+/**
+ * A pre-v1.1 stored document (§3.10 back-compat): a flat top-level `sections`
+ * array instead of `pages`. Only encountered when restoring / serving a version
+ * published before the pages model landed; normalized into a single `home` page.
+ */
+export interface LegacyPageDocument {
   version: number;
   published_at: string | null;
   sections: SerializedSection[];
   media: Record<string, string>;
 }
 
+type StoredDocument = PageDocument | LegacyPageDocument;
+
 /**
- * The read-time `/api/content` (and preview) response shape: the document with
- * its `media` map resolved to absolute CDN URLs (§6.8). Media *within* section /
- * item `data` is still referenced by id; the resolved `media` map is how a
- * consumer turns those ids into URLs.
+ * The read-time `/api/content` (and preview) response shape (§4.1): the document
+ * with its `media` map resolved to absolute CDN URLs (§6.8). Media *within*
+ * section / item `data` is still referenced by id; the resolved `media` map is
+ * how a consumer turns those ids into URLs.
  */
 export interface ContentResponse {
   version: number;
   published_at: string | null;
-  sections: SerializedSection[];
+  pages: SerializedPage[];
   media: Record<string, MediaRef>;
 }
+
+const PAGES = "pages";
 
 const SECTIONS = "sections";
 const SECTION_ITEMS = "section_items";
@@ -193,6 +221,88 @@ function validateWorkingSet(
   return ok(serialized);
 }
 
+// ---- Pages: grouping, validation, and legacy normalization (§3.10) ----------
+
+/**
+ * Group a flat working set (§4.2, ordered by page then position) into a
+ * `page_id → sections` map. Insertion order preserves each page's `position`
+ * ordering because the working set already arrives sorted within a page.
+ */
+function groupSectionsByPage(
+  workingSet: SectionWithItems[]
+): Map<string, SectionWithItems[]> {
+  const byPage = new Map<string, SectionWithItems[]>();
+  for (const section of workingSet) {
+    const list = byPage.get(section.page_id) ?? [];
+    list.push(section);
+    byPage.set(section.page_id, list);
+  }
+  return byPage;
+}
+
+/** The page row projected into the shape the canonical `pageSchema` validates. */
+function pageToValidatable(page: PageRow): Record<string, unknown> {
+  return {
+    slug: page.slug,
+    title: page.title,
+    nav_label: page.nav_label,
+    nav_position: page.nav_position,
+    is_hidden: page.is_hidden,
+  };
+}
+
+/**
+ * Publish-time page validation (§3.9 / §3.10) — "one level up" from sections.
+ * Every page must satisfy the canonical `pageSchema` (valid slug/title/nav), at
+ * least one non-hidden page must exist, and a page with slug `home` must exist —
+ * a site with no home page cannot be published. Returns a validation failure (the
+ * router maps it to 400) or `null` when the page set is publishable.
+ */
+function validatePages(pages: PageRow[]): PublishResult<null> | null {
+  for (const page of pages) {
+    const parsed = pageSchema.safeParse(pageToValidatable(page));
+    if (!parsed.success) {
+      return fail(
+        "validation",
+        `Invalid page ${page.id} (${page.slug}): ${parsed.error.message}`
+      );
+    }
+  }
+  if (!pages.some((p) => !p.is_hidden)) {
+    return fail("validation", "at least one non-hidden page is required to publish");
+  }
+  if (!pages.some((p) => p.slug === "home")) {
+    return fail("validation", "a page with slug 'home' is required to publish");
+  }
+  return null;
+}
+
+/**
+ * Normalize a stored document to its `pages` array (§3.10 back-compat). A v1.1
+ * document already carries `pages`. A pre-v1.1 document carries a flat top-level
+ * `sections` array — wrap it into a single `home` page (slug `home`, title
+ * `Home`, nav_label `Home`, nav_position 0) so read/restore paths only ever deal
+ * with the pages shape. The nil UUID stands in for the legacy page's (absent) id.
+ */
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+function documentToPages(doc: StoredDocument): SerializedPage[] {
+  if (Array.isArray((doc as PageDocument).pages)) {
+    return (doc as PageDocument).pages;
+  }
+  const legacySections = (doc as LegacyPageDocument).sections ?? [];
+  return [
+    {
+      id: NIL_UUID,
+      slug: "home",
+      title: "Home",
+      nav_label: "Home",
+      nav_position: 0,
+      sections: legacySections,
+    },
+  ];
+}
+
 // ---- Media key map (§6.8) ---------------------------------------------------
 
 /**
@@ -203,10 +313,10 @@ function validateWorkingSet(
  */
 async function buildMediaKeyMap(
   qb: Knex,
-  sections: SerializedSection[]
+  content: unknown
 ): Promise<Record<string, string>> {
   const ids = new Set<string>();
-  collectMediaIds(sections, ids);
+  collectMediaIds(content, ids);
   if (ids.size === 0) return {};
 
   const rows = await qb<{ id: string; s3_key: string; alt: string | null }>(
@@ -274,18 +384,41 @@ export async function publish(
   publishedBy: string,
   publishedAt: string = new Date().toISOString()
 ): Promise<PublishResult<PublishedVersion>> {
-  const workingSet = await getWorkingSet();
-  const validated = validateWorkingSet(workingSet);
-  if (!validated.ok) return validated;
+  // Validate one level up (§3.10): every page passes the canonical pageSchema, a
+  // non-hidden page exists, and a `home` page exists.
+  const pages = await listPages();
+  const pageCheck = validatePages(pages);
+  if (pageCheck) return pageCheck as PublishResult<PublishedVersion>;
+
+  // Validate + serialize each page's sections. Hidden pages and hidden sections
+  // are still validated (§3.9) but never serialized: only non-hidden pages, each
+  // with its non-hidden sections, reach the document.
+  const byPage = groupSectionsByPage(await getWorkingSet());
+  const serializedPages: SerializedPage[] = [];
+  for (const page of pages) {
+    const validated = validateWorkingSet(byPage.get(page.id) ?? []);
+    if (!validated.ok) return validated;
+    if (!page.is_hidden) {
+      serializedPages.push({
+        id: page.id,
+        slug: page.slug,
+        title: page.title,
+        nav_label: page.nav_label,
+        nav_position: page.nav_position,
+        sections: validated.data,
+      });
+    }
+  }
 
   const db = getDb();
   return db.transaction(async (trx) => {
-    const media = await buildMediaKeyMap(trx as unknown as Knex, validated.data);
+    // Media collected across ALL serialized pages (§6.8, by media_id key suffix).
+    const media = await buildMediaKeyMap(trx as unknown as Knex, serializedPages);
     const version = (await maxVersion(trx as unknown as Knex)) + 1;
     const document: PageDocument = {
       version,
       published_at: publishedAt,
-      sections: validated.data,
+      pages: serializedPages,
       media,
     };
 
@@ -312,14 +445,14 @@ export async function publish(
  */
 export async function getLatestContent(cdnDomain: string): Promise<ContentResponse> {
   const db = getDb();
-  const row = await db<{ version: number; document: PageDocument; published_at: Date }>(
+  const row = await db<{ version: number; document: StoredDocument; published_at: Date }>(
     PAGE_VERSIONS
   )
     .orderBy("version", "desc")
     .first();
 
   if (!row) {
-    return { version: 0, published_at: null, sections: [], media: {} };
+    return { version: 0, published_at: null, pages: [], media: {} };
   }
 
   const doc = row.document;
@@ -328,7 +461,9 @@ export async function getLatestContent(cdnDomain: string): Promise<ContentRespon
   return {
     version: doc.version,
     published_at: doc.published_at,
-    sections: doc.sections,
+    // A pre-v1.1 document (flat `sections`) is normalized to the pages shape so
+    // /api/content never serves the legacy shape (§3.10 back-compat).
+    pages: documentToPages(doc),
     media: resolveMediaMap(cdnDomain, keyMap, alts),
   };
 }
@@ -379,61 +514,89 @@ export async function restoreVersion(
 
   const db = getDb();
   return db.transaction(async (trx) => {
-    const source = await trx<{ version: number; document: PageDocument }>(PAGE_VERSIONS)
+    const source = await trx<{ version: number; document: StoredDocument }>(PAGE_VERSIONS)
       .where({ version: v })
       .first();
     if (!source) {
       return fail<PublishedVersion>("not_found", `Version ${v} not found`);
     }
 
+    // Normalize the source to the pages shape (§3.10 back-compat): a v1.1
+    // document already carries `pages`; a legacy flat document is wrapped into a
+    // single `home` page. Either way the rebuild and the re-published document
+    // are pages-shaped.
     const restored = source.document;
+    const sourcePages = documentToPages(restored);
     const newVersion = (await maxVersion(trx as unknown as Knex)) + 1;
+
+    // Rebuild the working set from the restored document. Delete-then-insert;
+    // deleting pages cascades to sections and section_items.
+    await trx(SECTION_ITEMS).del();
+    await trx(SECTIONS).del();
+    await trx(PAGES).del();
+
+    const rebuiltPages: SerializedPage[] = [];
+    for (const page of sourcePages) {
+      // A v1.1 document carries real page ids — recreate the page with the same
+      // id. A legacy-wrapped `home` page uses the nil-UUID placeholder, so let
+      // the DB mint a fresh id instead of inserting the sentinel.
+      const insertPage: Record<string, unknown> = {
+        slug: page.slug,
+        title: page.title,
+        nav_label: page.nav_label,
+        nav_position: page.nav_position,
+        is_hidden: false,
+      };
+      if (page.id && page.id !== NIL_UUID) insertPage.id = page.id;
+      const [pageRow] = await trx(PAGES).insert(insertPage as never).returning("id");
+      const pageId = (pageRow as { id: string }).id;
+
+      for (let i = 0; i < page.sections.length; i++) {
+        const section = page.sections[i];
+        await trx(SECTIONS).insert({
+          id: section.id,
+          type: section.type,
+          position: i,
+          is_hidden: false,
+          data: section.data as never,
+          page_id: pageId,
+        });
+        for (let j = 0; j < section.items.length; j++) {
+          const item = section.items[j];
+          await trx(SECTION_ITEMS).insert({
+            id: item.id,
+            section_id: section.id,
+            position: j,
+            is_hidden: false,
+            data: item.data as never,
+          });
+        }
+      }
+
+      rebuiltPages.push({
+        id: pageId,
+        slug: page.slug,
+        title: page.title,
+        nav_label: page.nav_label,
+        nav_position: page.nav_position,
+        sections: page.sections,
+      });
+    }
+
+    // Re-publish as a new version — the live site flips immediately. The document
+    // is emitted in the v1.1 pages shape even when restoring a legacy version.
     const document: PageDocument = {
       version: newVersion,
       published_at: publishedAt,
-      sections: restored.sections ?? [],
+      pages: rebuiltPages,
       media: restored.media ?? {},
     };
-
-    // 1. Re-publish as a new version — the live site flips immediately.
     await trx(PAGE_VERSIONS).insert({
       version: newVersion,
       document: document as never,
       published_at: publishedAt,
       published_by: publishedBy,
     });
-
-    // 2. Rebuild the working set from the restored document. Delete-then-insert;
-    //    section_items cascade away with their parent sections.
-    await trx(SECTION_ITEMS).del();
-    await trx(SECTIONS).del();
-
-    // Rebuilt sections need an owning page (§3.10). This task restores the
-    // legacy flat shape into the implicit `home` page; the pages-shaped restore
-    // arrives in a later task.
-    const pageId = await resolveDefaultPageId(trx);
-
-    for (let i = 0; i < document.sections.length; i++) {
-      const section = document.sections[i];
-      await trx(SECTIONS).insert({
-        id: section.id,
-        type: section.type,
-        position: i,
-        is_hidden: false,
-        data: section.data as never,
-        page_id: pageId,
-      });
-      for (let j = 0; j < section.items.length; j++) {
-        const item = section.items[j];
-        await trx(SECTION_ITEMS).insert({
-          id: item.id,
-          section_id: section.id,
-          position: j,
-          is_hidden: false,
-          data: item.data as never,
-        });
-      }
-    }
 
     await pruneVersions(trx);
 
@@ -461,30 +624,41 @@ export async function restoreVersion(
 export async function getDraftContent(cdnDomain: string): Promise<{
   version: null;
   published_at: null;
-  sections: SerializedSection[];
+  pages: SerializedPage[];
   media: Record<string, MediaRef>;
 }> {
-  const workingSet = await getWorkingSet();
-  // Filter hidden sections/items exactly as publish does, so the preview matches
-  // what visitors will see through /api/content (§4.1 shape). The draft is not
-  // re-validated (§3.9) — invalid drafts must still be previewable.
-  const sections: SerializedSection[] = workingSet
-    .filter((s) => !s.is_hidden)
-    .map((s) => ({
-      id: s.id,
-      type: s.type,
-      data: s.data,
-      items: s.items
-        .filter((item) => !item.is_hidden)
-        .map((item) => ({ id: item.id, data: item.data })),
+  const pages = await listPages();
+  const byPage = groupSectionsByPage(await getWorkingSet());
+
+  // Filter hidden pages, sections, and items exactly as publish does, so the
+  // preview matches what visitors will see through /api/content (§4.1 shape). The
+  // draft is NOT re-validated (§3.9) — invalid drafts must still be previewable.
+  const serializedPages: SerializedPage[] = pages
+    .filter((p) => !p.is_hidden)
+    .map((p) => ({
+      id: p.id,
+      slug: p.slug,
+      title: p.title,
+      nav_label: p.nav_label,
+      nav_position: p.nav_position,
+      sections: (byPage.get(p.id) ?? [])
+        .filter((s) => !s.is_hidden)
+        .map((s) => ({
+          id: s.id,
+          type: s.type,
+          data: s.data,
+          items: s.items
+            .filter((item) => !item.is_hidden)
+            .map((item) => ({ id: item.id, data: item.data })),
+        })),
     }));
 
-  const keyMap = await buildMediaKeyMap(getDb(), sections);
+  const keyMap = await buildMediaKeyMap(getDb(), serializedPages);
   const alts = await fetchAlts(getDb(), Object.keys(keyMap));
   return {
     version: null,
     published_at: null,
-    sections,
+    pages: serializedPages,
     media: resolveMediaMap(cdnDomain, keyMap, alts),
   };
 }
