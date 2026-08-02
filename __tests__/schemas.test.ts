@@ -18,6 +18,10 @@ import {
   postMetadataSchema,
   postSchema,
   slugSchema,
+  pageSlugSchema,
+  pageSchema,
+  draftPageSchema,
+  RESERVED_PAGE_SLUGS,
 } from "../src/schemas";
 
 describe("Link schema (§3.4) — protocol allowlist", () => {
@@ -349,5 +353,92 @@ describe("post metadata schema (§3.6)", () => {
         draft_body: [{ type: "nope" }],
       }).success
     ).toBe(false);
+  });
+});
+
+describe("page schema (§3.10)", () => {
+  it("accepts lowercase slugs with digits and hyphens", () => {
+    expect(pageSlugSchema.safeParse("home").success).toBe(true);
+    expect(pageSlugSchema.safeParse("projects").success).toBe(true);
+    expect(pageSlugSchema.safeParse("about-me").success).toBe(true);
+    expect(pageSlugSchema.safeParse("page-2").success).toBe(true);
+  });
+
+  it("rejects uppercase, spaces, and other illegal characters", () => {
+    expect(pageSlugSchema.safeParse("Home").success).toBe(false);
+    expect(pageSlugSchema.safeParse("my page").success).toBe(false);
+    expect(pageSlugSchema.safeParse("under_score").success).toBe(false);
+    expect(pageSlugSchema.safeParse("slash/y").success).toBe(false);
+    expect(pageSlugSchema.safeParse("").success).toBe(false);
+  });
+
+  it("rejects the reserved slugs blog/api/admin", () => {
+    expect([...RESERVED_PAGE_SLUGS]).toEqual(["blog", "api", "admin"]);
+    for (const reserved of RESERVED_PAGE_SLUGS) {
+      expect(pageSlugSchema.safeParse(reserved).success).toBe(false);
+    }
+    // `home` is special, NOT reserved.
+    expect(pageSlugSchema.safeParse("home").success).toBe(true);
+  });
+
+  it("accepts a full page and a null nav_label (served but hidden from nav)", () => {
+    expect(
+      pageSchema.safeParse({
+        slug: "home",
+        title: "Ben Kile",
+        nav_label: "Home",
+        nav_position: 0,
+        is_hidden: false,
+      }).success
+    ).toBe(true);
+    expect(
+      pageSchema.safeParse({
+        slug: "one-off",
+        title: "One-off",
+        nav_label: null,
+        nav_position: 3,
+        is_hidden: false,
+      }).success
+    ).toBe(true);
+  });
+
+  it("rejects an empty title, a reserved slug, and unknown keys", () => {
+    expect(
+      pageSchema.safeParse({
+        slug: "ok",
+        title: "",
+        nav_position: 0,
+        is_hidden: false,
+      }).success
+    ).toBe(false);
+    expect(
+      pageSchema.safeParse({
+        slug: "admin",
+        title: "Admin",
+        nav_position: 0,
+        is_hidden: false,
+      }).success
+    ).toBe(false);
+    expect(
+      pageSchema.safeParse({
+        slug: "ok",
+        title: "OK",
+        nav_position: 0,
+        is_hidden: false,
+        surprise: true,
+      }).success
+    ).toBe(false);
+  });
+
+  it("draft-lenient variant: required fields may be absent (§3.9)", () => {
+    // A fresh, incomplete draft passes.
+    expect(draftPageSchema.safeParse({}).success).toBe(true);
+    expect(draftPageSchema.safeParse({ title: "WIP" }).success).toBe(true);
+    // But a provided field is still validated — a bad slug is rejected even in
+    // a draft, and unknown keys are still rejected.
+    expect(draftPageSchema.safeParse({ slug: "Bad Slug" }).success).toBe(false);
+    expect(draftPageSchema.safeParse({ slug: "admin" }).success).toBe(false);
+    expect(draftPageSchema.safeParse({ nav_position: 1.5 }).success).toBe(false);
+    expect(draftPageSchema.safeParse({ surprise: true }).success).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import {
 import {
   SectionWithItems,
   getWorkingSet,
+  resolveDefaultPageId,
 } from "./sectionsService";
 import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
@@ -407,6 +408,11 @@ export async function restoreVersion(
     await trx(SECTION_ITEMS).del();
     await trx(SECTIONS).del();
 
+    // Rebuilt sections need an owning page (§3.10). This task restores the
+    // legacy flat shape into the implicit `home` page; the pages-shaped restore
+    // arrives in a later task.
+    const pageId = await resolveDefaultPageId(trx);
+
     for (let i = 0; i < document.sections.length; i++) {
       const section = document.sections[i];
       await trx(SECTIONS).insert({
@@ -415,6 +421,7 @@ export async function restoreVersion(
         position: i,
         is_hidden: false,
         data: section.data as never,
+        page_id: pageId,
       });
       for (let j = 0; j < section.items.length; j++) {
         const item = section.items[j];
