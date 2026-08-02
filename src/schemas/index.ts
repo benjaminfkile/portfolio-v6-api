@@ -6,12 +6,14 @@ import { blockSchema, blockArraySchema } from "./blocks";
 import { ITEM_SCHEMAS } from "./items";
 import { SECTION_DATA_SCHEMAS } from "./sections";
 import { postSchema, postMetadataSchema } from "./posts";
+import { pageSchema } from "./pages";
 
 export * from "./link";
 export * from "./blocks";
 export * from "./items";
 export * from "./sections";
 export * from "./posts";
+export * from "./pages";
 
 /**
  * The canonical schema surface — TECH_SPEC_V1.md §3.9 / §8.4.
@@ -31,6 +33,7 @@ export const contentRootSchema = z
     itemData: z.object(ITEM_SCHEMAS),
     postMetadata: postMetadataSchema,
     post: postSchema,
+    page: pageSchema,
   })
   .strict();
 

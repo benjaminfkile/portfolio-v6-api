@@ -29,6 +29,8 @@ import {
 
 export interface SectionRow {
   id: string;
+  /** Owning page (§3.10). Every section belongs to exactly one page. */
+  page_id: string;
   type: SectionType;
   position: number;
   is_hidden: boolean;
@@ -69,8 +71,30 @@ function ok<T>(data: T): ServiceResult<T> {
 
 const SECTIONS = "sections";
 const SECTION_ITEMS = "section_items";
+const PAGES = "pages";
 
 // ---- Helpers ----------------------------------------------------------------
+
+/**
+ * Resolve the id of the default `home` page, creating it if absent (§3.10).
+ *
+ * v1.1 makes `sections.page_id` a required foreign key, but the page-management
+ * routes (admin pages CRUD) arrive in a later task; until they do, every
+ * section belongs to the single implicit `home` page — the same page the
+ * migration backfill adopts a pre-existing working set into. Creating it lazily
+ * here keeps a fresh database (no backfill ran) writable. Accepts a `Knex` or a
+ * transaction so callers inside a publish/restore transaction stay atomic.
+ */
+export async function resolveDefaultPageId(
+  db: Knex | Knex.Transaction
+): Promise<string> {
+  const existing = await db(PAGES).where({ slug: "home" }).first();
+  if (existing) return (existing as { id: string }).id;
+  const [row] = await db(PAGES)
+    .insert({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 })
+    .returning("id");
+  return (row as { id: string }).id;
+}
 
 function isKnownSectionType(type: unknown): type is SectionType {
   return (
@@ -201,6 +225,9 @@ export async function createSection(
   }
 
   const db = getDb();
+  // Every section belongs to exactly one page (§3.10). Page-management routes
+  // arrive later; for now new sections join the implicit `home` page.
+  const pageId = await resolveDefaultPageId(db);
   const position = await nextPosition(db<SectionRow>(SECTIONS), db);
   const [row] = await db<SectionRow>(SECTIONS)
     .insert({
@@ -208,6 +235,7 @@ export async function createSection(
       position,
       is_hidden: input.is_hidden === true,
       data: validated.data as never,
+      page_id: pageId,
     })
     .returning("*");
   return ok(row);

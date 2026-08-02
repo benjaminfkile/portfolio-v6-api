@@ -50,6 +50,7 @@ import {
   PENDING_TAGGING,
   UPLOAD_URL_TTL_SECONDS,
 } from "../src/config/media";
+import { ensureHomePage } from "./helpers/pages";
 
 const mockVerify = verifyAdminIdToken as jest.Mock;
 const mockPresign = s3.generatePresignedUploadUrl as jest.Mock;
@@ -344,11 +345,13 @@ describe("POST /api/admin/media/sweep — reference scan (§6.9)", () => {
     const orphanId = await insertAsset({ s3_key: "media/orphan/f.webp", created_at: OLD });
 
     // 1. Working set: a section + an item, each referencing an asset.
+    const pageId = await ensureHomePage(getDb());
     const [section] = await getDb()("sections")
       .insert({
         type: "hero",
         position: 0,
         data: { title: "H", background_media_id: wsId },
+        page_id: pageId,
       })
       .returning(["id"]);
     await getDb()("section_items").insert({
@@ -430,6 +433,7 @@ describe("POST /api/admin/media/sweep — rescue & reap (§6.9)", () => {
       type: "hero",
       position: 0,
       data: { title: "H", background_media_id: rescuedId },
+      page_id: await ensureHomePage(getDb()),
     });
 
     const res = await request(app).post("/api/admin/media/sweep").set(...AUTH).send({});
