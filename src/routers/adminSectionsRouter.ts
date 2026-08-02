@@ -63,24 +63,35 @@ function requireExpectedUpdatedAt(req: Request, res: Response): string | null {
   return value;
 }
 
-/** Accept the reorder payload as either a bare array or `{ order: [...] }`. */
+/**
+ * Accept the reorder id list as a bare array, `{ ids: [...] }` (v1.1 sections
+ * order), or the legacy `{ order: [...] }` shape (still used by items order).
+ */
 function extractOrder(body: unknown): unknown {
   if (Array.isArray(body)) return body;
   if (body && typeof body === "object") {
-    return (body as { order?: unknown }).order;
+    const b = body as { order?: unknown; ids?: unknown };
+    return b.ids !== undefined ? b.ids : b.order;
   }
   return undefined;
 }
 
 // ---- Sections ---------------------------------------------------------------
 
-/** GET /api/admin/sections — full working set, drafts included, items nested. */
+/**
+ * GET /api/admin/sections — full working set, drafts included, items nested.
+ * Each section carries `page_id`; the optional `?page_id=` query narrows to a
+ * single page (§4.2 v1.1).
+ */
 adminSectionsRouter.get(
   "/sections",
   requireAdmin(),
-  async (_req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const sections = await getWorkingSet();
+      const pageId = req.query.page_id;
+      const sections = await getWorkingSet(
+        typeof pageId === "string" ? pageId : undefined
+      );
       res.status(200).json(success({ sections }));
     } catch (err) {
       next(err as Error);
@@ -88,14 +99,14 @@ adminSectionsRouter.get(
   }
 );
 
-/** POST /api/admin/sections — create a section. */
+/** POST /api/admin/sections — create a section (`page_id` required, §4.2 v1.1). */
 adminSectionsRouter.post(
   "/sections",
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { type, data, is_hidden } = req.body ?? {};
-      send(res, await createSection({ type, data, is_hidden }), 201);
+      const { type, data, is_hidden, page_id } = req.body ?? {};
+      send(res, await createSection({ type, data, is_hidden, page_id }), 201);
     } catch (err) {
       next(err as Error);
     }
@@ -103,23 +114,31 @@ adminSectionsRouter.post(
 );
 
 /**
- * PUT /api/admin/sections/order — full-array reorder (§4.2). Registered with a
- * literal path so it is never shadowed by `/sections/:id` (different method, but
- * kept explicit for clarity). Exempt from the precondition (§4.5).
+ * PUT /api/admin/sections/order — full-array reorder of ONE page's sections
+ * (§4.2 v1.1). Body carries `page_id` and that page's full ordered id array
+ * (`ids`). Registered with a literal path so it is never shadowed by
+ * `/sections/:id`. Exempt from the precondition (§4.5).
  */
 adminSectionsRouter.put(
   "/sections/order",
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      send(res, await reorderSections(extractOrder(req.body) as string[]));
+      const pageId = (req.body ?? {}).page_id;
+      send(
+        res,
+        await reorderSections(pageId, extractOrder(req.body) as string[])
+      );
     } catch (err) {
       next(err as Error);
     }
   }
 );
 
-/** PATCH /api/admin/sections/:id — update data / is_hidden (precondition). */
+/**
+ * PATCH /api/admin/sections/:id — update data / is_hidden, or MOVE the section
+ * to another page via `page_id` (§4.2 v1.1). Precondition required (§4.5).
+ */
 adminSectionsRouter.patch(
   "/sections/:id",
   requireAdmin(),
@@ -127,13 +146,14 @@ adminSectionsRouter.patch(
     try {
       const expected = requireExpectedUpdatedAt(req, res);
       if (expected === null) return;
-      const { data, is_hidden } = req.body ?? {};
+      const { data, is_hidden, page_id } = req.body ?? {};
       send(
         res,
         await updateSection(req.params.id, {
           expected_updated_at: expected,
           data,
           is_hidden,
+          page_id,
         })
       );
     } catch (err) {

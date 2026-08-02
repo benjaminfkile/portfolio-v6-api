@@ -4,6 +4,7 @@ import helmet from "helmet";
 import healthRouter from "./routers/healthRouter";
 import schemaRouter from "./routers/schemaRouter";
 import adminAuthRouter from "./routers/adminAuthRouter";
+import adminPagesRouter from "./routers/adminPagesRouter";
 import adminSectionsRouter from "./routers/adminSectionsRouter";
 import adminPublishRouter from "./routers/adminPublishRouter";
 import adminMediaRouter from "./routers/adminMediaRouter";
@@ -69,6 +70,9 @@ app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
 // route, requireAdminOrPreviewToken()), and requests one router does not match
 // fall through to the next. Later tasks (440–441) add their routers likewise.
 app.use("/api/admin", adminAuthRouter);
+// Pages CRUD + nav reorder (§4.2 v1.1, §3.10). Mounted before the sections
+// router; both live under /api/admin and non-matching requests fall through.
+app.use("/api/admin", adminPagesRouter);
 app.use("/api/admin", adminSectionsRouter);
 app.use("/api/admin", adminPublishRouter);
 // Media pipeline (§4.2, §6.7–§6.9): presigned uploads, confirm, library, delete,
