@@ -139,12 +139,31 @@ beforeEach(async () => {
   await getDb()("sections").del();
   await getDb()("page_versions").del();
   await getDb()("media_assets").del();
+  await getDb()("pages").del();
 });
 
 // ---- helpers ---------------------------------------------------------------
 
+/**
+ * v1.1 (§3.10) requires every section to belong to a page. Ensure the single
+ * implicit `home` page exists and return its id, so these publish-flow tests can
+ * keep creating sections without threading a page through every call.
+ */
+async function ensureHomePage(): Promise<string> {
+  const existing = await getDb()("pages").where({ slug: "home" }).first();
+  if (existing) return existing.id as string;
+  const [row] = await getDb()("pages")
+    .insert({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 })
+    .returning("id");
+  return row.id as string;
+}
+
 async function createSection(body: Record<string, unknown>) {
-  return request(app).post("/api/admin/sections").set(...AUTH).send(body);
+  const page_id = body.page_id ?? (await ensureHomePage());
+  return request(app)
+    .post("/api/admin/sections")
+    .set(...AUTH)
+    .send({ ...body, page_id });
 }
 
 async function createItem(sectionId: string, data: Record<string, unknown>) {

@@ -125,17 +125,36 @@ afterAll(async () => {
   stopCluster();
 }, 30000);
 
+let homePageId: string;
+
 beforeEach(async () => {
   mockVerify.mockReset();
   mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
   // Clean slate between tests — cascade clears section_items via the FK.
   await getDb()("section_items").del();
   await getDb()("sections").del();
+  await getDb()("pages").del();
+  // v1.1 (§3.10): every section belongs to a page. Seed one `home` page the
+  // helpers default to, so the section-focused assertions read unchanged.
+  homePageId = await createPage("home", "Home");
 });
 
-// Convenience creators returning the created row.
+/** Insert a page row directly and return its id (bypasses the pages router). */
+async function createPage(slug: string, title: string): Promise<string> {
+  const [row] = await getDb()("pages")
+    .insert({ slug, title, nav_label: title, nav_position: 0 })
+    .returning("id");
+  return row.id as string;
+}
+
+// Convenience creators returning the created row. Defaults to the seeded `home`
+// page unless the caller supplies a page_id (§4.2 v1.1: page_id is required).
 async function createSection(body: Record<string, unknown>) {
-  const res = await request(app).post("/api/admin/sections").set(...AUTH).send(body);
+  const page_id = body.page_id ?? homePageId;
+  const res = await request(app)
+    .post("/api/admin/sections")
+    .set(...AUTH)
+    .send({ ...body, page_id });
   return res;
 }
 
@@ -309,25 +328,25 @@ describe("reorder — full array, transactional, idempotent (§4.2 / §4.5)", ()
     const c = (await createSection({ type: "contact", data: {} })).body.data;
     expect([a.position, b.position, c.position]).toEqual([0, 1, 2]);
 
-    const order = [c.id, a.id, b.id];
+    const ids = [c.id, a.id, b.id];
     const first = await request(app)
       .put("/api/admin/sections/order")
       .set(...AUTH)
-      .send({ order });
+      .send({ page_id: homePageId, ids });
     expect(first.status).toBe(200);
-    expect(first.body.data.map((s: { id: string }) => s.id)).toEqual(order);
+    expect(first.body.data.map((s: { id: string }) => s.id)).toEqual(ids);
 
     // Idempotent — same array again yields the same order.
     const second = await request(app)
       .put("/api/admin/sections/order")
       .set(...AUTH)
-      .send({ order });
+      .send({ page_id: homePageId, ids });
     expect(second.status).toBe(200);
-    expect(second.body.data.map((s: { id: string }) => s.id)).toEqual(order);
+    expect(second.body.data.map((s: { id: string }) => s.id)).toEqual(ids);
 
     // The working set reflects positions 0,1,2 in the new order.
     const ws = await request(app).get("/api/admin/sections").set(...AUTH);
-    expect(ws.body.data.sections.map((s: { id: string }) => s.id)).toEqual(order);
+    expect(ws.body.data.sections.map((s: { id: string }) => s.id)).toEqual(ids);
     expect(ws.body.data.sections.map((s: { position: number }) => s.position)).toEqual([0, 1, 2]);
   });
 
@@ -339,7 +358,7 @@ describe("reorder — full array, transactional, idempotent (§4.2 / §4.5)", ()
     const res = await request(app)
       .put("/api/admin/sections/order")
       .set(...AUTH)
-      .send({ order: [b.id] });
+      .send({ page_id: homePageId, ids: [b.id] });
     expect(res.status).toBe(400);
 
     const ws = await request(app).get("/api/admin/sections").set(...AUTH);
@@ -466,5 +485,157 @@ describe("Zod validation on writes (§3.9)", () => {
       // `services` must be an array of strings.
       .send({ expected_updated_at: section.updated_at, data: { services: "gateway" } });
     expect(res.status).toBe(400);
+  });
+});
+
+// ---- v1.1 page scope (§3.10, §4.2 v1.1) -------------------------------------
+
+describe("page scope — create requires page_id (§4.2 v1.1)", () => {
+  it("400s a create with no page_id", async () => {
+    const res = await request(app)
+      .post("/api/admin/sections")
+      .set(...AUTH)
+      .send({ type: "hero", data: { title: "x" } });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ status: "error", error: true });
+  });
+
+  it("400s a create whose page_id references no page", async () => {
+    const ghost = "99999999-9999-9999-9999-999999999999";
+    const res = await request(app)
+      .post("/api/admin/sections")
+      .set(...AUTH)
+      .send({ type: "hero", data: { title: "x" }, page_id: ghost });
+    expect(res.status).toBe(400);
+  });
+
+  it("carries page_id on created sections and honours the ?page_id= filter", async () => {
+    const other = await createPage("projects", "Projects");
+    const home1 = (await createSection({ type: "hero", data: { title: "H" } })).body.data;
+    const home2 = (await createSection({ type: "about", data: { body: "b" } })).body.data;
+    const proj = (
+      await createSection({ type: "contact", data: {}, page_id: other })
+    ).body.data;
+
+    expect(home1.page_id).toBe(homePageId);
+    expect(proj.page_id).toBe(other);
+    // Positions are per-page: `projects` starts its own 0.
+    expect(proj.position).toBe(0);
+
+    const all = await request(app).get("/api/admin/sections").set(...AUTH);
+    expect(all.body.data.sections).toHaveLength(3);
+
+    const onlyHome = await request(app)
+      .get(`/api/admin/sections?page_id=${homePageId}`)
+      .set(...AUTH);
+    expect(onlyHome.body.data.sections.map((s: { id: string }) => s.id).sort()).toEqual(
+      [home1.id, home2.id].sort()
+    );
+
+    const onlyProj = await request(app)
+      .get(`/api/admin/sections?page_id=${other}`)
+      .set(...AUTH);
+    expect(onlyProj.body.data.sections.map((s: { id: string }) => s.id)).toEqual([proj.id]);
+  });
+});
+
+describe("page scope — move a section between pages (§4.2 v1.1)", () => {
+  it("appends at the target page's end and closes the gap in the source page", async () => {
+    const other = await createPage("projects", "Projects");
+    const a = (await createSection({ type: "hero", data: { title: "A" } })).body.data;
+    const b = (await createSection({ type: "about", data: { body: "B" } })).body.data;
+    const c = (await createSection({ type: "contact", data: {} })).body.data;
+    const t = (
+      await createSection({ type: "hero", data: { title: "T" }, page_id: other })
+    ).body.data;
+    expect([a.position, b.position, c.position]).toEqual([0, 1, 2]);
+
+    // Move the MIDDLE home section (b) to the projects page.
+    const moved = await request(app)
+      .patch(`/api/admin/sections/${b.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: b.updated_at, page_id: other });
+    expect(moved.status).toBe(200);
+    expect(moved.body.data.page_id).toBe(other);
+    // Appended after the existing projects section (position 0) → position 1.
+    expect(moved.body.data.position).toBe(1);
+
+    // Source page's gap is closed: a→0, c→1 (contiguous, order preserved).
+    const home = await request(app)
+      .get(`/api/admin/sections?page_id=${homePageId}`)
+      .set(...AUTH);
+    expect(home.body.data.sections.map((s: { id: string }) => s.id)).toEqual([a.id, c.id]);
+    expect(home.body.data.sections.map((s: { position: number }) => s.position)).toEqual([0, 1]);
+
+    // Target page now has both, ordered.
+    const proj = await request(app)
+      .get(`/api/admin/sections?page_id=${other}`)
+      .set(...AUTH);
+    expect(proj.body.data.sections.map((s: { id: string }) => s.id)).toEqual([t.id, b.id]);
+  });
+
+  it("400s a move to a nonexistent page and writes nothing", async () => {
+    const a = (await createSection({ type: "hero", data: { title: "A" } })).body.data;
+    const ghost = "99999999-9999-9999-9999-999999999999";
+    const res = await request(app)
+      .patch(`/api/admin/sections/${a.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: a.updated_at, page_id: ghost });
+    expect(res.status).toBe(400);
+
+    const ws = await request(app)
+      .get(`/api/admin/sections?page_id=${homePageId}`)
+      .set(...AUTH);
+    expect(ws.body.data.sections[0].page_id).toBe(homePageId);
+  });
+});
+
+describe("page scope — per-page reorder (§4.2 v1.1)", () => {
+  it("reorders only the named page's sections", async () => {
+    const other = await createPage("projects", "Projects");
+    const a = (await createSection({ type: "hero", data: { title: "A" } })).body.data;
+    const b = (await createSection({ type: "about", data: { body: "B" } })).body.data;
+    const p1 = (
+      await createSection({ type: "hero", data: { title: "P1" }, page_id: other })
+    ).body.data;
+    const p2 = (
+      await createSection({ type: "about", data: { body: "P2" }, page_id: other })
+    ).body.data;
+
+    const res = await request(app)
+      .put("/api/admin/sections/order")
+      .set(...AUTH)
+      .send({ page_id: other, ids: [p2.id, p1.id] });
+    expect(res.status).toBe(200);
+    // Response covers only the reordered page.
+    expect(res.body.data.map((s: { id: string }) => s.id)).toEqual([p2.id, p1.id]);
+
+    // The home page's order is untouched.
+    const home = await request(app)
+      .get(`/api/admin/sections?page_id=${homePageId}`)
+      .set(...AUTH);
+    expect(home.body.data.sections.map((s: { id: string }) => s.id)).toEqual([a.id, b.id]);
+  });
+
+  it("400s when the ids do not exactly cover that page's sections", async () => {
+    const other = await createPage("projects", "Projects");
+    const a = (await createSection({ type: "hero", data: { title: "A" } })).body.data;
+    const p1 = (
+      await createSection({ type: "hero", data: { title: "P1" }, page_id: other })
+    ).body.data;
+
+    // Passing a home-page id under the projects page → not that page's set.
+    const res = await request(app)
+      .put("/api/admin/sections/order")
+      .set(...AUTH)
+      .send({ page_id: other, ids: [p1.id, a.id] });
+    expect(res.status).toBe(400);
+
+    // 400 without a page_id at all.
+    const noPage = await request(app)
+      .put("/api/admin/sections/order")
+      .set(...AUTH)
+      .send({ ids: [p1.id] });
+    expect(noPage.status).toBe(400);
   });
 });

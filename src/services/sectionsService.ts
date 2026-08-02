@@ -78,11 +78,12 @@ const PAGES = "pages";
 /**
  * Resolve the id of the default `home` page, creating it if absent (§3.10).
  *
- * v1.1 makes `sections.page_id` a required foreign key, but the page-management
- * routes (admin pages CRUD) arrive in a later task; until they do, every
- * section belongs to the single implicit `home` page — the same page the
- * migration backfill adopts a pre-existing working set into. Creating it lazily
- * here keeps a fresh database (no backfill ran) writable. Accepts a `Knex` or a
+ * Admin section creates now carry an explicit `page_id` (§4.2 v1.1), so this is
+ * no longer on that path. It remains the fallback for the publish/restore
+ * pipeline, which must land the working set on the implicit `home` page — the
+ * same page the migration backfill adopts a pre-existing working set into — when
+ * a legacy (flat-sections) document is restored (§3.10 back-compat). Creating it
+ * lazily keeps a fresh database (no backfill ran) writable. Accepts a `Knex` or a
  * transaction so callers inside a publish/restore transaction stay atomic.
  */
 export async function resolveDefaultPageId(
@@ -94,6 +95,18 @@ export async function resolveDefaultPageId(
     .insert({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 })
     .returning("id");
   return (row as { id: string }).id;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A page_id arrives from the client as an opaque string. Validating its shape
+ * before it reaches a `uuid` column turns a bad value into a clean 400 rather
+ * than a Postgres "invalid input syntax for type uuid" 500.
+ */
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
 }
 
 function isKnownSectionType(type: unknown): type is SectionType {
@@ -174,18 +187,23 @@ async function nextPosition(
 // ---- Read: full working set (§4.2 GET /api/admin/sections) ------------------
 
 /**
- * The full working set: every section (drafts included) ordered by `position`,
- * each with its `section_items` nested and likewise ordered. `created_at` is a
- * stable tiebreaker so equal positions render deterministically.
+ * The full working set: every section (drafts included) ordered within its page
+ * by `position`, each with its `section_items` nested and likewise ordered.
+ * `created_at` is a stable tiebreaker so equal positions render deterministically.
+ *
+ * v1.1 (§3.10): sections belong to pages. Passing `pageId` narrows to a single
+ * page (the §4.2 `?page_id=` filter); without it the whole working set is
+ * returned, grouped by page so each page's sections stay contiguous and ordered.
  */
-export async function getWorkingSet(): Promise<SectionWithItems[]> {
+export async function getWorkingSet(pageId?: string): Promise<SectionWithItems[]> {
   const db = getDb();
-  const sections = await db<SectionRow>(SECTIONS)
-    .select("*")
-    .orderBy([
-      { column: "position", order: "asc" },
-      { column: "created_at", order: "asc" },
-    ]);
+  const query = db<SectionRow>(SECTIONS).select("*");
+  if (pageId !== undefined) query.where({ page_id: pageId });
+  const sections = await query.orderBy([
+    { column: "page_id", order: "asc" },
+    { column: "position", order: "asc" },
+    { column: "created_at", order: "asc" },
+  ]);
   const items = await db<SectionItemRow>(SECTION_ITEMS)
     .select("*")
     .orderBy([
@@ -209,6 +227,8 @@ export interface CreateSectionInput {
   type: unknown;
   data?: unknown;
   is_hidden?: unknown;
+  /** Owning page (§3.10, v1.1) — required. */
+  page_id?: unknown;
 }
 
 export async function createSection(
@@ -216,6 +236,11 @@ export async function createSection(
 ): Promise<ServiceResult<SectionRow>> {
   if (!isKnownSectionType(input.type)) {
     return fail("validation", `Unknown section type "${String(input.type)}"`);
+  }
+  // Every section belongs to exactly one page (§3.10, v1.1): page_id is required
+  // (400 without) and must reference an existing page (400 if it doesn't).
+  if (!isUuid(input.page_id)) {
+    return fail("bad_request", "page_id is required");
   }
   const validated = validateSectionData(input.type, input.data);
   if (!validated.ok) return validated;
@@ -225,10 +250,15 @@ export async function createSection(
   }
 
   const db = getDb();
-  // Every section belongs to exactly one page (§3.10). Page-management routes
-  // arrive later; for now new sections join the implicit `home` page.
-  const pageId = await resolveDefaultPageId(db);
-  const position = await nextPosition(db<SectionRow>(SECTIONS), db);
+  const pageId = input.page_id as string;
+  const page = await db(PAGES).where({ id: pageId }).first();
+  if (!page) return fail("bad_request", `page ${pageId} does not exist`);
+
+  // Position is per-page: append at the end of this page's order (§3.10).
+  const position = await nextPosition(
+    db<SectionRow>(SECTIONS).where({ page_id: pageId }),
+    db
+  );
   const [row] = await db<SectionRow>(SECTIONS)
     .insert({
       type: input.type,
@@ -247,6 +277,8 @@ export interface UpdateSectionInput {
   expected_updated_at: string;
   data?: unknown;
   is_hidden?: unknown;
+  /** Target page to MOVE this section to (§4.2 v1.1). */
+  page_id?: unknown;
 }
 
 export async function updateSection(
@@ -255,11 +287,18 @@ export async function updateSection(
 ): Promise<ServiceResult<SectionRow>> {
   const hasData = input.data !== undefined;
   const hasHidden = input.is_hidden !== undefined;
-  if (!hasData && !hasHidden) {
-    return fail("bad_request", "Provide at least one of data or is_hidden");
+  const hasPage = input.page_id !== undefined;
+  if (!hasData && !hasHidden && !hasPage) {
+    return fail(
+      "bad_request",
+      "Provide at least one of data, is_hidden, or page_id"
+    );
   }
   if (hasHidden && typeof input.is_hidden !== "boolean") {
     return fail("validation", "is_hidden must be a boolean");
+  }
+  if (hasPage && !isUuid(input.page_id)) {
+    return fail("validation", "page_id must be a page uuid");
   }
 
   const db = getDb();
@@ -288,12 +327,58 @@ export async function updateSection(
       patch.is_hidden = input.is_hidden as boolean;
     }
 
+    // Move to another page (§4.2 v1.1): append at the end of the target page's
+    // order, then close the gap left in the source page. A no-op self-move
+    // (page_id equals the current page) skips the repositioning entirely.
+    const targetPageId = input.page_id as string | undefined;
+    const isMove = hasPage && targetPageId !== row.page_id;
+    if (isMove) {
+      const target = await trx(PAGES).where({ id: targetPageId }).first();
+      if (!target) {
+        return fail<SectionRow>("bad_request", `page ${targetPageId} does not exist`);
+      }
+      patch.page_id = targetPageId;
+      patch.position = await nextPosition(
+        trx<SectionRow>(SECTIONS).where({ page_id: targetPageId }),
+        db
+      );
+    }
+
     const [updated] = await trx<SectionRow>(SECTIONS)
       .where({ id })
       .update(patch as never)
       .returning("*");
+
+    if (isMove) {
+      await resequencePage(trx, row.page_id);
+    }
     return ok(updated);
   });
+}
+
+/**
+ * Re-number a page's sections to a contiguous 0..n-1 `position` sequence,
+ * preserving their current order. Used after a section moves out of a page so
+ * the source page has no gap (§4.2 v1.1).
+ */
+async function resequencePage(
+  trx: Knex.Transaction,
+  pageId: string
+): Promise<void> {
+  const remaining = await trx<SectionRow>(SECTIONS)
+    .where({ page_id: pageId })
+    .orderBy([
+      { column: "position", order: "asc" },
+      { column: "created_at", order: "asc" },
+    ])
+    .forUpdate();
+  for (let i = 0; i < remaining.length; i++) {
+    if (remaining[i].position !== i) {
+      await trx<SectionRow>(SECTIONS)
+        .where({ id: remaining[i].id })
+        .update({ position: i });
+    }
+  }
 }
 
 // ---- Delete section (§4.2 DELETE — cascades to items via FK) ----------------
@@ -309,26 +394,36 @@ export async function deleteSection(id: string): Promise<ServiceResult<null>> {
 // ---- Reorder sections (§4.2 PUT /order — full array, txn, idempotent) -------
 
 /**
- * Full-array reorder (§4.2 / §4.5). The client sends the complete ordered id
- * array; each id's `position` is set to its index inside one transaction. The
- * array must be exactly the current set of section ids (same members, no
- * duplicates) so a stale array can't silently drop or duplicate a section.
- * Idempotent: applying the same order twice is a no-op. Exempt from the
- * `expected_updated_at` precondition (§4.5).
+ * Full-array reorder WITHIN a page (§4.2 v1.1 / §4.5). The client sends the
+ * page's id and the complete ordered id array of THAT page's sections; each id's
+ * `position` is set to its index inside one transaction. The array must be
+ * exactly the current set of the page's section ids (same members, no
+ * duplicates) so a stale array can't silently drop or duplicate a section, or
+ * reach across pages. Idempotent; exempt from the `expected_updated_at`
+ * precondition (§4.5).
  */
 export async function reorderSections(
+  pageId: unknown,
   order: string[]
 ): Promise<ServiceResult<SectionWithItems[]>> {
+  if (!isUuid(pageId)) {
+    return fail("bad_request", "page_id is required");
+  }
   const db = getDb();
   return db.transaction(async (trx) => {
-    const existing = await trx<SectionRow>(SECTIONS).select("id").forUpdate();
+    const existing = await trx<SectionRow>(SECTIONS)
+      .where({ page_id: pageId })
+      .select("id")
+      .forUpdate();
     const check = validateReorderArray(order, existing.map((r) => r.id));
     if (check) return fail<SectionWithItems[]>(check.code, check.message);
 
     for (let i = 0; i < order.length; i++) {
-      await trx<SectionRow>(SECTIONS).where({ id: order[i] }).update({ position: i });
+      await trx<SectionRow>(SECTIONS)
+        .where({ id: order[i], page_id: pageId })
+        .update({ position: i });
     }
-    return ok(await getWorkingSetTrx(trx));
+    return ok(await getWorkingSetTrx(trx, pageId as string));
   });
 }
 
@@ -506,13 +601,17 @@ function validateReorderArray(
   return null;
 }
 
-async function getWorkingSetTrx(trx: Knex.Transaction): Promise<SectionWithItems[]> {
-  const sections = await trx<SectionRow>(SECTIONS)
-    .select("*")
-    .orderBy([
-      { column: "position", order: "asc" },
-      { column: "created_at", order: "asc" },
-    ]);
+async function getWorkingSetTrx(
+  trx: Knex.Transaction,
+  pageId?: string
+): Promise<SectionWithItems[]> {
+  const query = trx<SectionRow>(SECTIONS).select("*");
+  if (pageId !== undefined) query.where({ page_id: pageId });
+  const sections = await query.orderBy([
+    { column: "page_id", order: "asc" },
+    { column: "position", order: "asc" },
+    { column: "created_at", order: "asc" },
+  ]);
   const items = await trx<SectionItemRow>(SECTION_ITEMS)
     .select("*")
     .orderBy([
