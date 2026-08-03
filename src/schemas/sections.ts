@@ -20,6 +20,7 @@ export const SECTION_TYPES = [
   "blog",
   "now_playing",
   "duolingo",
+  "github",
   "contact",
 ] as const;
 
@@ -111,6 +112,20 @@ export const duolingoData = z
   })
   .strict();
 
+/**
+ * §3.5 (v1.2 live section) — the GitHub contribution-graph card. Config only;
+ * the live data (the contribution calendar) is fetched at runtime from
+ * `GET /api/github`. `weeks` is how many trailing weeks of the calendar the
+ * component renders (1..53; a GitHub year is ~53 weeks), defaulting to a full
+ * year (52). An optional `heading` labels the section.
+ */
+export const githubData = z
+  .object({
+    heading: z.string().optional(),
+    weeks: z.number().int().min(1).max(53).default(52),
+  })
+  .strict();
+
 /** Section-type → `data` schema. Every registry type (§3.4) is covered. */
 export const SECTION_DATA_SCHEMAS = {
   hero: heroData,
@@ -122,6 +137,7 @@ export const SECTION_DATA_SCHEMAS = {
   blog: blogData,
   now_playing: nowPlayingData,
   duolingo: duolingoData,
+  github: githubData,
   contact: contactData,
 } satisfies Record<SectionType, z.ZodTypeAny>;
 
@@ -143,6 +159,7 @@ export const DRAFT_SECTION_DATA_SCHEMAS: Record<SectionType, z.ZodTypeAny> = {
   blog: blogData.partial(),
   now_playing: nowPlayingData.partial(),
   duolingo: duolingoData.partial(),
+  github: githubData.partial(),
   contact: contactData.partial(),
 };
 
@@ -152,4 +169,5 @@ export type StatusData = z.infer<typeof statusData>;
 export type BlogData = z.infer<typeof blogData>;
 export type NowPlayingData = z.infer<typeof nowPlayingData>;
 export type DuolingoData = z.infer<typeof duolingoData>;
+export type GithubData = z.infer<typeof githubData>;
 export type ContactData = z.infer<typeof contactData>;

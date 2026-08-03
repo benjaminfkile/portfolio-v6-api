@@ -316,6 +316,26 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
       score_label: "XP",
     });
   });
+
+  it("publishes a github live section (v1.2 §3.4/§3.5)", async () => {
+    await createSection({ type: "hero", data: { title: "Home" } });
+    await createSection({
+      type: "github",
+      data: { heading: "Contributions", weeks: 52 },
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      type: string;
+      data: Record<string, unknown>;
+    }>;
+    const gh = sections.find((s) => s.type === "github");
+    expect(gh).toBeDefined();
+    expect(gh!.data).toMatchObject({ heading: "Contributions", weeks: 52 });
+  });
 });
 
 // ---- validation refusal (§3.9) ---------------------------------------------

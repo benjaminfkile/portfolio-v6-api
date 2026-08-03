@@ -15,6 +15,7 @@ import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
 import nowPlayingRouter from "./routers/nowPlayingRouter";
 import duolingoRouter from "./routers/duolingoRouter";
+import githubRouter from "./routers/githubRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -64,6 +65,12 @@ app.use("/api/now-playing", nowPlayingRouter);
 // upstream failure yields { available: false }, a 200, never a 5xx. The stored
 // username never appears in a response.
 app.use("/api/duolingo", duolingoRouter);
+// GitHub contribution-graph proxy (§3.5, v1.2). Same live-section contract: a
+// ~1h in-memory cache and DEGRADE rather than error — no configured PAT or any
+// upstream failure yields { available: false }, a 200, never a 5xx. The stored
+// PAT is sent only in the upstream Authorization header and never appears in a
+// response or log.
+app.use("/api/github", githubRouter);
 // Admin responses are live editing state and must never be cached or
 // revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
 app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
