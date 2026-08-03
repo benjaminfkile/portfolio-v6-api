@@ -21,6 +21,7 @@ export const SECTION_TYPES = [
   "now_playing",
   "duolingo",
   "github",
+  "ops",
   "contact",
 ] as const;
 
@@ -126,6 +127,22 @@ export const githubData = z
   })
   .strict();
 
+/**
+ * §3.5 (v1.3 live section) — the ops / CloudWatch metrics card. Config only; the
+ * live data (the curated dashboard widgets) is fetched at runtime from
+ * `GET /api/ops`. `window_hours` is how many trailing hours of metrics the
+ * endpoint queries (1..24; period is a fixed 5-minute grain), defaulting to 3.
+ * An optional `heading` labels the section. NO infra identifiers (dashboard
+ * name, resource names, ARNs) live in this config — the dashboard name is a
+ * deployed secret, resolved server-side (§4.7-style) and never in content.
+ */
+export const opsData = z
+  .object({
+    heading: z.string().optional(),
+    window_hours: z.number().int().min(1).max(24).default(3),
+  })
+  .strict();
+
 /** Section-type → `data` schema. Every registry type (§3.4) is covered. */
 export const SECTION_DATA_SCHEMAS = {
   hero: heroData,
@@ -138,6 +155,7 @@ export const SECTION_DATA_SCHEMAS = {
   now_playing: nowPlayingData,
   duolingo: duolingoData,
   github: githubData,
+  ops: opsData,
   contact: contactData,
 } satisfies Record<SectionType, z.ZodTypeAny>;
 
@@ -160,6 +178,7 @@ export const DRAFT_SECTION_DATA_SCHEMAS: Record<SectionType, z.ZodTypeAny> = {
   now_playing: nowPlayingData.partial(),
   duolingo: duolingoData.partial(),
   github: githubData.partial(),
+  ops: opsData.partial(),
   contact: contactData.partial(),
 };
 
@@ -170,4 +189,5 @@ export type BlogData = z.infer<typeof blogData>;
 export type NowPlayingData = z.infer<typeof nowPlayingData>;
 export type DuolingoData = z.infer<typeof duolingoData>;
 export type GithubData = z.infer<typeof githubData>;
+export type OpsData = z.infer<typeof opsData>;
 export type ContactData = z.infer<typeof contactData>;

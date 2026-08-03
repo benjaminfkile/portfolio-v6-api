@@ -34,6 +34,8 @@ function loadLocalConfig(): LoadedConfig {
     token_encryption_key: process.env.TOKEN_ENCRYPTION_KEY || undefined,
     gateway_health_url:
       process.env.GATEWAY_HEALTH_URL || "http://localhost:3000/api/health",
+    cloudwatch_dashboard_name:
+      process.env.CLOUDWATCH_DASHBOARD_NAME || undefined,
   };
 
   const dbSecrets: IDBSecrets = {

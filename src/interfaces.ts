@@ -35,6 +35,14 @@ export interface IAppSecrets {
    */
   token_encryption_key?: string;
   gateway_health_url?: string;
+  /**
+   * Name of the CloudWatch dashboard the `ops` live section (§3.5, v1.3) reads
+   * through `GET /api/ops`. This is an infra identifier and MUST NOT appear in
+   * repo content, code, tests, or logs — it lives only in the stored secret
+   * (deployed) or `CLOUDWATCH_DASHBOARD_NAME` (local). Optional: when unset or
+   * empty, `/api/ops` serves `{ available: false }` and makes no AWS call.
+   */
+  cloudwatch_dashboard_name?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----
