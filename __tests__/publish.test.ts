@@ -336,6 +336,26 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     expect(gh).toBeDefined();
     expect(gh!.data).toMatchObject({ heading: "Contributions", weeks: 52 });
   });
+
+  it("publishes an ops live section (v1.3 §3.4/§3.5)", async () => {
+    await createSection({ type: "hero", data: { title: "Home" } });
+    await createSection({
+      type: "ops",
+      data: { heading: "System health", window_hours: 6 },
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      type: string;
+      data: Record<string, unknown>;
+    }>;
+    const ops = sections.find((s) => s.type === "ops");
+    expect(ops).toBeDefined();
+    expect(ops!.data).toMatchObject({ heading: "System health", window_hours: 6 });
+  });
 });
 
 // ---- validation refusal (§3.9) ---------------------------------------------

@@ -16,6 +16,7 @@ import statusRouter from "./routers/statusRouter";
 import nowPlayingRouter from "./routers/nowPlayingRouter";
 import duolingoRouter from "./routers/duolingoRouter";
 import githubRouter from "./routers/githubRouter";
+import opsRouter from "./routers/opsRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -71,6 +72,13 @@ app.use("/api/duolingo", duolingoRouter);
 // PAT is sent only in the upstream Authorization header and never appears in a
 // response or log.
 app.use("/api/github", githubRouter);
+// Ops / CloudWatch metrics proxy (§3.5, v1.3). Same live-section contract: a
+// ~5-minute in-memory cache and DEGRADE rather than error — no configured
+// dashboard name, any CloudWatch failure, or an unrenderable dashboard yields
+// { available: false }, a 200, never a 5xx. The dashboard name is an infra
+// identifier resolved server-side and never appears in a response or log; the
+// curated payload is allowlist-shaped so no ARN/instance-id/account-id leaks.
+app.use("/api/ops", opsRouter);
 // Admin responses are live editing state and must never be cached or
 // revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
 app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
