@@ -292,6 +292,30 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     expect(content.body.pages[0].sections).toHaveLength(1);
     expect(content.body.pages[0].sections[0].id).toBe(visible.id);
   });
+
+  it("publishes a duolingo live section (v1.2 §3.4/§3.5)", async () => {
+    await createSection({ type: "hero", data: { title: "Home" } });
+    await createSection({
+      type: "duolingo",
+      data: { heading: "Learning", language: "es", score_label: "XP" },
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      type: string;
+      data: Record<string, unknown>;
+    }>;
+    const duo = sections.find((s) => s.type === "duolingo");
+    expect(duo).toBeDefined();
+    expect(duo!.data).toMatchObject({
+      heading: "Learning",
+      language: "es",
+      score_label: "XP",
+    });
+  });
 });
 
 // ---- validation refusal (§3.9) ---------------------------------------------
