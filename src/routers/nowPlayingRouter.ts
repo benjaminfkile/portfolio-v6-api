@@ -6,6 +6,7 @@ import {
   SpotifyConfig,
 } from "../services/spotifyService";
 import { getStoredSpotifyToken } from "../services/spotifyTokenStore";
+import { resolveEncryptionKey } from "../services/serviceTokenStore";
 
 /**
  * Public now-playing router — TECH_SPEC_V1.md §4.6 (`/api/now-playing`) / #442.
@@ -30,7 +31,9 @@ const NOT_PLAYING: NowPlaying = { playing: false };
 async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
   const secrets = req.app.get("secrets") as IAppSecrets | undefined;
   const clientSecret = secrets?.spotify_client_secret ?? "";
-  const stored = await getStoredSpotifyToken(clientSecret);
+  // The stored token is encrypted with the resolved key (§4.7): the dedicated
+  // `token_encryption_key` when set, else the client secret (back-compat).
+  const stored = await getStoredSpotifyToken(resolveEncryptionKey(secrets));
   return {
     clientId: secrets?.spotify_client_id ?? "",
     clientSecret,
