@@ -19,6 +19,7 @@ export const SECTION_TYPES = [
   "status",
   "blog",
   "now_playing",
+  "duolingo",
   "contact",
 ] as const;
 
@@ -94,6 +95,22 @@ export const nowPlayingData = z
   })
   .strict();
 
+/**
+ * §3.5 (v1.2 live section) — the Duolingo streak/course card. Config only; the
+ * live data is fetched at runtime from `GET /api/duolingo`. `language` is a
+ * lowercase Duolingo course code (its `learningLanguage`, e.g. `es`, `fr`,
+ * `zs`); the runtime picks the matching course out of the account's courses.
+ */
+export const LANGUAGE_CODE_REGEX = /^[a-z-]{2,8}$/;
+
+export const duolingoData = z
+  .object({
+    heading: z.string().optional(),
+    language: z.string().regex(LANGUAGE_CODE_REGEX).default("es"),
+    score_label: z.string().optional(),
+  })
+  .strict();
+
 /** Section-type → `data` schema. Every registry type (§3.4) is covered. */
 export const SECTION_DATA_SCHEMAS = {
   hero: heroData,
@@ -104,6 +121,7 @@ export const SECTION_DATA_SCHEMAS = {
   status: statusData,
   blog: blogData,
   now_playing: nowPlayingData,
+  duolingo: duolingoData,
   contact: contactData,
 } satisfies Record<SectionType, z.ZodTypeAny>;
 
@@ -124,6 +142,7 @@ export const DRAFT_SECTION_DATA_SCHEMAS: Record<SectionType, z.ZodTypeAny> = {
   status: statusData.partial(),
   blog: blogData.partial(),
   now_playing: nowPlayingData.partial(),
+  duolingo: duolingoData.partial(),
   contact: contactData.partial(),
 };
 
@@ -132,4 +151,5 @@ export type AboutData = z.infer<typeof aboutData>;
 export type StatusData = z.infer<typeof statusData>;
 export type BlogData = z.infer<typeof blogData>;
 export type NowPlayingData = z.infer<typeof nowPlayingData>;
+export type DuolingoData = z.infer<typeof duolingoData>;
 export type ContactData = z.infer<typeof contactData>;

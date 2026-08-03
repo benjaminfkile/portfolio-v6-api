@@ -14,6 +14,7 @@ import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
 import nowPlayingRouter from "./routers/nowPlayingRouter";
+import duolingoRouter from "./routers/duolingoRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -58,6 +59,11 @@ app.use("/api/posts", postsRouter);
 // 200, never a 5xx. No Spotify token ever appears in a response (§4.6).
 app.use("/api/status", statusRouter);
 app.use("/api/now-playing", nowPlayingRouter);
+// Duolingo streak/course proxy (§3.5, v1.2). Same live-section contract: a ~1h
+// in-memory cache and DEGRADE rather than error — no configured username or any
+// upstream failure yields { available: false }, a 200, never a 5xx. The stored
+// username never appears in a response.
+app.use("/api/duolingo", duolingoRouter);
 // Admin responses are live editing state and must never be cached or
 // revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
 app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
