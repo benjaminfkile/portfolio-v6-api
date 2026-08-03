@@ -25,6 +25,15 @@ export interface IAppSecrets {
    * to the loopback callback (see spotifyOAuthService.resolveRedirectUri).
    */
   spotify_redirect_uri?: string;
+  /**
+   * Dedicated key for the service-token encryption at rest (§4.7,
+   * serviceTokenStore). Optional: when unset the store derives its key from
+   * `spotify_client_secret` for back-compat, so existing Spotify ciphertext stays
+   * decryptable until this dedicated key is introduced. Introducing or rotating
+   * it re-derives the key; any prior ciphertext then reads as "not connected"
+   * (the §4.7 degrade rule) and the fix is re-entering / reconnecting.
+   */
+  token_encryption_key?: string;
   gateway_health_url?: string;
 }
 
