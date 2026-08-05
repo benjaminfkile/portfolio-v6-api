@@ -164,15 +164,20 @@ export function deriveUnit(
 }
 
 /** The title heuristic of `deriveUnit` (b): `Utilization`/`(%)` → `%`, else a
- * trailing parenthesized suffix verbatim (`X (MB/s)` → `MB/s`), else null. */
+ * trailing parenthesized suffix — but ONLY when it actually reads as a unit
+ * (`(MB/s)`, `(req/s)`, `(ms)`). Titles routinely carry non-unit parentheticals
+ * (`CPU Credits (ASG)`), so a plain word is rejected: a suffix qualifies iff it
+ * is `%`, contains a `/` (a rate), or is a known short unit token. */
+const UNIT_TOKEN = /^(ms|s|sec|min|B|KB|MB|GB|TB|KiB|MiB|GiB)$/i;
+
 function titleUnit(title: string): string | null {
   if (/utilization/i.test(title)) return "%";
   const m = title.match(/\(([^()]+)\)\s*$/);
   if (!m) return null;
   const inner = m[1].trim();
-  if (inner === "") return null;
   if (inner === "%") return "%";
-  return inner;
+  if (inner.includes("/") || UNIT_TOKEN.test(inner)) return inner;
+  return null;
 }
 
 /** Read an optional standard unit off a metric-data result (GetMetricData does

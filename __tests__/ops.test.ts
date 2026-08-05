@@ -584,6 +584,9 @@ describe("deriveUnit (§3.5, DEFECT 2 — pure unit derivation)", () => {
     expect(deriveUnit(null, "RDS - Memory Used (%)", null)).toBe("%");
     expect(deriveUnit(null, "Disk Throughput (MB/s)", null)).toBe("MB/s");
     expect(deriveUnit(null, "Requests (req/s)", null)).toBe("req/s"); // verbatim
+    expect(deriveUnit(null, "Latency (ms)", null)).toBe("ms");
+    // A non-unit parenthetical is NOT a unit — "CPU Credits (ASG)" ≠ "0 ASG".
+    expect(deriveUnit(null, "EC2 - CPU Credits (ASG)", null)).toBeNull();
     expect(deriveUnit(null, "Just a title", null)).toBeNull();
   });
 
