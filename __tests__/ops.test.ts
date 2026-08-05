@@ -36,6 +36,7 @@ import { IAppSecrets } from "../src/interfaces";
 import {
   getOps,
   parseWindowHours,
+  deriveUnit,
   _resetOpsForTests,
   OPS_CACHE_TTL_MS,
   DEFAULT_WINDOW_HOURS,
@@ -55,6 +56,8 @@ const FAKE_INSTANCE_ID = "i-0abcdef1234567890";
 const FAKE_ARN = "arn:aws:ecs:us-east-1:000000000000:service/fake-svc";
 const FAKE_ACCOUNT_ID = "000000000000";
 const FAKE_TARGET_GROUP = "app/fake-alb/0123456789abcdef";
+const FAKE_DB_ID = "fake-db-instance-DO-NOT-LEAK";
+const FAKE_VOL_ID = "vol-0fedcba9876543210";
 
 /**
  * A realistic-but-FAKE CloudWatch dashboard body. Three metric widgets:
@@ -287,7 +290,9 @@ describe("getOps (§3.5 curated shape)", () => {
     const result = await getOps(DASHBOARD_NAME, 3);
     if (!result.available) throw new Error("expected available");
     expect(result.widgets[0].kind).toBe("gauge");
-    expect(result.widgets[0].unit).toBeNull(); // no mappable unit
+    // DEFECT 2: the title heuristic maps a "(%)" suffix to "%" even with no
+    // unit prop and no yAxis label.
+    expect(result.widgets[0].unit).toBe("%");
     expect(result.widgets[0].latest).toBe(88);
   });
 });
@@ -345,6 +350,254 @@ describe("getOps sanitization — ALLOWLIST leak test (§3.5)", () => {
     for (const s of result.widgets[0].series) {
       expect(s.label).toBeNull();
     }
+  });
+});
+
+/**
+ * A FAKE dashboard exercising DEFECT 1 (math expressions). Two expression
+ * widgets, each: two HIDDEN source metrics (visible:false, carrying fake infra
+ * dimensions) + one expression row that GetMetricData executes server-side.
+ *   A) "RDS - Memory Used (%)" — expression yields a percent → gauge, unit "%".
+ *   B) "Disk Throughput (MB/s)" — expression yields a rate → unit "MB/s".
+ */
+const EXPR_MEMORY_STRING = "((m2-m1)/m2)*100";
+const EXPR_THROUGHPUT_STRING = "(r1+r2)/1048576/300";
+
+function expressionDashboardBody(): string {
+  return JSON.stringify({
+    widgets: [
+      {
+        type: "metric",
+        properties: {
+          title: "RDS - Memory Used (%)",
+          view: "gauge",
+          metrics: [
+            [
+              "AWS/RDS",
+              "FreeableMemory",
+              "DBInstanceIdentifier",
+              FAKE_DB_ID,
+              { id: "m1", visible: false },
+            ],
+            [
+              "AWS/RDS",
+              "TotalMemory",
+              "DBInstanceIdentifier",
+              FAKE_DB_ID,
+              { id: "m2", visible: false },
+            ],
+            [{ expression: EXPR_MEMORY_STRING, label: "Memory %", id: "e1" }],
+          ],
+        },
+      },
+      {
+        type: "metric",
+        properties: {
+          title: "Disk Throughput (MB/s)",
+          metrics: [
+            ["AWS/EBS", "ReadBytes", "VolumeId", FAKE_VOL_ID, { id: "r1", visible: false }],
+            ["AWS/EBS", "WriteBytes", "VolumeId", FAKE_VOL_ID, { id: "r2", visible: false }],
+            [{ expression: EXPR_THROUGHPUT_STRING, label: "Throughput", id: "x1" }],
+          ],
+        },
+      },
+    ],
+  });
+}
+
+/**
+ * Stand in for CloudWatch executing the expressions: return a result for each
+ * ReturnData=true query (the expression rows) keyed by its generated Id, with
+ * fabricated values (percent 0–100 for the memory expression, an MB/s rate for
+ * throughput). Hidden (ReturnData=false) source metrics return nothing, exactly
+ * as GetMetricData behaves.
+ */
+function metricDataFromQueries(input: Record<string, any>) {
+  const ts = [
+    new Date("2026-08-03T10:00:00Z"),
+    new Date("2026-08-03T10:05:00Z"),
+  ];
+  const results = (input.MetricDataQueries as any[])
+    .filter((q) => q.ReturnData === true)
+    .map((q) => ({
+      Id: q.Id,
+      Timestamps: ts,
+      // The memory expression id resolves to a percent; the other to a rate.
+      Values: String(q.Id).includes("e1") ? [55.0, 61.5] : [12.5, 18.0],
+    }));
+  return { MetricDataResults: results };
+}
+
+function wireExpressionPath() {
+  mockSend.mockImplementation((command: unknown) => {
+    if (command instanceof MockGetDashboardCommand) {
+      return Promise.resolve({ DashboardBody: expressionDashboardBody() });
+    }
+    if (command instanceof MockGetMetricDataCommand) {
+      const input = (command as MockGetMetricDataCommand).input as Record<
+        string,
+        any
+      >;
+      return Promise.resolve(metricDataFromQueries(input));
+    }
+    return Promise.reject(new Error("unexpected command"));
+  });
+}
+
+describe("getOps math expressions (§3.5, DEFECT 1)", () => {
+  it("renders the percent EXPRESSION as a gauge with a 0–100 latest", async () => {
+    wireExpressionPath();
+    const result = await getOps(DASHBOARD_NAME, 3);
+    if (!result.available) throw new Error("expected available");
+
+    const memory = result.widgets[0];
+    expect(memory.title).toBe("RDS - Memory Used (%)");
+    expect(memory.kind).toBe("gauge"); // single expression series, percent unit
+    expect(memory.unit).toBe("%");
+    expect(memory.series).toHaveLength(1); // ONLY the expression renders
+    expect(memory.series[0].label).toBe("Memory %"); // clean user label
+    expect(memory.latest).toBe(61.5);
+    expect(memory.latest).toBeGreaterThanOrEqual(0);
+    expect(memory.latest).toBeLessThanOrEqual(100);
+    expect(memory.series[0].points).toEqual([
+      { t: "2026-08-03T10:00:00.000Z", v: 55.0 },
+      { t: "2026-08-03T10:05:00.000Z", v: 61.5 },
+    ]);
+  });
+
+  it("derives unit 'MB/s' for a '(MB/s)' expression widget", async () => {
+    wireExpressionPath();
+    const result = await getOps(DASHBOARD_NAME, 3);
+    if (!result.available) throw new Error("expected available");
+
+    const throughput = result.widgets[1];
+    expect(throughput.title).toBe("Disk Throughput (MB/s)");
+    expect(throughput.unit).toBe("MB/s");
+    expect(throughput.series).toHaveLength(1);
+    expect(throughput.series[0].label).toBe("Throughput");
+    expect(throughput.latest).toBe(18.0);
+  });
+
+  it("leaks NONE of the expression strings, hidden-metric query ids, or dimensions", async () => {
+    wireExpressionPath();
+    const result = await getOps(DASHBOARD_NAME, 3);
+    const serialized = JSON.stringify(result);
+    for (const secret of [
+      EXPR_MEMORY_STRING,
+      EXPR_THROUGHPUT_STRING,
+      FAKE_DB_ID,
+      FAKE_VOL_ID,
+      // per-widget prefixed query ids for the hidden source metrics.
+      "w0_m1",
+      "w0_m2",
+      "w1_r1",
+      "w1_r2",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it("batches BOTH hidden metrics and expressions into ONE GetMetricData call", async () => {
+    wireExpressionPath();
+    await getOps(DASHBOARD_NAME, 3);
+
+    const metricCalls = mockSend.mock.calls.filter(
+      ([c]) => c instanceof MockGetMetricDataCommand
+    );
+    expect(metricCalls).toHaveLength(1); // one batched call for both widgets
+
+    const input = (metricCalls[0][0] as MockGetMetricDataCommand).input as Record<
+      string,
+      any
+    >;
+    const queries = input.MetricDataQueries as any[];
+    // 2 hidden source metrics + 1 expression, per widget × 2 widgets = 6.
+    expect(queries).toHaveLength(6);
+
+    const metricStatQueries = queries.filter((q) => q.MetricStat);
+    const expressionQueries = queries.filter((q) => q.Expression);
+    expect(metricStatQueries).toHaveLength(4);
+    expect(expressionQueries).toHaveLength(2);
+
+    // Source metrics feed the expression only → ReturnData:false.
+    for (const q of metricStatQueries) {
+      expect(q.ReturnData).toBe(false);
+      expect(q.MetricStat.Period).toBe(METRIC_PERIOD_SECONDS);
+    }
+    // Expressions are the rendered series → ReturnData:true, ids rewritten to the
+    // collision-free per-widget global ids so they resolve.
+    for (const q of expressionQueries) {
+      expect(q.ReturnData).toBe(true);
+      expect(typeof q.Expression).toBe("string");
+    }
+    const memoryExpr = expressionQueries.find((q) => q.Id === "w0_e1");
+    expect(memoryExpr.Expression).toBe("((w0_m2-w0_m1)/w0_m2)*100");
+    const throughputExpr = expressionQueries.find((q) => q.Id === "w1_x1");
+    expect(throughputExpr.Expression).toBe("(w1_r1+w1_r2)/1048576/300");
+  });
+
+  it("scrubs an expression label that is a resource identifier", async () => {
+    mockSend.mockImplementation((command: unknown) => {
+      if (command instanceof MockGetDashboardCommand) {
+        return Promise.resolve({
+          DashboardBody: JSON.stringify({
+            widgets: [
+              {
+                type: "metric",
+                properties: {
+                  title: "Derived",
+                  metrics: [
+                    ["AWS/X", "A", { id: "m1", visible: false }],
+                    ["AWS/X", "B", { id: "m2", visible: false }],
+                    [{ expression: "m1+m2", label: FAKE_ARN, id: "e1" }],
+                  ],
+                },
+              },
+            ],
+          }),
+        });
+      }
+      const input = (command as MockGetMetricDataCommand).input as Record<
+        string,
+        any
+      >;
+      return Promise.resolve(metricDataFromQueries(input));
+    });
+
+    const result = await getOps(DASHBOARD_NAME, 3);
+    if (!result.available) throw new Error("expected available");
+    expect(result.widgets[0].series[0].label).toBeNull(); // ARN label scrubbed
+    expect(JSON.stringify(result)).not.toContain(FAKE_ARN);
+  });
+});
+
+describe("deriveUnit (§3.5, DEFECT 2 — pure unit derivation)", () => {
+  it("(a) maps an explicit unit / yAxis label", () => {
+    expect(deriveUnit("Percent", "", null)).toBe("%");
+    expect(deriveUnit("Bytes/Second", "", null)).toBe("MB/s");
+    expect(deriveUnit("Megabytes/Second", "", null)).toBe("MB/s");
+    expect(deriveUnit("MB/s", "", null)).toBe("MB/s"); // already a display unit
+  });
+
+  it("(b) falls back to a title heuristic", () => {
+    expect(deriveUnit(null, "CPU Utilization", null)).toBe("%");
+    expect(deriveUnit(null, "RDS - Memory Used (%)", null)).toBe("%");
+    expect(deriveUnit(null, "Disk Throughput (MB/s)", null)).toBe("MB/s");
+    expect(deriveUnit(null, "Requests (req/s)", null)).toBe("req/s"); // verbatim
+    expect(deriveUnit(null, "Just a title", null)).toBeNull();
+  });
+
+  it("(c) falls back to the metric's standard unit", () => {
+    expect(deriveUnit(null, "Plain", "Percent")).toBe("%");
+    expect(deriveUnit(null, "Plain", "Bytes")).toBe("B");
+    expect(deriveUnit(null, "Plain", "Count")).toBeNull(); // a bare count → null
+    expect(deriveUnit(null, "Plain", null)).toBeNull();
+  });
+
+  it("honours priority: props > title > standard unit", () => {
+    expect(deriveUnit("Percent", "X (MB/s)", "Bytes")).toBe("%");
+    // an unmappable prop label falls through to the title heuristic.
+    expect(deriveUnit("Requests", "X (MB/s)", "Bytes")).toBe("MB/s");
   });
 });
 
