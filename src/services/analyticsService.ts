@@ -286,3 +286,160 @@ export function _resetAnalyticsStateForTests(): void {
   lastPrune = 0;
   lastRetentionDay = "";
 }
+
+// ---- aggregates (read half, §4.8) -------------------------------------------
+
+/**
+ * The admin analytics summary shape (§4.8). Every count is a plain number; the
+ * raw pg `bigint`/`count` strings are coerced here so the router just wraps this
+ * in the §4.3 envelope.
+ */
+export interface AnalyticsSummary {
+  days: number;
+  totals: { pageviews: number; visitors: number; engaged: number };
+  daily: { date: string; pageviews: number; visitors: number }[];
+  top_pages: { path: string; views: number }[];
+  top_referrers: { origin: string; count: number }[];
+  events: { event: string; count: number }[];
+  top_outbound: { href: string; count: number }[];
+}
+
+/** Allowed lookback windows (§4.8). Anything else falls back to 30. */
+const ALLOWED_DAYS = new Set([7, 30, 90]);
+const DEFAULT_DAYS = 30;
+
+/**
+ * Parse the `?days=` query param (§4.8): only 7 | 30 | 90 are honored; every
+ * other value — missing, non-numeric, out of the set — degrades to 30 rather
+ * than erroring.
+ */
+export function parseDays(raw: unknown): number {
+  const value =
+    typeof raw === "string" || typeof raw === "number" ? Number(raw) : NaN;
+  return ALLOWED_DAYS.has(value) ? value : DEFAULT_DAYS;
+}
+
+/** COUNT()/bigint columns arrive from pg as strings — coerce to a number. */
+function toNum(value: unknown): number {
+  return typeof value === "number" ? value : Number(value ?? 0);
+}
+
+/**
+ * Compute the curated admin analytics summary over `occurred_at >= now() - days`
+ * (§4.8). All aggregation happens in Postgres via grouped queries — rows are
+ * NEVER loaded into JS — and the six independent queries run concurrently.
+ *
+ * `days` is expected to already be one of the allowlisted windows (see
+ * `parseDays`); it is bound as an integer either way, so it is never string
+ * interpolation. UTC-day bucketing for `daily` is explicit (`AT TIME ZONE
+ * 'UTC'`) so day boundaries do not drift with the server/session timezone, and
+ * `date` is formatted to `YYYY-MM-DD` text in SQL rather than relying on the pg
+ * `date`-type parser.
+ */
+export async function getAnalyticsSummary(
+  days: number
+): Promise<AnalyticsSummary> {
+  const db = getDb();
+  // Shared trailing window. `make_interval(days => ?)` keeps `days` a bound
+  // integer, never interpolated SQL.
+  const since = db.raw("now() - make_interval(days => ?)", [days]);
+
+  const [totalsRows, dailyRows, pagesRows, referrersRows, eventRows, outRows] =
+    await Promise.all([
+      db.raw(
+        `SELECT
+           count(*) FILTER (WHERE event = 'pageview')            AS pageviews,
+           count(DISTINCT session_key)                            AS visitors,
+           count(DISTINCT session_key) FILTER
+             (WHERE event <> 'pageview')                          AS engaged
+         FROM analytics_events
+         WHERE occurred_at >= ?`,
+        [since]
+      ),
+      db.raw(
+        `SELECT
+           to_char(date_trunc('day', occurred_at AT TIME ZONE 'UTC'),
+                   'YYYY-MM-DD')                                  AS date,
+           count(*) FILTER (WHERE event = 'pageview')            AS pageviews,
+           count(DISTINCT session_key)                            AS visitors
+         FROM analytics_events
+         WHERE occurred_at >= ?
+         GROUP BY 1
+         ORDER BY 1 ASC`,
+        [since]
+      ),
+      db.raw(
+        `SELECT path, count(*) AS views
+         FROM analytics_events
+         WHERE occurred_at >= ? AND event = 'pageview'
+         GROUP BY path
+         ORDER BY views DESC, path ASC
+         LIMIT 10`,
+        [since]
+      ),
+      db.raw(
+        `SELECT referrer AS origin, count(*) AS count
+         FROM analytics_events
+         WHERE occurred_at >= ? AND referrer IS NOT NULL
+         GROUP BY referrer
+         ORDER BY count DESC, referrer ASC
+         LIMIT 10`,
+        [since]
+      ),
+      db.raw(
+        `SELECT event, count(*) AS count
+         FROM analytics_events
+         WHERE occurred_at >= ? AND event <> 'pageview'
+         GROUP BY event
+         ORDER BY count DESC, event ASC`,
+        [since]
+      ),
+      db.raw(
+        `SELECT meta->>'href' AS href, count(*) AS count
+         FROM analytics_events
+         WHERE occurred_at >= ?
+           AND event = 'link_out'
+           AND meta->>'href' IS NOT NULL
+         GROUP BY meta->>'href'
+         ORDER BY count DESC, href ASC
+         LIMIT 10`,
+        [since]
+      ),
+    ]);
+
+  const totals = totalsRows.rows[0] ?? {};
+
+  return {
+    days,
+    totals: {
+      pageviews: toNum(totals.pageviews),
+      visitors: toNum(totals.visitors),
+      engaged: toNum(totals.engaged),
+    },
+    daily: dailyRows.rows.map(
+      (r: { date: string; pageviews: unknown; visitors: unknown }) => ({
+        date: r.date,
+        pageviews: toNum(r.pageviews),
+        visitors: toNum(r.visitors),
+      })
+    ),
+    top_pages: pagesRows.rows.map((r: { path: string; views: unknown }) => ({
+      path: r.path,
+      views: toNum(r.views),
+    })),
+    top_referrers: referrersRows.rows.map(
+      (r: { origin: string; count: unknown }) => ({
+        origin: r.origin,
+        count: toNum(r.count),
+      })
+    ),
+    events: eventRows.rows.map((r: { event: string; count: unknown }) => ({
+      event: r.event,
+      count: toNum(r.count),
+    })),
+    top_outbound: outRows.rows.map((r: { href: string; count: unknown }) => ({
+      href: r.href,
+      count: toNum(r.count),
+    })),
+  };
+}
