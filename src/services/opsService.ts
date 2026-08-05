@@ -241,6 +241,35 @@ interface ParsedExpression {
 type ParsedRow = ParsedMetric | ParsedExpression;
 
 /**
+ * Resolve CloudWatch's dot shorthand against the previous METRIC row: `"."` at
+ * a position inherits the previous row's element at that position, and `"..."`
+ * splices in the remainder of the previous row's string elements from there.
+ * Dashboards routinely lean on this — a widget's rows read
+ * `["AWS/EC2", "CPUSurplusCreditsCharged", "AutoScalingGroupName", "asg-name"]`
+ * then `[".", "CPUCreditUsage", ".", "."]` — and taken literally the dots query
+ * namespace `"."` with dimension `"."="."`, which matches nothing (the bug that
+ * rendered a 500+ credit balance as an empty series).
+ */
+function resolveDotShorthand(row: unknown, prev: unknown[] | null): unknown {
+  if (!Array.isArray(row) || prev === null) return row;
+  const out: unknown[] = [];
+  for (const el of row) {
+    if (el === "...") {
+      for (let j = out.length; j < prev.length && typeof prev[j] === "string"; j++) {
+        out.push(prev[j]);
+      }
+      continue;
+    }
+    if (el === "." && typeof prev[out.length] === "string") {
+      out.push(prev[out.length]);
+      continue;
+    }
+    out.push(el);
+  }
+  return out;
+}
+
+/**
  * Parse one CloudWatch dashboard metrics row into a metric query. A metric row
  * looks like `[Namespace, MetricName, DimName, DimValue, …, { label?, stat?,
  * id?, visible?, … }?]`. Expression rows (`[{ expression, label }]`) and any
@@ -412,12 +441,19 @@ function buildPlan(body: string): {
     const unitRaw = widgetUnitRaw(props);
     const wi = widgetIndex++;
 
-    // Pass 1 — parse every row and collect the set of dashboard-declared ids.
+    // Pass 1 — parse every row (dot shorthand resolved against the previous
+    // metric row) and collect the set of dashboard-declared ids.
     const rows: ParsedRow[] = [];
     const declaredIds = new Set<string>();
+    let prevMetricRow: unknown[] | null = null;
     for (const row of metricsRaw) {
-      const parsedRow = parseMetricRow(row, widgetStat) ?? parseExpressionRow(row);
+      const resolved = resolveDotShorthand(row, prevMetricRow);
+      const parsedRow =
+        parseMetricRow(resolved, widgetStat) ?? parseExpressionRow(resolved);
       if (!parsedRow) continue; // unknown row — skip defensively
+      if (parsedRow.kind === "metric" && Array.isArray(resolved)) {
+        prevMetricRow = resolved;
+      }
       rows.push(parsedRow);
       if (parsedRow.declaredId) declaredIds.add(parsedRow.declaredId);
     }

@@ -247,6 +247,61 @@ describe("getOps (§3.5 curated shape)", () => {
     expect(result.widgets[1].series).toHaveLength(2);
   });
 
+  it("resolves the dot shorthand — dotted rows inherit namespace/dims from the previous row", async () => {
+    // A credits-style widget: full first row, then dot rows. Taken literally the
+    // dots query namespace "." / dimension "."="." and match nothing.
+    mockSend.mockImplementation((command: unknown) => {
+      if (command instanceof MockGetDashboardCommand) {
+        return Promise.resolve({
+          DashboardBody: JSON.stringify({
+            widgets: [
+              {
+                type: "metric",
+                properties: {
+                  title: "CPU Credits",
+                  metrics: [
+                    ["AWS/EC2", "CPUSurplusCreditsCharged", "AutoScalingGroupName", "fake-asg"],
+                    [".", "CPUCreditUsage", ".", "."],
+                    [".", "CPUCreditBalance", "..."],
+                  ],
+                },
+              },
+            ],
+          }),
+        });
+      }
+      const input = (command as MockGetMetricDataCommand).input as Record<string, any>;
+      return Promise.resolve({
+        MetricDataResults: (input.MetricDataQueries as any[]).map((q) => ({
+          Id: q.Id,
+          Timestamps: [new Date("2026-08-03T10:00:00Z")],
+          Values: [q.MetricStat.Metric.MetricName === "CPUCreditBalance" ? 576 : 0],
+        })),
+      });
+    });
+
+    const result = await getOps(DASHBOARD_NAME, 3);
+    if (!result.available) throw new Error("expected available");
+
+    // Every dotted row resolved to the REAL namespace + dimensions.
+    const input = (
+      mockSend.mock.calls.filter(([c]) => c instanceof MockGetMetricDataCommand)[0][0] as MockGetMetricDataCommand
+    ).input as Record<string, any>;
+    for (const q of input.MetricDataQueries as any[]) {
+      expect(q.MetricStat.Metric.Namespace).toBe("AWS/EC2");
+      expect(q.MetricStat.Metric.Dimensions).toEqual([
+        { Name: "AutoScalingGroupName", Value: "fake-asg" },
+      ]);
+    }
+
+    // All three series carry data; the balance line reads 576, labelled by
+    // metric name.
+    const widget = result.widgets[0];
+    expect(widget.series).toHaveLength(3);
+    const balance = widget.series.find((s) => s.label === "CPUCreditBalance");
+    expect(balance?.points[0]?.v).toBe(576);
+  });
+
   it("builds ONE GetMetricData call at period 300 covering every series", async () => {
     wireHappyPath();
     await getOps(DASHBOARD_NAME, 3);
