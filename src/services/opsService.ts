@@ -118,41 +118,119 @@ function sanitizeLabel(explicitLabel: string | null): string | null {
   return isResourceIdentifier(explicitLabel) ? null : explicitLabel;
 }
 
-/** Map a CloudWatch unit to the short display string, else null (allowlist). */
-function mapUnitDisplay(raw: string | null): string | null {
-  if (raw === "Percent") return "%";
-  if (raw === "Bytes/Second" || raw === "Megabytes/Second") return "MB/s";
+/**
+ * Map a raw CloudWatch unit / axis-label / standard-unit token to the short
+ * display string, else null (allowlist). Handles both the CloudWatch spellings
+ * (`Percent`, `Bytes/Second`, `Bytes`, `Count`) and the already-short display
+ * forms (`%`, `MB/s`, `B`) so an axis label that is already a display unit passes
+ * through. `Count` is deliberately dropped to null (a bare count has no unit).
+ */
+function mapUnitToken(raw: string): string | null {
+  const s = raw.trim();
+  if (s === "Percent" || s === "%") return "%";
+  if (s === "Bytes/Second" || s === "Megabytes/Second" || s === "MB/s") {
+    return "MB/s";
+  }
+  if (s === "Bytes" || s === "B") return "B";
+  if (s === "Count") return null;
   return null;
 }
 
-/** kind = 'gauge' iff single-series AND (raw unit Percent OR gauge-y title). */
+/**
+ * Derive a widget's display unit (§3.5, DEFECT 2) in priority order:
+ *   (a) the widget's explicit `unit` / yAxis-left label (`unitRaw`), mapped;
+ *   (b) a title heuristic — `Utilization` or a `(%)` suffix → `%`, and any other
+ *       parenthesized trailing suffix (`(MB/s)`, `(req/s)`…) passes through;
+ *   (c) the metric's standard unit from the GetMetricData result, mapped.
+ * A small pure function (unit-tested directly). Returns null when nothing yields
+ * a unit.
+ */
+export function deriveUnit(
+  unitRaw: string | null,
+  title: string,
+  standardUnit: string | null
+): string | null {
+  if (unitRaw) {
+    const mapped = mapUnitToken(unitRaw);
+    if (mapped) return mapped;
+  }
+  const fromTitle = titleUnit(title);
+  if (fromTitle) return fromTitle;
+  if (standardUnit) {
+    const mapped = mapUnitToken(standardUnit);
+    if (mapped) return mapped;
+  }
+  return null;
+}
+
+/** The title heuristic of `deriveUnit` (b): `Utilization`/`(%)` → `%`, else a
+ * trailing parenthesized suffix verbatim (`X (MB/s)` → `MB/s`), else null. */
+function titleUnit(title: string): string | null {
+  if (/utilization/i.test(title)) return "%";
+  const m = title.match(/\(([^()]+)\)\s*$/);
+  if (!m) return null;
+  const inner = m[1].trim();
+  if (inner === "") return null;
+  if (inner === "%") return "%";
+  return inner;
+}
+
+/** Read an optional standard unit off a metric-data result (GetMetricData does
+ * not surface units, so this is a best-effort fallback for deriveUnit (c)). */
+function readStandardUnit(r: MetricDataResult | undefined): string | null {
+  if (!r) return null;
+  const u =
+    (r as unknown as { StandardUnit?: unknown; Unit?: unknown }).StandardUnit ??
+    (r as unknown as { StandardUnit?: unknown; Unit?: unknown }).Unit;
+  return typeof u === "string" ? u : null;
+}
+
+/** kind = 'gauge' iff single-series AND (display unit is % OR gauge-y title). A
+ * widget whose EXPRESSION produces a percent (unit resolves to `%` from the
+ * title/label) is therefore a gauge, not a raw-bytes chart (§3.5, DEFECT 1). */
 function inferKind(
   seriesCount: number,
-  unitRaw: string | null,
+  unit: string | null,
   title: string
 ): "gauge" | "chart" {
   const single = seriesCount === 1;
-  const percentish = unitRaw === "Percent" || GAUGE_TITLE_RE.test(title);
+  const percentish = unit === "%" || GAUGE_TITLE_RE.test(title);
   return single && percentish ? "gauge" : "chart";
 }
 
 // --- Dashboard parsing ------------------------------------------------------
 
 interface ParsedMetric {
+  kind: "metric";
   namespace: string;
   metricName: string;
   dimensions: { Name: string; Value: string }[];
   stat: string;
   /** The widget-def `label` option, if it was an explicit string (else null). */
   explicitLabel: string | null;
+  /** The dashboard-declared `id` (e.g. `m1`), preserved so expressions resolve. */
+  declaredId: string | null;
+  /** The dashboard `visible` flag (undefined when unset). */
+  visible: boolean | undefined;
 }
 
+interface ParsedExpression {
+  kind: "expression";
+  /** The raw metric-math expression string — server-side ONLY, never emitted. */
+  expression: string;
+  explicitLabel: string | null;
+  declaredId: string | null;
+  visible: boolean | undefined;
+}
+
+type ParsedRow = ParsedMetric | ParsedExpression;
+
 /**
- * Parse one CloudWatch dashboard metrics row. A metric row looks like
- * `[Namespace, MetricName, DimName, DimValue, …, { label?, stat?, … }?]`.
- * Expression rows (`[{ expression, label }]`) and any other unknown shape start
- * with a non-string first element (or lack a metric name) and are SKIPPED
- * defensively by returning null.
+ * Parse one CloudWatch dashboard metrics row into a metric query. A metric row
+ * looks like `[Namespace, MetricName, DimName, DimValue, …, { label?, stat?,
+ * id?, visible?, … }?]`. Expression rows (`[{ expression, label }]`) and any
+ * other unknown shape start with a non-string first element (or lack a metric
+ * name); this returns null for them (handled by `parseExpressionRow`).
  */
 function parseMetricRow(row: unknown, widgetStat: string): ParsedMetric | null {
   if (!Array.isArray(row) || row.length < 2) return null;
@@ -164,7 +242,7 @@ function parseMetricRow(row: unknown, widgetStat: string): ParsedMetric | null {
   const metricName = row[1];
   const rest = row.slice(2);
 
-  // A trailing options object (not an array) carries label/stat/etc.
+  // A trailing options object (not an array) carries label/stat/id/visible/etc.
   let options: Record<string, unknown> = {};
   const last = rest[rest.length - 1];
   if (last !== null && typeof last === "object" && !Array.isArray(last)) {
@@ -184,8 +262,75 @@ function parseMetricRow(row: unknown, widgetStat: string): ParsedMetric | null {
   const stat = typeof options.stat === "string" ? options.stat : widgetStat;
   const explicitLabel =
     typeof options.label === "string" ? (options.label as string) : null;
+  const declaredId = typeof options.id === "string" ? options.id : null;
+  const visible =
+    typeof options.visible === "boolean" ? options.visible : undefined;
 
-  return { namespace, metricName, dimensions, stat, explicitLabel };
+  return {
+    kind: "metric",
+    namespace,
+    metricName,
+    dimensions,
+    stat,
+    explicitLabel,
+    declaredId,
+    visible,
+  };
+}
+
+/**
+ * Parse one dashboard EXPRESSION row — `[{ expression, id?, label?, visible? }]`
+ * — into a metric-math query source. Returns null for anything that is not an
+ * expression row. The expression STRING is kept for server-side GetMetricData
+ * only; it never reaches the curated response.
+ */
+function parseExpressionRow(row: unknown): ParsedExpression | null {
+  if (!Array.isArray(row) || row.length < 1) return null;
+  const first = row[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) {
+    return null;
+  }
+  const obj = first as Record<string, unknown>;
+  if (typeof obj.expression !== "string") return null;
+
+  const explicitLabel = typeof obj.label === "string" ? obj.label : null;
+  const declaredId = typeof obj.id === "string" ? obj.id : null;
+  const visible = typeof obj.visible === "boolean" ? obj.visible : undefined;
+
+  return {
+    kind: "expression",
+    expression: obj.expression,
+    explicitLabel,
+    declaredId,
+    visible,
+  };
+}
+
+/** Identifier-shaped tokens in a metric-math expression (ids AND function names;
+ * callers intersect with declared ids so function names are harmless). */
+function extractIds(expression: string): string[] {
+  return expression.match(/[a-zA-Z_][a-zA-Z0-9_]*/g) ?? [];
+}
+
+/** Escape a string for safe use as a literal inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Rewrite an expression so each dashboard-declared local id (`m1`, `e1`…) is
+ * replaced by its collision-free global query id. Single-pass with an alternation
+ * of the declared ids (longest first) and word boundaries, so an id is never
+ * matched inside a longer token or a just-substituted global id.
+ */
+function rewriteExpression(
+  expression: string,
+  idMap: Map<string, string>
+): string {
+  const ids = [...idMap.keys()].sort((a, b) => b.length - a.length);
+  if (ids.length === 0) return expression;
+  const re = new RegExp(`\\b(${ids.map(escapeRegExp).join("|")})\\b`, "g");
+  return expression.replace(re, (tok) => idMap.get(tok) ?? tok);
 }
 
 /** The raw unit for a widget: an explicit `unit` prop, else its left-axis label. */
@@ -209,11 +354,21 @@ interface PlannedWidget {
 }
 
 /**
- * Parse the dashboard body into a plan (widgets + their series, keyed by query
- * id) and the flat `GetMetricData` query list covering every series. Only
- * `type: "metric"` widgets with a metrics array are considered; a widget whose
- * rows are all expression/unknown (zero renderable series) is dropped. Throws on
- * unparseable JSON — the caller degrades.
+ * Parse the dashboard body into a plan (widgets + their rendered series, keyed by
+ * query id) and the flat `GetMetricData` query list. Only `type: "metric"`
+ * widgets with a metrics array are considered; a widget with zero renderable
+ * series is dropped. Throws on unparseable JSON — the caller degrades.
+ *
+ * MATH EXPRESSIONS (§3.5, DEFECT 1): GetMetricData executes expressions
+ * server-side, so the query list carries BOTH the metric rows (as MetricStat
+ * queries — `ReturnData:false` when the dashboard hides them or they only feed an
+ * expression) AND the expression rows (as `{ Id, Expression, Label,
+ * ReturnData:true }`). Dashboard-declared ids (`m1`/`e1`…) are preserved but
+ * prefixed per widget (`w0_m1`…) so ids stay collision-free across a single
+ * batched call, and expression strings are rewritten to the prefixed ids so they
+ * still resolve. An expression that references no declared sibling id is dropped
+ * defensively (it cannot resolve). The rendered series are exactly the
+ * `ReturnData:true` queries, in dashboard order.
  */
 function buildPlan(body: string): {
   plan: PlannedWidget[];
@@ -223,7 +378,8 @@ function buildPlan(body: string): {
   const widgetsRaw = parsed.widgets;
   const plan: PlannedWidget[] = [];
   const queries: MetricDataQuery[] = [];
-  let counter = 0;
+  let autoCounter = 0; // globally-unique ids (m0, m1…) for id-less metric rows
+  let widgetIndex = 0; // per-widget prefix for declared ids (w0_…, w1_…)
 
   if (!Array.isArray(widgetsRaw)) return { plan, queries };
 
@@ -239,30 +395,82 @@ function buildPlan(body: string): {
     const title = typeof props.title === "string" ? props.title : "";
     const widgetStat = typeof props.stat === "string" ? props.stat : "Average";
     const unitRaw = widgetUnitRaw(props);
+    const wi = widgetIndex++;
 
-    const series: PlannedSeries[] = [];
+    // Pass 1 — parse every row and collect the set of dashboard-declared ids.
+    const rows: ParsedRow[] = [];
+    const declaredIds = new Set<string>();
     for (const row of metricsRaw) {
-      const metric = parseMetricRow(row, widgetStat);
-      if (!metric) continue; // expression / unknown row — skip defensively
+      const parsedRow = parseMetricRow(row, widgetStat) ?? parseExpressionRow(row);
+      if (!parsedRow) continue; // unknown row — skip defensively
+      rows.push(parsedRow);
+      if (parsedRow.declaredId) declaredIds.add(parsedRow.declaredId);
+    }
 
-      const id = `m${counter++}`;
-      queries.push({
-        Id: id,
-        MetricStat: {
-          Metric: {
-            Namespace: metric.namespace,
-            MetricName: metric.metricName,
-            Dimensions: metric.dimensions,
+    // Which declared ids are referenced by an expression (so they only feed it)?
+    const referenced = new Set<string>();
+    for (const r of rows) {
+      if (r.kind !== "expression") continue;
+      for (const tok of extractIds(r.expression)) {
+        if (declaredIds.has(tok)) referenced.add(tok);
+      }
+    }
+
+    // Map declared local id → collision-free global query id for THIS widget.
+    const idMap = new Map<string, string>();
+    for (const id of declaredIds) idMap.set(id, `w${wi}_${id}`);
+
+    // Pass 2 — build queries and the rendered series (ReturnData=true, in order).
+    const series: PlannedSeries[] = [];
+    const widgetQueries: MetricDataQuery[] = [];
+    for (const r of rows) {
+      if (r.kind === "metric") {
+        const id = r.declaredId ? idMap.get(r.declaredId)! : `m${autoCounter++}`;
+        let returnData: boolean;
+        if (r.visible === false) returnData = false;
+        else if (r.visible === true) returnData = true;
+        // Unset visibility: render unless the row only feeds an expression.
+        else returnData = r.declaredId ? !referenced.has(r.declaredId) : true;
+
+        widgetQueries.push({
+          Id: id,
+          MetricStat: {
+            Metric: {
+              Namespace: r.namespace,
+              MetricName: r.metricName,
+              Dimensions: r.dimensions,
+            },
+            Period: METRIC_PERIOD_SECONDS,
+            Stat: r.stat,
           },
-          Period: METRIC_PERIOD_SECONDS,
-          Stat: metric.stat,
-        },
-        ReturnData: true,
-      });
-      series.push({ id, label: sanitizeLabel(metric.explicitLabel) });
+          ReturnData: returnData,
+        });
+        if (returnData) series.push({ id, label: sanitizeLabel(r.explicitLabel) });
+      } else {
+        // An expression that references no declared sibling id cannot resolve
+        // (e.g. it names auto-assigned ids we never emit) — drop it.
+        const refs = extractIds(r.expression).filter((t) => declaredIds.has(t));
+        if (refs.length === 0) continue;
+
+        const id = r.declaredId
+          ? idMap.get(r.declaredId)!
+          : `w${wi}_x${autoCounter++}`;
+        const returnData = r.visible !== false;
+        const query: MetricDataQuery = {
+          Id: id,
+          Expression: rewriteExpression(r.expression, idMap),
+          ReturnData: returnData,
+        };
+        // Forward the user-set label to CloudWatch (server-side only). The
+        // curated series label is separately sanitized below.
+        if (r.explicitLabel !== null) query.Label = r.explicitLabel;
+        widgetQueries.push(query);
+        if (returnData) series.push({ id, label: sanitizeLabel(r.explicitLabel) });
+      }
     }
 
     if (series.length === 0) continue; // nothing renderable in this widget
+    for (const q of widgetQueries) queries.push(q);
     plan.push({ title, unitRaw, series });
   }
 
@@ -302,8 +510,11 @@ function curateWidget(
     points: resultToPoints(byId.get(s.id)),
   }));
 
-  const unit = mapUnitDisplay(w.unitRaw);
-  const kind = inferKind(series.length, w.unitRaw, w.title);
+  const standardUnit = readStandardUnit(
+    w.series.length > 0 ? byId.get(w.series[0].id) : undefined
+  );
+  const unit = deriveUnit(w.unitRaw, w.title, standardUnit);
+  const kind = inferKind(series.length, unit, w.title);
 
   const firstPoints = series[0]?.points ?? [];
   const latest =
