@@ -17,6 +17,7 @@ import nowPlayingRouter from "./routers/nowPlayingRouter";
 import duolingoRouter from "./routers/duolingoRouter";
 import githubRouter from "./routers/githubRouter";
 import opsRouter from "./routers/opsRouter";
+import beaconRouter from "./routers/beaconRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
 
@@ -38,6 +39,13 @@ app.use(helmet());
 if (isLocal()) {
   app.use(cors());
 }
+
+// Public analytics ingest (§4.8, v1.4). Mounted BEFORE the global JSON parser
+// because it must survive a malformed JSON body (which express.json() would turn
+// into a 500 via the error handler) — the beacon router parses the body itself,
+// tolerates parse errors, and ALWAYS answers 204. It never throws, never logs
+// request contents, and stores no raw IP/user-agent.
+app.use("/api/beacon", beaconRouter);
 
 app.use(express.json());
 
