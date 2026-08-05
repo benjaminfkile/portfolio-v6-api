@@ -482,6 +482,16 @@ function buildPlan(body: string): {
   return { plan, queries };
 }
 
+/**
+ * Round a value for the curated shape. Metric values arrive as raw doubles
+ * (`4.131730772880646`); two decimals is ample precision for a 5-minute-period
+ * dashboard readout, keeps the payload compact, and means no consumer ever has
+ * to defend against 15-digit floats.
+ */
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
 /** Map a metric-data result to ordered `{ t, v }` points (skips bad entries). */
 function resultToPoints(r: MetricDataResult | undefined): OpsPoint[] {
   if (!r) return [];
@@ -500,7 +510,7 @@ function resultToPoints(r: MetricDataResult | undefined): OpsPoint[] {
           ? ts
           : null;
     if (t === null) continue;
-    points.push({ t, v });
+    points.push({ t, v: round2(v) });
   }
   return points;
 }

@@ -129,7 +129,7 @@ function metricDataResults() {
           new Date("2026-08-03T10:00:00Z"),
           new Date("2026-08-03T10:05:00Z"),
         ],
-        Values: [41.5, 47.2],
+        Values: [41.5, 47.201730772880646], // raw double — curated shape rounds to 2dp
       },
       {
         Id: "m1",
@@ -200,7 +200,7 @@ describe("getOps (§3.5 curated shape)", () => {
           title: "CPU Utilization",
           kind: "gauge", // single Percent series
           unit: "%",
-          latest: 47.2, // last point of the first series
+          latest: 47.2, // last point of the first series, rounded to 2dp
           series: [
             {
               label: null, // explicit label was an ARN → scrubbed
