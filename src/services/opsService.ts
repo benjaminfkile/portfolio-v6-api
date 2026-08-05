@@ -112,10 +112,20 @@ function isResourceIdentifier(s: string): boolean {
   return RESOURCE_ID_PATTERNS.some((re) => re.test(s));
 }
 
-/** A label survives only if user-set AND not a resource identifier — else null. */
-function sanitizeLabel(explicitLabel: string | null): string | null {
-  if (explicitLabel === null) return null;
-  return isResourceIdentifier(explicitLabel) ? null : explicitLabel;
+/**
+ * A series label survives only if it is not a resource identifier. For metric
+ * rows without a user-set label the bare METRIC NAME (`CPUCreditBalance`) is
+ * the fallback — namespace vocabulary, not an identifier, and without it a
+ * multi-series widget is a pile of indistinguishable lines. Dimension values
+ * never participate; the identifier scrub still runs over every candidate.
+ */
+function sanitizeLabel(
+  explicitLabel: string | null,
+  fallbackMetricName: string | null = null
+): string | null {
+  const candidate = explicitLabel ?? fallbackMetricName;
+  if (candidate === null) return null;
+  return isResourceIdentifier(candidate) ? null : candidate;
 }
 
 /**
@@ -450,7 +460,12 @@ function buildPlan(body: string): {
           },
           ReturnData: returnData,
         });
-        if (returnData) series.push({ id, label: sanitizeLabel(r.explicitLabel) });
+        if (returnData) {
+          series.push({
+            id,
+            label: sanitizeLabel(r.explicitLabel, r.metricName),
+          });
+        }
       } else {
         // An expression that references no declared sibling id cannot resolve
         // (e.g. it names auto-assigned ids we never emit) — drop it.

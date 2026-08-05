@@ -225,7 +225,10 @@ describe("getOps (§3.5 curated shape)", () => {
               ],
             },
             {
-              label: null, // no explicit label
+              // No explicit label → the bare metric name (namespace vocabulary,
+              // not an identifier) is the fallback so multi-series widgets stay
+              // distinguishable. Dimension values still never appear.
+              label: "NetworkRxBytes",
               points: [
                 { t: "2026-08-03T10:00:00.000Z", v: 3000 },
                 { t: "2026-08-03T10:05:00.000Z", v: 4000 },
