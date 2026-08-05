@@ -10,6 +10,7 @@ import adminPublishRouter from "./routers/adminPublishRouter";
 import adminMediaRouter from "./routers/adminMediaRouter";
 import adminPostsRouter from "./routers/adminPostsRouter";
 import adminIntegrationsRouter from "./routers/adminIntegrationsRouter";
+import adminAnalyticsRouter from "./routers/adminAnalyticsRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
@@ -116,6 +117,11 @@ app.use("/api/admin", adminPostsRouter);
 // task migrates. requireAdmin() guards every route except the oauth callback,
 // which is guarded by its single-use state (a browser redirect carries no bearer).
 app.use("/api/admin", adminIntegrationsRouter);
+// Analytics aggregates (§4.8 v1.4, read half): GET /api/admin/analytics returns
+// the curated, privacy-respecting summary (totals/daily/top pages/referrers/
+// events/outbound) over a 7/30/90-day window. Admin-only; all aggregation runs
+// in Postgres and the underlying rows carry no PII.
+app.use("/api/admin", adminAnalyticsRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
