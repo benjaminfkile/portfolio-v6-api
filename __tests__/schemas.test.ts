@@ -13,6 +13,7 @@ import {
   blogData,
   nowPlayingData,
   contactData,
+  skillsData,
   SECTION_DATA_SCHEMAS,
   SECTION_TYPES,
   postMetadataSchema,
@@ -207,7 +208,15 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("skills item — valid and invalid proficiency", () => {
+  it("skills item — valid without proficiency; rejects a leftover proficiency key (strict, v1.5)", () => {
+    expect(
+      skillsItemSchema.safeParse({
+        title: "TypeScript",
+        description: "strong",
+        icon_source: "devicon:typescript",
+      }).success
+    ).toBe(true);
+    // proficiency was removed from the product — a strict schema rejects it.
     expect(
       skillsItemSchema.safeParse({
         title: "TypeScript",
@@ -215,13 +224,12 @@ describe("section item schemas (§3.4 table)", () => {
         icon_source: "devicon:typescript",
         proficiency: 90,
       }).success
-    ).toBe(true);
+    ).toBe(false);
+    // icon_source is required (min 1).
     expect(
       skillsItemSchema.safeParse({
         title: "TypeScript",
-        description: "strong",
-        icon_source: "devicon:typescript",
-        proficiency: 900,
+        icon_source: "",
       }).success
     ).toBe(false);
   });
@@ -302,6 +310,33 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
       nowPlayingData.safeParse({ idle: "message", idle_message: "away" }).success
     ).toBe(true);
     expect(nowPlayingData.safeParse({ idle: "explode" }).success).toBe(false);
+  });
+
+  it("skills — optional integer sphere_detail 0–4, round-trips absent as absent (v1.5)", () => {
+    // Heading/intro only (no sphere_detail) is valid, and the parsed value has
+    // no sphere_detail key: absent must round-trip as absent (AUTO), not a
+    // defaulted number.
+    const auto = skillsData.safeParse({ heading: "Skills", intro: "what I use" });
+    expect(auto.success).toBe(true);
+    if (auto.success) {
+      expect("sphere_detail" in auto.data).toBe(false);
+      expect(auto.data.sphere_detail).toBeUndefined();
+    }
+    // An empty object (fully AUTO) is valid.
+    expect(skillsData.safeParse({}).success).toBe(true);
+
+    // Every in-range detail 0..4 is accepted.
+    for (const detail of [0, 1, 2, 3, 4]) {
+      expect(skillsData.safeParse({ sphere_detail: detail }).success).toBe(true);
+    }
+
+    // Out of range and non-integer are rejected.
+    expect(skillsData.safeParse({ sphere_detail: 5 }).success).toBe(false);
+    expect(skillsData.safeParse({ sphere_detail: -1 }).success).toBe(false);
+    expect(skillsData.safeParse({ sphere_detail: 2.5 }).success).toBe(false);
+
+    // proficiency is gone from the section data too — unknown keys rejected.
+    expect(skillsData.safeParse({ proficiency: 50 }).success).toBe(false);
   });
 
   it("contact — optional links honour the protocol allowlist", () => {

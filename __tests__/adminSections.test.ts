@@ -295,7 +295,7 @@ describe("optimistic concurrency (§4.5)", () => {
         .post(`/api/admin/sections/${section.id}/items`)
         .set(...AUTH)
         .send({
-          data: { title: "TS", description: "typed", icon_source: "x", proficiency: 90 },
+          data: { title: "TS", description: "typed", icon_source: "x" },
         })
     ).body.data;
 
@@ -303,7 +303,7 @@ describe("optimistic concurrency (§4.5)", () => {
     const missing = await request(app)
       .patch(`/api/admin/items/${item.id}`)
       .set(...AUTH)
-      .send({ data: { title: "TS", description: "typed", icon_source: "x", proficiency: 95 } });
+      .send({ data: { title: "TS", description: "typed", icon_source: "x" } });
     expect(missing.status).toBe(400);
 
     // Stale → 409
@@ -315,7 +315,7 @@ describe("optimistic concurrency (§4.5)", () => {
       .set(...AUTH)
       .send({
         expected_updated_at: stale,
-        data: { title: "TS", description: "typed", icon_source: "x", proficiency: 95 },
+        data: { title: "TS", description: "typed", icon_source: "x" },
       });
     expect(conflict.status).toBe(409);
   });
@@ -372,7 +372,7 @@ describe("reorder — full array, transactional, idempotent (§4.2 / §4.5)", ()
         .post(`/api/admin/sections/${section.id}/items`)
         .set(...AUTH)
         .send({
-          data: { title, description: "d", icon_source: "i", proficiency: 50 },
+          data: { title, description: "d", icon_source: "i" },
         });
     const i1 = (await mk("one")).body.data;
     const i2 = (await mk("two")).body.data;
@@ -461,7 +461,7 @@ describe("Zod validation on writes (§3.9)", () => {
     const res = await request(app)
       .post(`/api/admin/sections/${section.id}/items`)
       .set(...AUTH)
-      // proficiency out of the 0–100 range.
+      // proficiency was removed in v1.5 — a strict schema rejects the leftover key.
       .send({ data: { title: "x", description: "d", icon_source: "i", proficiency: 500 } });
     expect(res.status).toBe(400);
   });
