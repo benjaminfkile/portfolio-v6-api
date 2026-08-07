@@ -11,6 +11,7 @@ import adminMediaRouter from "./routers/adminMediaRouter";
 import adminPostsRouter from "./routers/adminPostsRouter";
 import adminIntegrationsRouter from "./routers/adminIntegrationsRouter";
 import adminAnalyticsRouter from "./routers/adminAnalyticsRouter";
+import adminIconsRouter from "./routers/adminIconsRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
@@ -122,6 +123,12 @@ app.use("/api/admin", adminIntegrationsRouter);
 // events/outbound) over a 7/30/90-day window. Admin-only; all aggregation runs
 // in Postgres and the underlying rows carry no PII.
 app.use("/api/admin", adminAnalyticsRouter);
+// Icons (§Icons v1.6): the devicon manifest proxy (pinned, cached, slimmed) and
+// the icon import that stores a pinned SVG under the `icons/` prefix in the
+// existing media bucket and returns its CDN URL. Admin-only; all upstream fetch
+// and S3 access is server-side. The `icons/` prefix is deliberately outside the
+// §6.9 media orphan sweep (icons are referenced by URL, not media_id).
+app.use("/api/admin", adminIconsRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.

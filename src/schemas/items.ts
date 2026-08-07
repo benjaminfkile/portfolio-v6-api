@@ -23,7 +23,12 @@ export const skillsItemSchema = z
   .object({
     title: z.string().min(1),
     description: z.string().default(""),
+    // Default (light-theme) icon URL — required. Source-agnostic plain URL
+    // string (devicon, simpleicons, custom, self-hosted); see §Icons v1.6.
     icon_source: z.string().min(1),
+    // OPTIONAL dark-theme override URL (§Icons v1.6). Every renderer falls back
+    // to `icon_source` when it is absent, so absent must round-trip as absent.
+    icon_source_dark: z.string().min(1).optional(),
   })
   .strict();
 

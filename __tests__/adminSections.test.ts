@@ -456,6 +456,36 @@ describe("Zod validation on writes (§3.9)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("carries a compact, human-readable path:message in the 400 envelope (§Icons v1.6)", async () => {
+    // sphere_detail is capped at 4 (§3.4 v1.5). A 400 must read like a human
+    // sentence, not the raw serialized Zod issue array.
+    const res = await createSection({
+      type: "skills",
+      data: { sphere_detail: 5 },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errorMsg).toContain(
+      'Invalid data for section type "skills": sphere_detail: '
+    );
+    // Not the raw JSON issue dump.
+    expect(res.body.errorMsg).not.toContain('"code"');
+    expect(res.body.errorMsg).not.toContain("[\n");
+  });
+
+  it("renders a compact path:message for a bad ITEM too (§Icons v1.6)", async () => {
+    const section = (await createSection({ type: "skills", data: {} })).body.data;
+    const res = await request(app)
+      .post(`/api/admin/sections/${section.id}/items`)
+      .set(...AUTH)
+      // icon_source must be a string; a number fails with a readable message.
+      .send({ data: { title: "x", icon_source: 123 } });
+    expect(res.status).toBe(400);
+    expect(res.body.errorMsg).toContain(
+      "Invalid data for skills item: icon_source: "
+    );
+    expect(res.body.errorMsg).not.toContain('"code"');
+  });
+
   it("rejects invalid item data with a 400", async () => {
     const section = (await createSection({ type: "skills", data: {} })).body.data;
     const res = await request(app)
