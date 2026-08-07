@@ -146,19 +146,19 @@ export const githubData = z
   .strict();
 
 /**
- * §3.5 (v1.3 live section) — the ops / CloudWatch metrics card. Config only; the
- * live data (the curated dashboard widgets) is fetched at runtime from
- * `GET /api/ops`. `window_hours` is how many trailing hours of metrics the
- * endpoint queries (1..24; period is a fixed 5-minute grain), defaulting to 3.
- * An optional `heading` labels the section. NO infra identifiers (dashboard
- * name, resource names, ARNs) live in this config — the dashboard name is a
- * deployed secret, resolved server-side (§4.7-style) and never in content.
+ * §3.5 (v1.7 Ops Replay) — the ops / CloudWatch metrics card. Config only; the
+ * live data is the immutable DAILY REPLAY report fetched at runtime from
+ * `GET /api/ops` (one report per UTC day, replayed client-side). As of the v1.7
+ * replay rework the lookback is no longer configurable — a report always covers
+ * one full UTC day — so `window_hours` is REMOVED; only the header copy
+ * (`heading` / `intro`) is snapshotted. NO infra identifiers (dashboard name,
+ * resource names, ARNs) live in this config — the dashboard name is a deployed
+ * secret, resolved server-side (§4.7-style) and never in content.
  */
 export const opsData = z
   .object({
     heading: z.string().optional(),
     intro: z.string().optional(),
-    window_hours: z.number().int().min(1).max(24).default(3),
   })
   .strict();
 

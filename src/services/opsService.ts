@@ -1,15 +1,25 @@
 /**
- * Ops service — TECH_SPEC_V1.md §3.5 (`ops` live section, v1.3) / task #488.
+ * Ops service — TECH_SPEC_V1.md §3.5 (`ops`, v1.7 Ops Replay) / task #537.
  *
- * The `ops` live section renders a curated view of a CloudWatch dashboard's
- * metric widgets. The API proxies CloudWatch server-side for the same reasons
- * the other live sections proxy their upstream (§3.5): the dashboard name is a
- * deployed infra identifier that stays server-side, the returned shape is a
- * deliberate curated choice, and a ~5-minute in-memory cache means visitor
- * traffic never multiplies (expensive, throttled) CloudWatch calls.
+ * The public ops page is a DAILY REPLAY: one immutable report per UTC day, built
+ * ONCE from the curated CloudWatch dashboard, persisted to `ops_reports`, and
+ * replayed client-side. Security rationale (do not weaken): there is no live
+ * feedback loop for probers — the soonest observable consequence of anything is
+ * tomorrow's report — and CloudWatch reads drop to ~1 fetch/day regardless of
+ * traffic. This module keeps the whole v1.3 dashboard fetch / sanitize / widget-
+ * shaping machinery, but retargets it at a fixed UTC day (midnight→midnight,
+ * 5-minute grain, up to 288 points) instead of a trailing window.
  *
- * SANITIZATION is ALLOWLIST-SHAPED (§3.5). The response is assembled ONLY from a
- * fixed set of fields — `{ title, computed kind/unit/latest/series }`. Raw
+ * The BUILD is lazy and single-flight: on a request, if yesterday's (UTC) report
+ * is missing AND now ≥ 00:15 UTC (CloudWatch datapoints arrive late — never clip
+ * the day by building at exactly midnight), it is built. An in-process
+ * single-flight map plus an idempotent `ON CONFLICT DO NOTHING` insert means
+ * concurrent requests (even across instances) cannot double-build. Only a
+ * SUCCESSFUL build persists — a degraded fetch leaves the day unbuilt so the next
+ * request retries.
+ *
+ * SANITIZATION is ALLOWLIST-SHAPED (§3.5). A report widget is assembled ONLY from
+ * a fixed set of fields — `{ title, computed kind/unit/latest/series }`. Raw
  * dashboard internals (dimension values like `i-…` instance ids, ARNs, account
  * ids, region, CloudWatch's auto-generated series labels) are NEVER copied
  * through. A series `label` survives only when it was an EXPLICIT user-set label
@@ -18,26 +28,43 @@
  *
  * DEGRADE rather than error (§3.5): a missing/empty dashboard name, an SDK/IAM
  * error, malformed dashboard JSON, or a dashboard with no renderable metric
- * widgets ALL resolve to `{ available: false }` — a 200, never a 5xx. Only the
- * error class name / result shape is ever logged; the dashboard name never is.
+ * widgets ALL make the build a no-op (nothing persisted) — the endpoint then 404s
+ * until a report exists, never a 5xx. Only the error class name is ever logged;
+ * the dashboard name never is.
  */
 
 import type {
   MetricDataQuery,
   MetricDataResult,
 } from "@aws-sdk/client-cloudwatch";
+import type { Knex } from "knex";
 import { getDashboard, getMetricData } from "../aws/cloudwatchService";
-
-/** In-memory curated-result cache TTL (§3.5 "~5-minute"). */
-export const OPS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /** Fixed metric grain for every query — a 5-minute period (§3.5). */
 export const METRIC_PERIOD_SECONDS = 300;
 
-/** `?window_hours=` bounds and default (§3.5). */
-export const DEFAULT_WINDOW_HOURS = 3;
-export const MIN_WINDOW_HOURS = 1;
-export const MAX_WINDOW_HOURS = 24;
+/** The report's fixed sample grain, in minutes (a 5-minute period → 288/day). */
+export const GRAIN_MINUTES = METRIC_PERIOD_SECONDS / 60;
+
+/**
+ * Build margin (§3.5): yesterday's report is only built once now is at least this
+ * many minutes past 00:00 UTC. CloudWatch datapoints for the tail of a day arrive
+ * late, so building at exactly midnight would clip the last few 5-minute points.
+ */
+export const BUILD_MARGIN_MINUTES = 15;
+
+/** One UTC day in milliseconds. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Cache-Control tuning (§3.5). When the served report IS the expected latest, the
+ * response stays fresh until shortly after the next 00:15 UTC (when a new report
+ * is due) — `CACHE_BOUNDARY_BUFFER_SECONDS` past the boundary so the lazy build
+ * has landed. When the expected report is NOT built yet (or a specific older
+ * `?date=` was requested), a short max-age lets the client retry soon.
+ */
+export const CACHE_BOUNDARY_BUFFER_SECONDS = 60;
+export const CACHE_SHORT_MAX_AGE_SECONDS = 5 * 60;
 
 /**
  * Resource-identifier patterns (§3.5). A series label matching ANY of these is
@@ -75,38 +102,32 @@ export interface OpsWidget {
   series: OpsSeries[];
 }
 
-/** Curated /api/ops payload (§3.5). Never contains any infra identifier. */
-export type OpsResult =
-  | { available: false }
-  | { available: true; window_hours: number; widgets: OpsWidget[] };
+/**
+ * One immutable daily ops report (§3.5, v1.7) — the JSONB stored in
+ * `ops_reports.payload`. Every series covers the FULL UTC day at a fixed 5-minute
+ * grain; the widget shape is exactly the v1.3 curated shape. Never contains any
+ * infra identifier. `available_dates` is NOT stored here — it is the set of all
+ * stored report dates, computed and merged in at serve time.
+ */
+export interface OpsReport {
+  report_date: string;
+  generated_at: string;
+  grain_minutes: number;
+  widgets: OpsWidget[];
+}
 
-const UNAVAILABLE: OpsResult = { available: false };
+/** The `GET /api/ops` response — a stored report plus the day-navigation list. */
+export interface OpsReportResponse extends OpsReport {
+  available_dates: string[];
+}
 
-// Module-level state: the ~5-minute curated-result cache (keyed by dashboard +
-// window so a different window is a distinct entry) and a per-key single-flight
-// map so a burst of concurrent cache-miss reads collapses to one CloudWatch call.
-let cache: { key: string; result: OpsResult; expiresAt: number } | null = null;
-const inFlight = new Map<string, Promise<OpsResult>>();
+// Module-level single-flight: at most one in-process build per target UTC day, so
+// a burst of concurrent cache-miss requests collapses to ONE CloudWatch fetch and
+// one insert. Cross-instance double-builds are prevented by the idempotent
+// `ON CONFLICT DO NOTHING` insert in `buildReportRow`.
+const buildInFlight = new Map<string, Promise<void>>();
 
 // --- Validation helpers -----------------------------------------------------
-
-/**
- * Validate `?window_hours=` — an integer in 1..24; anything else (missing,
- * non-integer, out of range) DEGRADES to the default of 3 (§3.5), never an error.
- */
-export function parseWindowHours(raw: unknown): number {
-  const s = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof s !== "string" && typeof s !== "number") return DEFAULT_WINDOW_HOURS;
-  const n = typeof s === "number" ? s : Number(s);
-  if (
-    !Number.isInteger(n) ||
-    n < MIN_WINDOW_HOURS ||
-    n > MAX_WINDOW_HOURS
-  ) {
-    return DEFAULT_WINDOW_HOURS;
-  }
-  return n;
-}
 
 function isResourceIdentifier(s: string): boolean {
   return RESOURCE_ID_PATTERNS.some((re) => re.test(s));
@@ -590,22 +611,84 @@ function curateWidget(
   return { title: w.title, kind, unit, latest, series };
 }
 
-// --- Orchestration ----------------------------------------------------------
+// --- UTC-day helpers --------------------------------------------------------
+
+/** The UTC calendar day of a `Date`, as `YYYY-MM-DD`. */
+export function utcDateString(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** The UTC day BEFORE `now` (the report the lazy build targets). */
+export function yesterdayUtc(now: Date): string {
+  return utcDateString(new Date(now.getTime() - DAY_MS));
+}
+
+/** Minutes elapsed since 00:00 UTC of `now`'s day (0..1439). */
+function minutesSinceUtcMidnight(now: Date): number {
+  return now.getUTCHours() * 60 + now.getUTCMinutes();
+}
 
 /**
- * Do the actual upstream work for a cache miss: fetch the dashboard, build ONE
- * GetMetricData call for every widget's metrics, and curate the results. ANY
- * failure — SDK/IAM error, malformed dashboard JSON, empty/unrenderable widgets
- * — resolves to `{ available: false }`; it never throws. Logs the error class /
- * shape only, NEVER the dashboard name.
+ * The newest UTC day whose report is DUE at `now` — i.e. the most recent day D
+ * such that `now ≥ start-of(D+1) + BUILD_MARGIN`. When the margin has passed this
+ * is yesterday; before today's 00:15 UTC it is the day before yesterday (yesterday
+ * is not buildable yet). Used only to decide the Cache-Control freshness window.
  */
-async function computeOps(
+export function expectedLatestDate(now: Date): string {
+  const marginMs = BUILD_MARGIN_MINUTES * 60 * 1000;
+  return utcDateString(new Date(now.getTime() - marginMs - DAY_MS));
+}
+
+/** Milliseconds from `now` to the next 00:15 UTC boundary (strictly after now). */
+function msUntilNextBuildBoundary(now: Date): number {
+  const today0015 = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    0,
+    BUILD_MARGIN_MINUTES,
+    0
+  );
+  const target = now.getTime() < today0015 ? today0015 : today0015 + DAY_MS;
+  return target - now.getTime();
+}
+
+/**
+ * The `Cache-Control` value for a served report (§3.5). When the served report is
+ * the expected latest, it stays fresh until shortly after the next 00:15 UTC
+ * (when the next report is due). Otherwise — the expected report is not built yet,
+ * or a specific older `?date=` was requested — a short max-age lets the client
+ * retry soon (still capped so it never outlives the boundary).
+ */
+export function buildCacheControl(now: Date, reportDate: string): string {
+  const untilBoundarySec = Math.max(
+    0,
+    Math.ceil(msUntilNextBuildBoundary(now) / 1000)
+  );
+  const maxAge =
+    reportDate === expectedLatestDate(now)
+      ? untilBoundarySec + CACHE_BOUNDARY_BUFFER_SECONDS
+      : Math.min(CACHE_SHORT_MAX_AGE_SECONDS, untilBoundarySec);
+  return `public, max-age=${maxAge}`;
+}
+
+// --- Build (retargeted at a fixed UTC day) ----------------------------------
+
+/**
+ * Fetch the dashboard and curate ONE full UTC day of metrics into the report
+ * widgets. The GetMetricData window is exactly the day midnight→midnight (UTC) at
+ * a 5-minute period, so every series spans the full day at 288-point grain. ANY
+ * failure — SDK/IAM error, malformed dashboard JSON, empty/unrenderable widgets —
+ * resolves to `null` (the build is a no-op, nothing persists); it never throws.
+ * Logs the error CLASS only, NEVER the dashboard name.
+ */
+async function buildDayWidgets(
   dashboardName: string,
-  windowHours: number
-): Promise<OpsResult> {
+  reportDate: string
+): Promise<OpsWidget[] | null> {
   try {
     const body = await getDashboard(dashboardName);
-    if (!body) return UNAVAILABLE;
+    if (!body) return null;
 
     let plan: PlannedWidget[];
     let queries: MetricDataQuery[];
@@ -614,12 +697,12 @@ async function computeOps(
     } catch {
       // Malformed dashboard JSON — degrade (never surface the parse error, which
       // could echo dashboard contents).
-      return UNAVAILABLE;
+      return null;
     }
-    if (plan.length === 0 || queries.length === 0) return UNAVAILABLE;
+    if (plan.length === 0 || queries.length === 0) return null;
 
-    const end = new Date();
-    const start = new Date(end.getTime() - windowHours * 60 * 60 * 1000);
+    const start = new Date(`${reportDate}T00:00:00.000Z`);
+    const end = new Date(start.getTime() + DAY_MS);
     const results = await getMetricData(queries, start, end);
 
     const byId = new Map<string, MetricDataResult>();
@@ -627,60 +710,127 @@ async function computeOps(
       if (typeof r.Id === "string") byId.set(r.Id, r);
     }
 
-    const widgets = plan.map((w) => curateWidget(w, byId));
-    return { available: true, window_hours: windowHours, widgets };
+    return plan.map((w) => curateWidget(w, byId));
   } catch (err) {
     // Log the error CLASS only — an AWS error message can embed the dashboard
     // name / ARNs, which must never reach a log line (§3.5).
     console.error(
-      "[opsService] ops fetch failed; serving { available: false }:",
+      "[opsService] report build failed; leaving day unbuilt:",
       err instanceof Error ? err.name : "unknown error"
     );
-    return UNAVAILABLE;
+    return null;
   }
 }
 
 /**
- * Get the curated ops payload for `dashboardName` at `windowHours`, served from
- * the ~5-minute cache with per-key single-flight. Always resolves — never
- * rejects — so `GET /api/ops` never returns a 5xx (§3.5). With no dashboard name
- * there is nothing to fetch: returns `{ available: false }` and makes no AWS
- * call. Only a SUCCESSFUL result is cached, so a transient failure does not stay
- * dark for the whole window.
+ * Build `reportDate`'s report and persist it. Only a SUCCESSFUL build is written;
+ * a degraded fetch (`null` widgets) leaves the day unbuilt so a later request
+ * retries. The insert is idempotent (`ON CONFLICT (report_date) DO NOTHING`) so
+ * two instances racing to build the same day cannot double-write — the loser's
+ * insert is a no-op and the winner's row stands.
  */
-export async function getOps(
-  dashboardName: string | null | undefined,
-  windowHours: number
-): Promise<OpsResult> {
-  if (!dashboardName) return UNAVAILABLE;
+async function buildReportRow(
+  db: Knex,
+  dashboardName: string,
+  reportDate: string,
+  now: Date
+): Promise<void> {
+  const widgets = await buildDayWidgets(dashboardName, reportDate);
+  if (!widgets) return; // degrade — only successful builds persist
 
-  const key = `${dashboardName}::${windowHours}`;
-  const now = Date.now();
-  if (cache && cache.key === key && cache.expiresAt > now) {
-    return cache.result;
-  }
+  const payload: OpsReport = {
+    report_date: reportDate,
+    generated_at: now.toISOString(),
+    grain_minutes: GRAIN_MINUTES,
+    widgets,
+  };
 
-  const existing = inFlight.get(key);
-  if (existing) return existing;
-
-  const p = (async () => {
-    const result = await computeOps(dashboardName, windowHours);
-    if (result.available) {
-      cache = { key, result, expiresAt: Date.now() + OPS_CACHE_TTL_MS };
-    }
-    return result;
-  })();
-
-  inFlight.set(key, p);
-  try {
-    return await p;
-  } finally {
-    inFlight.delete(key);
-  }
+  await db("ops_reports")
+    .insert({
+      report_date: reportDate,
+      generated_at: now,
+      payload: JSON.stringify(payload),
+    })
+    .onConflict("report_date")
+    .ignore();
 }
 
-/** Test-only: clear the module cache, any in-flight fetch, and the SDK client. */
+/**
+ * Lazy build (§3.5): if yesterday's (UTC) report is missing AND now ≥ 00:15 UTC,
+ * build it — single-flight in-process so a burst of concurrent requests triggers
+ * exactly one CloudWatch fetch + one insert. With no dashboard name there is
+ * nothing to build (and no AWS call). Never throws — a build failure degrades to a
+ * no-op and the request falls through to whatever is already stored.
+ */
+async function ensureReport(
+  db: Knex,
+  dashboardName: string,
+  now: Date
+): Promise<void> {
+  if (!dashboardName) return;
+  if (minutesSinceUtcMidnight(now) < BUILD_MARGIN_MINUTES) return;
+
+  const target = yesterdayUtc(now);
+
+  // Fast path: already stored → no build, no CloudWatch call.
+  const existing = await db("ops_reports")
+    .where({ report_date: target })
+    .first();
+  if (existing) return;
+
+  let p = buildInFlight.get(target);
+  if (!p) {
+    p = buildReportRow(db, dashboardName, target, now).finally(() =>
+      buildInFlight.delete(target)
+    );
+    buildInFlight.set(target, p);
+  }
+  await p;
+}
+
+// --- Read / serve -----------------------------------------------------------
+
+/** Read one stored report's payload — a specific `date` or the latest. */
+async function readReport(
+  db: Knex,
+  date: string | undefined
+): Promise<OpsReport | null> {
+  const query = db("ops_reports");
+  const row = date
+    ? await query.where({ report_date: date }).first()
+    : await query.orderBy("report_date", "desc").first();
+  return row ? (row.payload as OpsReport) : null;
+}
+
+/** Every stored report's `report_date`, newest first, as `YYYY-MM-DD` strings. */
+async function availableDates(db: Knex): Promise<string[]> {
+  const rows = await db("ops_reports")
+    .select(db.raw("to_char(report_date, 'YYYY-MM-DD') AS report_date"))
+    .orderBy("report_date", "desc");
+  return rows.map((r: { report_date: string }) => r.report_date);
+}
+
+/**
+ * The `GET /api/ops` payload (§3.5, v1.7): trigger the lazy build, then serve the
+ * requested stored report (a specific `date`, else the latest) with the
+ * day-navigation `available_dates` merged in. Resolves to `null` when no matching
+ * report exists (the router 404s) — before the first day is built, or an
+ * in-range-but-unbuilt `date`.
+ */
+export async function getOpsReport(
+  db: Knex,
+  dashboardName: string | null | undefined,
+  opts: { date?: string; now: Date }
+): Promise<OpsReportResponse | null> {
+  await ensureReport(db, dashboardName ?? "", opts.now);
+
+  const report = await readReport(db, opts.date);
+  if (!report) return null;
+
+  return { ...report, available_dates: await availableDates(db) };
+}
+
+/** Test-only: clear the in-flight build map. */
 export function _resetOpsForTests(): void {
-  cache = null;
-  inFlight.clear();
+  buildInFlight.clear();
 }
