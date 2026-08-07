@@ -14,6 +14,9 @@ import {
   nowPlayingData,
   contactData,
   skillsData,
+  duolingoData,
+  githubData,
+  opsData,
   SECTION_DATA_SCHEMAS,
   SECTION_TYPES,
   postMetadataSchema,
@@ -371,6 +374,50 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
 
     // proficiency is gone from the section data too — unknown keys rejected.
     expect(skillsData.safeParse({ proficiency: 50 }).success).toBe(false);
+  });
+
+  it("duolingo/github/ops — optional intro accepted, round-tripped, strict otherwise (v1.6b)", () => {
+    // Each live-section schema now accepts an optional `intro` (lead-in prose
+    // rendered under the heading as a <p>). It round-trips exactly, is valid
+    // when absent, and unknown keys are still rejected via .strict().
+    const duo = duolingoData.safeParse({
+      heading: "Duolingo",
+      intro: "How my Spanish is going.",
+      language: "es",
+    });
+    expect(duo.success).toBe(true);
+    if (duo.success) expect(duo.data.intro).toBe("How my Spanish is going.");
+
+    const gh = githubData.safeParse({
+      heading: "GitHub",
+      intro: "A year of commits.",
+      weeks: 52,
+    });
+    expect(gh.success).toBe(true);
+    if (gh.success) expect(gh.data.intro).toBe("A year of commits.");
+
+    const ops = opsData.safeParse({
+      heading: "Ops",
+      intro: "Live infrastructure metrics.",
+      window_hours: 3,
+    });
+    expect(ops.success).toBe(true);
+    if (ops.success) expect(ops.data.intro).toBe("Live infrastructure metrics.");
+
+    // Absent intro round-trips as absent (not defaulted to a string).
+    for (const parsed of [
+      duolingoData.parse({}),
+      githubData.parse({}),
+      opsData.parse({}),
+    ]) {
+      expect("intro" in parsed).toBe(false);
+      expect((parsed as { intro?: string }).intro).toBeUndefined();
+    }
+
+    // Non-string intro is rejected, and unknown keys are still rejected.
+    expect(duolingoData.safeParse({ intro: 42 }).success).toBe(false);
+    expect(githubData.safeParse({ nope: "x" }).success).toBe(false);
+    expect(opsData.safeParse({ bogus: true }).success).toBe(false);
   });
 
   it("contact — optional links honour the protocol allowlist", () => {

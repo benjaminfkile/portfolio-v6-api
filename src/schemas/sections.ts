@@ -124,6 +124,7 @@ export const LANGUAGE_CODE_REGEX = /^[a-z-]{2,8}$/;
 export const duolingoData = z
   .object({
     heading: z.string().optional(),
+    intro: z.string().optional(),
     language: z.string().regex(LANGUAGE_CODE_REGEX).default("es"),
     score_label: z.string().optional(),
   })
@@ -139,6 +140,7 @@ export const duolingoData = z
 export const githubData = z
   .object({
     heading: z.string().optional(),
+    intro: z.string().optional(),
     weeks: z.number().int().min(1).max(53).default(52),
   })
   .strict();
@@ -155,6 +157,7 @@ export const githubData = z
 export const opsData = z
   .object({
     heading: z.string().optional(),
+    intro: z.string().optional(),
     window_hours: z.number().int().min(1).max(24).default(3),
   })
   .strict();
