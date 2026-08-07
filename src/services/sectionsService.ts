@@ -1,4 +1,5 @@
 import { stripEmptyStrings } from "../utils/draftData";
+import { formatZodError } from "../utils/zodError";
 import { Knex } from "knex";
 import { getDb } from "../db/db";
 import {
@@ -132,7 +133,10 @@ function validateSectionData(
   const schema = DRAFT_SECTION_DATA_SCHEMAS[type];
   const parsed = schema.safeParse(stripEmptyStrings(data ?? {}));
   if (!parsed.success) {
-    return fail("validation", `Invalid data for section type "${type}": ${parsed.error.message}`);
+    return fail(
+      "validation",
+      `Invalid data for section type "${type}": ${formatZodError(parsed.error)}`
+    );
   }
   return ok(parsed.data as Record<string, unknown>);
 }
@@ -156,7 +160,7 @@ function validateItemData(
   if (!parsed.success) {
     return fail(
       "validation",
-      `Invalid data for ${sectionType} item: ${parsed.error.message}`
+      `Invalid data for ${sectionType} item: ${formatZodError(parsed.error)}`
     );
   }
   return ok(parsed.data as Record<string, unknown>);

@@ -234,6 +234,40 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
+  it("skills item — optional icon_source_dark; absent round-trips as absent (v1.6)", () => {
+    // A dark-theme override is accepted alongside the required light icon.
+    const withDark = skillsItemSchema.safeParse({
+      title: "TypeScript",
+      icon_source: "https://cdn/ts-original.svg",
+      icon_source_dark: "https://cdn/ts-plain.svg",
+    });
+    expect(withDark.success).toBe(true);
+    if (withDark.success) {
+      expect(withDark.data.icon_source_dark).toBe("https://cdn/ts-plain.svg");
+    }
+
+    // Absent is valid and must NOT materialize a key — renderers fall back to
+    // icon_source only when the override is truly absent.
+    const noDark = skillsItemSchema.safeParse({
+      title: "TypeScript",
+      icon_source: "https://cdn/ts-original.svg",
+    });
+    expect(noDark.success).toBe(true);
+    if (noDark.success) {
+      expect("icon_source_dark" in noDark.data).toBe(false);
+      expect(noDark.data.icon_source_dark).toBeUndefined();
+    }
+
+    // Present-but-empty is rejected (min 1), same as icon_source.
+    expect(
+      skillsItemSchema.safeParse({
+        title: "TypeScript",
+        icon_source: "https://cdn/ts-original.svg",
+        icon_source_dark: "",
+      }).success
+    ).toBe(false);
+  });
+
   it("portfolio item — valid with links, rejects bad media_id and js link", () => {
     expect(
       portfolioItemSchema.safeParse({

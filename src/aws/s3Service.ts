@@ -185,3 +185,27 @@ export async function deleteObject(key: string): Promise<void> {
     new DeleteObjectCommand({ Bucket: getBucket(), Key: key })
   );
 }
+
+/**
+ * Server-side PutObject (§Icons v1.6). Unlike the media path — which mints a
+ * presigned PUT for the browser to upload directly (§6.7) — the icon import
+ * downloads a devicon SVG server-side and writes it here in one call. The object
+ * is public-read behind CloudFront (§6.1) and write-once under a deterministic
+ * key, so a long-lived immutable cache header is always safe.
+ */
+export async function putObject(params: {
+  key: string;
+  body: string | Uint8Array | Buffer;
+  contentType: string;
+  cacheControl: string;
+}): Promise<void> {
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: getBucket(),
+      Key: params.key,
+      Body: params.body,
+      ContentType: params.contentType,
+      CacheControl: params.cacheControl,
+    })
+  );
+}
