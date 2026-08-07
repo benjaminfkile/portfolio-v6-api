@@ -48,8 +48,8 @@ export const aboutData = z
 
 /**
  * Sections whose content lives entirely in `section_items`
- * (`timeline`/`skills`/`portfolio`) carry only an optional section-level
- * heading/intro in their own `data`.
+ * (`timeline`/`portfolio`) carry only an optional section-level heading/intro in
+ * their own `data`.
  */
 const itemSectionData = z
   .object({
@@ -59,8 +59,24 @@ const itemSectionData = z
   .strict();
 
 export const timelineData = itemSectionData;
-export const skillsData = itemSectionData;
 export const portfolioData = itemSectionData;
+
+/**
+ * §3.4 (v1.5 Skills Sphere) — the skills section renders its items on a 3D
+ * geodesic sphere (three.js `IcosahedronGeometry`). Besides the shared
+ * heading/intro, it carries an optional `sphere_detail`: the icosahedron detail
+ * parameter (0–4), where the face count is 20·(detail+1)² (0→20, 1→80, 2→180,
+ * 3→320, 4→500). It is `.optional()`, NOT `.default()`: absent means AUTO — the
+ * renderer picks the smallest detail whose face count ≥ the number of skill
+ * items (clamped to 4) — and absent must round-trip as absent.
+ */
+export const skillsData = z
+  .object({
+    heading: z.string().optional(),
+    intro: z.string().optional(),
+    sphere_detail: z.number().int().min(0).max(4).optional(),
+  })
+  .strict();
 
 export const contactData = z
   .object({

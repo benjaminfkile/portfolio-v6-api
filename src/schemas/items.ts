@@ -24,8 +24,6 @@ export const skillsItemSchema = z
     title: z.string().min(1),
     description: z.string().default(""),
     icon_source: z.string().min(1),
-    // A 0–100 proficiency scale; the renderer maps it to a meter.
-    proficiency: z.number().min(0).max(100),
   })
   .strict();
 
