@@ -6,7 +6,9 @@ import {
   IconFailureCode,
   IconResult,
   getDeviconManifest,
+  getSimpleIconsManifest,
   importIcon,
+  importSimpleIcon,
 } from "../services/iconsService";
 
 /**
@@ -69,17 +71,46 @@ adminIconsRouter.get(
 );
 
 /**
- * POST /api/admin/icons/import (§Icons v1.6). Validates `{ name, variant }`
- * against the manifest, downloads the pinned SVG server-side, stores it under the
- * `icons/` prefix (image/svg+xml, long-lived cache), and returns `{ url }`.
- * Idempotent: an already-imported icon returns its URL without re-uploading.
+ * GET /api/admin/icons/simpleicons-manifest (§Icons v1.6.1). Serves the pinned
+ * simple-icons catalog, slimmed to `{ version, icons: [{ slug, title }] }` and
+ * cached ~24h. Mirror of the devicon manifest endpoint. Upstream failure → 502.
+ */
+adminIconsRouter.get(
+  "/icons/simpleicons-manifest",
+  requireAdmin(),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      send(res, await getSimpleIconsManifest());
+    } catch (err) {
+      next(err as Error);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/icons/import (§Icons v1.6 / v1.6.1). Two body shapes:
+ *
+ *   - `{ name, variant }` — the devicon import (unchanged): validate against the
+ *     devicon manifest, download the pinned SVG, store under `icons/devicon/`.
+ *   - `{ source: 'simpleicons', slug, color }` — the tinted simple-icons import:
+ *     validate slug against the pinned catalog + color by regex, download the
+ *     tinted SVG from cdn.simpleicons.org, store under `icons/simpleicons/`.
+ *
+ * Both are idempotent (deterministic key → existing object returns its URL) and
+ * return `{ url }` (a media-CDN URL).
  */
 adminIconsRouter.post(
   "/icons/import",
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { name, variant } = req.body ?? {};
+      const body = req.body ?? {};
+      if (body.source === "simpleicons") {
+        const { slug, color } = body;
+        send(res, await importSimpleIcon({ slug, color }, cdnDomain(req)));
+        return;
+      }
+      const { name, variant } = body;
       send(res, await importIcon({ name, variant }, cdnDomain(req)));
     } catch (err) {
       next(err as Error);

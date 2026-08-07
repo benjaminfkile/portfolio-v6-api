@@ -195,9 +195,269 @@ export async function getDeviconManifest(
   return ok(manifest);
 }
 
-/** Test-only: forget the cached manifest so a fresh fetch runs. */
+// ---- Simple Icons manifest proxy (§Icons v1.6.1, task #541) -----------------
+
+/**
+ * PINNED simple-icons release (§Icons v1.6.1). The catalog is fetched at this
+ * exact version so slug validation is reproducible; the live artwork itself is
+ * served (and tinted) by the cdn.simpleicons.org CDN at import time. Bumping
+ * simple-icons is a one-line change here. Latest stable release of the
+ * `simple-icons` npm package at implementation time (2026-08).
+ */
+export const SIMPLEICONS_VERSION = "13.21.0";
+
+/**
+ * jsDelivr URL of the simple-icons catalog data file at the pinned version. The
+ * `simple-icons` npm package ships `_data/simple-icons.json`, an array of
+ * `{ title, hex, slug? }` entries from which every slug is derivable.
+ */
+export const SIMPLEICONS_MANIFEST_URL = `https://cdn.jsdelivr.net/npm/simple-icons@${SIMPLEICONS_VERSION}/_data/simple-icons.json`;
+
+/** cdn.simpleicons.org base — renders any icon at any colour (§Icons v1.6.1). */
+export const SIMPLEICONS_CDN_BASE = "https://cdn.simpleicons.org";
+
+/** S3 key prefix for imported (tinted) simple-icons — OUTSIDE `media/` (§6.9). */
+export const SIMPLEICONS_KEY_PREFIX = "icons/simpleicons";
+
+/** A 3- or 6-digit hex colour WITHOUT a leading `#` (§Icons v1.6.1). */
+export const SIMPLEICONS_COLOR_RE = /^(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+/**
+ * Derive a simple-icons slug from a title, mirroring the project's official
+ * `titleToSlug` (github.com/simple-icons/simple-icons). Entries carry an explicit
+ * `slug` only when it differs from this derivation, so `entry.slug ?? titleToSlug`
+ * reproduces the exact CDN slug in all cases.
+ */
+export function titleToSlug(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\+/g, "plus")
+    .replace(/\./g, "dot")
+    .replace(/&/g, "and")
+    .replace(/đ/g, "d")
+    .replace(/ħ/g, "h")
+    .replace(/ı/g, "i")
+    .replace(/ĸ/g, "k")
+    .replace(/ŀ/g, "l")
+    .replace(/ł/g, "l")
+    .replace(/ß/g, "ss")
+    .replace(/ŧ/g, "t")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/** The contract-shaped simple-icons entry — just what the picker UI needs. */
+export interface SlimSimpleIcon {
+  slug: string;
+  title: string;
+}
+
+export interface SimpleIconsManifest {
+  version: string;
+  icons: SlimSimpleIcon[];
+}
+
+/**
+ * Slim a raw simple-icons data file to `{ slug, title }[]`. Accepts either the
+ * bare array form or the `{ icons: [...] }` wrapper form (the data file has used
+ * both across releases). Each slug is the entry's explicit `slug` when present,
+ * otherwise the title-derived slug. Rows without a string `title` are dropped.
+ */
+export function slimSimpleIcons(raw: unknown): SlimSimpleIcon[] {
+  const arr = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).icons)
+      ? ((raw as Record<string, unknown>).icons as unknown[])
+      : null;
+  if (!arr) return [];
+  const icons: SlimSimpleIcon[] = [];
+  for (const entry of arr) {
+    if (entry == null || typeof entry !== "object") continue;
+    const rec = entry as Record<string, unknown>;
+    if (typeof rec.title !== "string" || rec.title.length === 0) continue;
+    const slug =
+      typeof rec.slug === "string" && rec.slug.length > 0
+        ? rec.slug
+        : titleToSlug(rec.title);
+    if (!slug) continue;
+    icons.push({ slug, title: rec.title });
+  }
+  return icons;
+}
+
+interface SimpleIconsCacheEntry {
+  manifest: SimpleIconsManifest;
+  expiresAt: number;
+}
+
+let simpleIconsCache: SimpleIconsCacheEntry | null = null;
+
+/**
+ * Fetch + slim the simple-icons catalog, cached ~24h (mirror of
+ * `getDeviconManifest`). Returns the cached copy while fresh; on a miss it
+ * fetches the pinned data file, slims to `{ slug, title }`, and caches. Any
+ * upstream failure is an `upstream` result the router maps to 502; a failure
+ * never poisons the cache and a stale entry is never served past its TTL.
+ */
+export async function getSimpleIconsManifest(
+  now: number = Date.now()
+): Promise<IconResult<SimpleIconsManifest>> {
+  if (simpleIconsCache && simpleIconsCache.expiresAt > now) {
+    return ok(simpleIconsCache.manifest);
+  }
+
+  const { signal, clear } = timeoutSignal();
+  let raw: unknown;
+  try {
+    const res = await fetch(SIMPLEICONS_MANIFEST_URL, {
+      headers: { accept: "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`simple-icons manifest fetch returned status ${res.status}`);
+    }
+    raw = await res.json();
+  } catch (err) {
+    console.error(
+      "[iconsService] simple-icons manifest fetch failed:",
+      err instanceof Error ? err.message : err
+    );
+    return fail(
+      "upstream",
+      "Could not fetch the simple-icons catalog from the upstream CDN"
+    );
+  } finally {
+    clear();
+  }
+
+  const icons = slimSimpleIcons(raw);
+  if (icons.length === 0) {
+    return fail("upstream", "The simple-icons catalog had an unexpected shape");
+  }
+
+  const manifest: SimpleIconsManifest = {
+    version: SIMPLEICONS_VERSION,
+    icons,
+  };
+  simpleIconsCache = { manifest, expiresAt: now + MANIFEST_CACHE_TTL_MS };
+  return ok(manifest);
+}
+
+/** cdn.simpleicons.org URL rendering `slug` tinted to `color` (hex, no `#`). */
+export function simpleIconCdnUrl(slug: string, color: string): string {
+  return `${SIMPLEICONS_CDN_BASE}/${slug}/${color}`;
+}
+
+/**
+ * Deterministic S3 key for a tinted simple-icon (§Icons v1.6.1):
+ * `icons/simpleicons/<slug>-<color>.svg`. The colour is lower-cased so
+ * `EDF1F7` and `edf1f7` map to one object, keeping the import idempotent.
+ */
+export function simpleIconS3Key(slug: string, color: string): string {
+  return `${SIMPLEICONS_KEY_PREFIX}/${slug}-${color.toLowerCase()}.svg`;
+}
+
+export interface ImportSimpleIconInput {
+  slug?: unknown;
+  color?: unknown;
+}
+
+/**
+ * Download a tinted simple-icon from cdn.simpleicons.org and store it under the
+ * `icons/simpleicons/` prefix, returning its media-CDN URL (§Icons v1.6.1).
+ *
+ *   - `slug` is validated against the (cached, pinned) catalog and `color` by
+ *     regex (3/6-digit hex, no `#`) — either failing is a 400 with a named
+ *     message and no download happens.
+ *   - the key is deterministic, so the import is IDEMPOTENT: a HEAD that finds the
+ *     object already present skips the download+upload and returns the URL.
+ *   - a fresh object is fetched from the CDN and written with `image/svg+xml` and
+ *     a long-lived immutable cache header, OUTSIDE the media table/orphan sweep.
+ */
+export async function importSimpleIcon(
+  input: ImportSimpleIconInput,
+  cdnDomain: string
+): Promise<IconResult<ImportIconResult>> {
+  const slug = typeof input.slug === "string" ? input.slug.trim() : "";
+  const color = typeof input.color === "string" ? input.color.trim() : "";
+  if (!slug) return fail("bad_request", "slug is required");
+  if (!color) return fail("bad_request", "color is required");
+  if (!SIMPLEICONS_COLOR_RE.test(color)) {
+    return fail(
+      "validation",
+      `invalid color "${color}" — expected a 3- or 6-digit hex value without "#" (e.g. EDF1F7)`
+    );
+  }
+
+  const manifest = await getSimpleIconsManifest();
+  if (!manifest.ok) return fail(manifest.code, manifest.message);
+
+  if (!manifest.data.icons.some((i) => i.slug === slug)) {
+    return fail("validation", `unknown simple-icons slug "${slug}"`);
+  }
+
+  const key = simpleIconS3Key(slug, color);
+
+  // Idempotency: an already-imported tint (deterministic key present) is served
+  // straight from its URL — no re-download, no re-upload.
+  const existing = await s3.headObject(key);
+  if (existing) {
+    return ok({ url: toCdnUrl(cdnDomain, key) });
+  }
+
+  const svg = await fetchSimpleIconSvg(slug, color);
+  if (svg === null) {
+    return fail(
+      "upstream",
+      `Could not download the "${slug}" (#${color}) SVG from the upstream CDN`
+    );
+  }
+
+  await s3.putObject({
+    key,
+    body: svg,
+    contentType: "image/svg+xml",
+    cacheControl: MEDIA_CACHE_CONTROL,
+  });
+
+  return ok({ url: toCdnUrl(cdnDomain, key) });
+}
+
+/**
+ * Fetch a tinted simple-icon SVG from cdn.simpleicons.org. Returns the SVG text
+ * on a 200, or `null` on ANY transport failure (non-2xx, timeout, network error)
+ * so the caller can map it to a clean 502 rather than throwing a 500.
+ */
+async function fetchSimpleIconSvg(
+  slug: string,
+  color: string
+): Promise<string | null> {
+  const { signal, clear } = timeoutSignal();
+  try {
+    const res = await fetch(simpleIconCdnUrl(slug, color), {
+      headers: { accept: "image/svg+xml" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`simple-icons svg fetch returned status ${res.status}`);
+    }
+    return await res.text();
+  } catch (err) {
+    console.error(
+      "[iconsService] simple-icons svg fetch failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  } finally {
+    clear();
+  }
+}
+
+/** Test-only: forget the cached manifests so a fresh fetch runs. */
 export function _resetIconsCacheForTests(): void {
   manifestCache = null;
+  simpleIconsCache = null;
 }
 
 // ---- Import -----------------------------------------------------------------
