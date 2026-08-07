@@ -341,7 +341,7 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     await createSection({ type: "hero", data: { title: "Home" } });
     await createSection({
       type: "ops",
-      data: { heading: "System health", window_hours: 6 },
+      data: { heading: "System health", intro: "Last 24h, replayed." },
     });
 
     const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
@@ -354,7 +354,10 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     }>;
     const ops = sections.find((s) => s.type === "ops");
     expect(ops).toBeDefined();
-    expect(ops!.data).toMatchObject({ heading: "System health", window_hours: 6 });
+    expect(ops!.data).toMatchObject({
+      heading: "System health",
+      intro: "Last 24h, replayed.",
+    });
   });
 });
 

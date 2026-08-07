@@ -399,10 +399,12 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     const ops = opsData.safeParse({
       heading: "Ops",
       intro: "Live infrastructure metrics.",
-      window_hours: 3,
     });
     expect(ops.success).toBe(true);
     if (ops.success) expect(ops.data.intro).toBe("Live infrastructure metrics.");
+
+    // v1.7: the lookback is no longer configurable — `window_hours` is rejected.
+    expect(opsData.safeParse({ window_hours: 3 }).success).toBe(false);
 
     // Absent intro round-trips as absent (not defaulted to a string).
     for (const parsed of [
