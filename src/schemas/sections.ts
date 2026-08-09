@@ -131,17 +131,18 @@ export const duolingoData = z
   .strict();
 
 /**
- * §3.5 (v1.2 live section) — the GitHub contribution-graph card. Config only;
- * the live data (the contribution calendar) is fetched at runtime from
- * `GET /api/github`. `weeks` is how many trailing weeks of the calendar the
- * component renders (1..53; a GitHub year is ~53 weeks), defaulting to a full
- * year (52). An optional `heading` labels the section.
+ * §3.5 (v1.10 GitHub Explorer) — the GitHub contribution-graph card. Config
+ * only; the live data (the contribution calendar) is fetched at runtime from
+ * `GET /api/github[?year=YYYY]`. As of v1.10 the section is fully browsable —
+ * the client always renders the full returned window and offers a year picker —
+ * so the v1.2 `weeks` config (how many trailing weeks to render) is REMOVED;
+ * only the header copy (`heading` / `intro`) is snapshotted. The end state
+ * mirrors `opsData`: `{ heading?, intro? }`.
  */
 export const githubData = z
   .object({
     heading: z.string().optional(),
     intro: z.string().optional(),
-    weeks: z.number().int().min(1).max(53).default(52),
   })
   .strict();
 

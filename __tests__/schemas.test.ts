@@ -448,10 +448,12 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     const gh = githubData.safeParse({
       heading: "GitHub",
       intro: "A year of commits.",
-      weeks: 52,
     });
     expect(gh.success).toBe(true);
     if (gh.success) expect(gh.data.intro).toBe("A year of commits.");
+
+    // v1.10: the section is browsable via the year picker — `weeks` is removed.
+    expect(githubData.safeParse({ weeks: 52 }).success).toBe(false);
 
     const ops = opsData.safeParse({
       heading: "Ops",
