@@ -9,18 +9,24 @@ let db: Knex | null = null;
 
 /**
  * Resolve the Postgres connection from loaded config. `db_name` / credentials
- * come from the config (env under IS_LOCAL, Secrets Manager otherwise); host,
- * port and ssl always come from the environment — matching the manual migration
+ * come from the config (env under IS_LOCAL, Secrets Manager otherwise). Host
+ * and port prefer the DB secret when present — RDS-managed secrets carry
+ * `host`/`port` alongside the credentials — so deployed containers need no
+ * DB_* env vars; ssl likewise prefers the app secret's `db_ssl`. The
+ * environment remains the fallback for local dev and the manual migration
  * command in TECH_SPEC_V1.md §9.1 (DB_HOST / DB_SSL=true against RDS).
  */
 export function buildDbConnection(config: LoadedConfig): IDbConnection {
   return {
-    host: process.env.DB_HOST || "localhost",
-    port: parseInt(process.env.DB_PORT || "5432", 10),
+    host: config.dbSecrets.host || process.env.DB_HOST || "localhost",
+    port: parseInt(
+      String(config.dbSecrets.port ?? process.env.DB_PORT ?? "5432"),
+      10
+    ),
     user: config.dbSecrets.username,
     password: config.dbSecrets.password,
     database: config.appSecrets.db_name,
-    ssl: process.env.DB_SSL === "true",
+    ssl: (config.appSecrets.db_ssl ?? process.env.DB_SSL) === "true",
   };
 }
 

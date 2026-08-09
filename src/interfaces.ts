@@ -36,6 +36,12 @@ export interface IAppSecrets {
   token_encryption_key?: string;
   gateway_health_url?: string;
   /**
+   * Whether the Postgres connection uses TLS, as the string "true"/"false"
+   * (matching the DB_SSL env var it replaces). Optional: when unset,
+   * buildDbConnection falls back to DB_SSL from the environment.
+   */
+  db_ssl?: string;
+  /**
    * Name of the CloudWatch dashboard the `ops` live section (§3.5, v1.3) reads
    * through `GET /api/ops`. This is an infra identifier and MUST NOT appear in
    * repo content, code, tests, or logs — it lives only in the stored secret
@@ -46,9 +52,15 @@ export interface IAppSecrets {
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----
+// RDS-managed secrets also carry `host`/`port` alongside the credentials;
+// buildDbConnection prefers them over the DB_HOST/DB_PORT env fallbacks, so a
+// deployed container needs no DB_* env vars. Both stay optional — the local
+// path (loadLocalConfig) supplies credentials only.
 export interface IDBSecrets {
   username: string;
   password: string;
+  host?: string;
+  port?: number | string;
 }
 
 // ---- Resolved Postgres connection used by initDb ----------------------------
