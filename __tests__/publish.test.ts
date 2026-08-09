@@ -317,11 +317,13 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     });
   });
 
-  it("publishes a github live section (v1.2 §3.4/§3.5)", async () => {
+  it("publishes a github live section (v1.10 §3.4/§3.5)", async () => {
     await createSection({ type: "hero", data: { title: "Home" } });
     await createSection({
       type: "github",
-      data: { heading: "Contributions", weeks: 52 },
+      // v1.10: the section is browsable via the year picker — config is header
+      // copy only; the removed `weeks` key is no longer accepted.
+      data: { heading: "Contributions", intro: "A year of commits." },
     });
 
     const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
@@ -334,7 +336,10 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     }>;
     const gh = sections.find((s) => s.type === "github");
     expect(gh).toBeDefined();
-    expect(gh!.data).toMatchObject({ heading: "Contributions", weeks: 52 });
+    expect(gh!.data).toMatchObject({
+      heading: "Contributions",
+      intro: "A year of commits.",
+    });
   });
 
   it("publishes an ops live section (v1.3 §3.4/§3.5)", async () => {
