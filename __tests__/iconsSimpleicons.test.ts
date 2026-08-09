@@ -34,13 +34,18 @@ import { failure } from "../src/utils/envelope";
 import {
   SIMPLEICONS_VERSION,
   SIMPLEICONS_MANIFEST_URL,
-  SIMPLEICONS_CDN_BASE,
   DEVICON_VERSION,
   MANIFEST_CACHE_TTL_MS,
   titleToSlug,
   slimSimpleIcons,
+  simpleIconSvgUrl,
+  tintSvg,
   _resetIconsCacheForTests,
 } from "../src/services/iconsService";
+
+/** True for the pinned jsDelivr ARTWORK url (not the `_data` catalog json). */
+const isArtworkUrl = (url: unknown): boolean =>
+  String(url).includes(`simple-icons@${SIMPLEICONS_VERSION}/icons/`);
 
 const mockVerify = verifyAdminIdToken as jest.Mock;
 const mockHead = s3.headObject as jest.Mock;
@@ -60,8 +65,10 @@ const RAW_CATALOG = [
   { title: "" }, // dropped: no usable title
 ];
 
+// RAW artwork as shipped by the simple-icons package: single glyph, no fill.
+// The import downloads this and tints it server-side (tintSvg).
 const SVG_BODY =
-  '<svg xmlns="http://www.w3.org/2000/svg" fill="#EDF1F7"><path d="M0 0"/></svg>';
+  '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>';
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return {
@@ -82,7 +89,7 @@ function svgResponse(body: string, ok = true, status = 200): Response {
 }
 
 // Route the mocked fetch by URL: the catalog data file returns RAW_CATALOG, a
-// cdn.simpleicons.org URL returns the tinted SVG body. Overridden per-case.
+// pinned jsDelivr artwork URL returns the raw SVG body. Overridden per-case.
 let fetchImpl: (url: string) => Response;
 const mockFetch = jest.fn(async (input: unknown) => fetchImpl(String(input)));
 
@@ -125,7 +132,7 @@ beforeEach(() => {
   mockPut.mockClear();
   mockFetch.mockClear();
   fetchImpl = (url) =>
-    url.startsWith(SIMPLEICONS_CDN_BASE)
+    isArtworkUrl(url)
       ? svgResponse(SVG_BODY)
       : jsonResponse(RAW_CATALOG);
 });
@@ -235,9 +242,10 @@ describe("POST /api/admin/icons/import — simpleicons (§Icons v1.6.1)", () => 
     // Idempotency probe on the deterministic key first.
     expect(mockHead).toHaveBeenCalledWith(KEY);
 
-    // Downloaded the tinted SVG from the simple-icons CDN (hex, no '#').
+    // Downloaded the RAW artwork from pinned jsDelivr (never
+    // cdn.simpleicons.org — it 403s datacenter IPs) and tinted server-side.
     expect(mockFetch).toHaveBeenCalledWith(
-      `${SIMPLEICONS_CDN_BASE}/react/${COLOR}`,
+      simpleIconSvgUrl("react"),
       expect.any(Object)
     );
     expect(mockPut).toHaveBeenCalledTimes(1);
@@ -245,7 +253,8 @@ describe("POST /api/admin/icons/import — simpleicons (§Icons v1.6.1)", () => 
     expect(putArgs.key).toBe(KEY);
     expect(putArgs.key.startsWith("icons/simpleicons/")).toBe(true);
     expect(putArgs.contentType).toBe("image/svg+xml");
-    expect(putArgs.body).toBe(SVG_BODY);
+    expect(putArgs.body).toBe(tintSvg(SVG_BODY, COLOR));
+    expect(putArgs.body).toContain(`fill="#${COLOR.toLowerCase()}"`);
     expect(typeof putArgs.cacheControl).toBe("string");
   });
 
@@ -270,7 +279,7 @@ describe("POST /api/admin/icons/import — simpleicons (§Icons v1.6.1)", () => 
     expect(mockPut).not.toHaveBeenCalled();
     // Slug rejected before any CDN artwork fetch.
     const svgFetches = mockFetch.mock.calls.filter((c) =>
-      String(c[0]).startsWith(SIMPLEICONS_CDN_BASE)
+      isArtworkUrl(c[0])
     );
     expect(svgFetches).toHaveLength(0);
   });
@@ -333,14 +342,14 @@ describe("POST /api/admin/icons/import — simpleicons (§Icons v1.6.1)", () => 
     expect(res.body.data.url).toBe(URL);
     expect(mockPut).not.toHaveBeenCalled();
     const svgFetches = mockFetch.mock.calls.filter((c) =>
-      String(c[0]).startsWith(SIMPLEICONS_CDN_BASE)
+      isArtworkUrl(c[0])
     );
     expect(svgFetches).toHaveLength(0);
   });
 
   it("returns 502 when the CDN artwork download fails", async () => {
     fetchImpl = (url) =>
-      url.startsWith(SIMPLEICONS_CDN_BASE)
+      isArtworkUrl(url)
         ? svgResponse("", false, 500)
         : jsonResponse(RAW_CATALOG);
 

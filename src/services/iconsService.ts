@@ -198,9 +198,11 @@ export async function getDeviconManifest(
 // ---- Simple Icons manifest proxy (§Icons v1.6.1, task #541) -----------------
 
 /**
- * PINNED simple-icons release (§Icons v1.6.1). The catalog is fetched at this
- * exact version so slug validation is reproducible; the live artwork itself is
- * served (and tinted) by the cdn.simpleicons.org CDN at import time. Bumping
+ * PINNED simple-icons release (§Icons v1.6.1). The catalog AND the artwork are
+ * fetched from jsDelivr at this exact version, and the tint is applied
+ * server-side (see `tintSvg`) — cdn.simpleicons.org is used only by the admin's
+ * browser-side previews, because it 403s requests from datacenter IPs (observed
+ * from EC2, 2026-08-09), so the API must never fetch from it. Bumping
  * simple-icons is a one-line change here. Latest stable release of the
  * `simple-icons` npm package at implementation time (2026-08).
  */
@@ -350,6 +352,31 @@ export function simpleIconCdnUrl(slug: string, color: string): string {
 }
 
 /**
+ * jsDelivr URL of the RAW (untinted) simple-icon SVG at the pinned version —
+ * the import's actual download source; the tint is applied by `tintSvg`.
+ */
+export function simpleIconSvgUrl(slug: string): string {
+  return `https://cdn.jsdelivr.net/npm/simple-icons@${SIMPLEICONS_VERSION}/icons/${slug}.svg`;
+}
+
+/**
+ * Tint a simple-icons SVG to `color` (hex, no `#`) by setting `fill` on the
+ * root `<svg>` element — the package's SVGs are a single uniform-fill glyph
+ * with no fill of their own, which is exactly how cdn.simpleicons.org tints
+ * them. Replaces an existing root fill defensively; lower-cases the colour to
+ * match the deterministic S3 key.
+ */
+export function tintSvg(svg: string, color: string): string {
+  const fill = `fill="#${color.toLowerCase()}"`;
+  const root = svg.match(/<svg\b[^>]*>/);
+  if (!root) return svg;
+  const tinted = /\bfill="[^"]*"/.test(root[0])
+    ? root[0].replace(/\bfill="[^"]*"/, fill)
+    : root[0].replace(/^<svg\b/, `<svg ${fill}`);
+  return svg.replace(root[0], tinted);
+}
+
+/**
  * Deterministic S3 key for a tinted simple-icon (§Icons v1.6.1):
  * `icons/simpleicons/<slug>-<color>.svg`. The colour is lower-cased so
  * `EDF1F7` and `edf1f7` map to one object, keeping the import idempotent.
@@ -425,9 +452,11 @@ export async function importSimpleIcon(
 }
 
 /**
- * Fetch a tinted simple-icon SVG from cdn.simpleicons.org. Returns the SVG text
- * on a 200, or `null` on ANY transport failure (non-2xx, timeout, network error)
- * so the caller can map it to a clean 502 rather than throwing a 500.
+ * Fetch the raw simple-icon SVG from jsDelivr (pinned version) and tint it
+ * server-side. Returns the tinted SVG text on a 200, or `null` on ANY transport
+ * failure (non-2xx, timeout, network error) so the caller can map it to a clean
+ * 502 rather than throwing a 500. Not cdn.simpleicons.org: that CDN 403s
+ * datacenter IPs, so it works from a dev laptop and fails from EC2.
  */
 async function fetchSimpleIconSvg(
   slug: string,
@@ -435,14 +464,14 @@ async function fetchSimpleIconSvg(
 ): Promise<string | null> {
   const { signal, clear } = timeoutSignal();
   try {
-    const res = await fetch(simpleIconCdnUrl(slug, color), {
+    const res = await fetch(simpleIconSvgUrl(slug), {
       headers: { accept: "image/svg+xml" },
       signal,
     });
     if (!res.ok) {
       throw new Error(`simple-icons svg fetch returned status ${res.status}`);
     }
-    return await res.text();
+    return tintSvg(await res.text(), color);
   } catch (err) {
     console.error(
       "[iconsService] simple-icons svg fetch failed:",
