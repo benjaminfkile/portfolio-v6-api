@@ -400,7 +400,7 @@ describe("cascade delete (§3.2)", () => {
           intro: "i",
           description: "d",
           media_id: "11111111-1111-1111-1111-111111111111",
-          tech_icons: [],
+          skill_refs: [],
           links: [],
         },
       });

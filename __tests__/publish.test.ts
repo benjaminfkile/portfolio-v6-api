@@ -227,7 +227,7 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
       intro: "i",
       description: "d",
       media_id: MEDIA_ID,
-      tech_icons: ["ts"],
+      skill_refs: [],
       links: [{ type: "repo", label: "code", url: "https://example.com" }],
     });
 
@@ -382,6 +382,127 @@ describe("publish validation refusal (§3.9)", () => {
   });
 });
 
+// ---- skill_refs publish validation (§Skill Refs v1.8) ----------------------
+
+describe("publish skill_refs validation (§Skill Refs v1.8)", () => {
+  const PORTFOLIO_MEDIA = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+  /** Create a skills section (optionally hidden) with one item (optionally hidden). */
+  async function makeSkill(opts: {
+    sectionHidden?: boolean;
+    itemHidden?: boolean;
+    title?: string;
+  }): Promise<string> {
+    const section = (
+      await createSection({
+        type: "skills",
+        data: { heading: "Skills" },
+        is_hidden: opts.sectionHidden === true,
+      })
+    ).body.data;
+    const item = await request(app)
+      .post(`/api/admin/sections/${section.id}/items`)
+      .set(...AUTH)
+      .send({
+        data: { title: opts.title ?? "React", description: "", icon_source: "x" },
+        is_hidden: opts.itemHidden === true,
+      });
+    return item.body.data.id as string;
+  }
+
+  /** Create a portfolio section with one item referencing `skillRefs`. */
+  async function makePortfolioItem(
+    skillRefs: string[],
+    title = "My Project"
+  ): Promise<void> {
+    const section = (await createSection({ type: "portfolio", data: {} })).body.data;
+    await createItem(section.id, {
+      title,
+      intro: "i",
+      description: "d",
+      media_id: PORTFOLIO_MEDIA,
+      skill_refs: skillRefs,
+      links: [],
+    });
+  }
+
+  it("publishes and carries skill_refs through when every ref resolves", async () => {
+    const skillId = await makeSkill({ title: "React" });
+    await makePortfolioItem([skillId]);
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      type: string;
+      items: Array<{ data: Record<string, unknown> }>;
+    }>;
+    const portfolio = sections.find((s) => s.type === "portfolio");
+    expect(portfolio).toBeDefined();
+    expect(portfolio!.items[0].data.skill_refs).toEqual([skillId]);
+  });
+
+  it("422s with a named issue when a skill_ref is dangling", async () => {
+    await makeSkill({ title: "React" });
+    const DANGLING = "deadbeef-dead-dead-dead-deaddeafbeef";
+    await makePortfolioItem([DANGLING], "Ghost Project");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(422);
+    // The named issue includes the portfolio item title AND the offending ref.
+    expect(pub.body.errorMsg).toContain("Ghost Project");
+    expect(pub.body.errorMsg).toContain(DANGLING);
+
+    // Nothing was published.
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(0);
+  });
+
+  it("422s when a skill_ref points at a HIDDEN skills item", async () => {
+    const hiddenItemId = await makeSkill({ itemHidden: true });
+    await makePortfolioItem([hiddenItemId], "Hidden-Item Project");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(422);
+    expect(pub.body.errorMsg).toContain("Hidden-Item Project");
+    expect(pub.body.errorMsg).toContain(hiddenItemId);
+  });
+
+  it("422s when a skill_ref points at an item of a HIDDEN skills section", async () => {
+    const itemInHiddenSection = await makeSkill({ sectionHidden: true });
+    await makePortfolioItem([itemInHiddenSection], "Hidden-Section Project");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(422);
+    expect(pub.body.errorMsg).toContain("Hidden-Section Project");
+    expect(pub.body.errorMsg).toContain(itemInHiddenSection);
+  });
+
+  it("resolves a ref to a skills item on a DIFFERENT page", async () => {
+    // Skills live on `home`; the portfolio item lives on `projects`. The
+    // allowed-ref set is global, so this must publish.
+    const skillId = await makeSkill({ title: "React" });
+    const projects = (
+      await createPage({ slug: "projects", title: "Projects", nav_label: "Projects" })
+    ).body.data;
+    const portfolio = (
+      await createSection({ type: "portfolio", data: {}, page_id: projects.id })
+    ).body.data;
+    await createItem(portfolio.id, {
+      title: "Cross-page",
+      intro: "i",
+      description: "d",
+      media_id: PORTFOLIO_MEDIA,
+      skill_refs: [skillId],
+      links: [],
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+  });
+});
+
 // ---- pages-level publish validation (§3.10 / §3.9) -------------------------
 
 describe("publish pages validation (§3.10)", () => {
@@ -475,7 +596,7 @@ describe("publish pages validation (§3.10)", () => {
       intro: "i",
       description: "d",
       media_id: PROJ_MEDIA,
-      tech_icons: ["ts"],
+      skill_refs: [],
       links: [{ type: "repo", label: "code", url: "https://example.com" }],
     });
 

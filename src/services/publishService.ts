@@ -28,7 +28,15 @@ import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
 // ---- Result envelope (mirrors sectionsService) ------------------------------
 
-export type PublishFailureCode = "not_found" | "validation" | "bad_request";
+export type PublishFailureCode =
+  | "not_found"
+  | "validation"
+  | "bad_request"
+  // The working set is well-formed but a portfolio item's `skill_refs` points at
+  // a skills item that does not resolve to a visible skill (§Skill Refs v1.8).
+  // Distinct from `validation` so the router can map it to 422 (unprocessable)
+  // rather than 400 (malformed) — the content is valid, the reference is not.
+  | "ref_validation";
 
 export type PublishResult<T> =
   | { ok: true; data: T }
@@ -147,6 +155,28 @@ function collectMediaIds(value: unknown, acc: Set<string>): void {
   }
 }
 
+// ---- Skill-ref resolution (§Skill Refs v1.8) --------------------------------
+
+/**
+ * The set of skills `section_items.id`s a portfolio `skill_refs` entry is allowed
+ * to reference: every NON-HIDDEN item of a NON-HIDDEN `skills` section, across
+ * ALL pages (skills sections may live on any page). A ref to a hidden item, an
+ * item of a hidden skills section, or a non-existent id is not in this set and
+ * blocks publish. Built once from the entire working set before per-page
+ * validation, since a portfolio item on one page may legitimately reference a
+ * skill on another.
+ */
+function collectVisibleSkillItemIds(workingSet: SectionWithItems[]): Set<string> {
+  const ids = new Set<string>();
+  for (const section of workingSet) {
+    if (section.type !== "skills" || section.is_hidden) continue;
+    for (const item of section.items) {
+      if (!item.is_hidden) ids.add(item.id);
+    }
+  }
+  return ids;
+}
+
 // ---- Validation of the whole working set (§3.9) -----------------------------
 
 function isKnownSectionType(type: unknown): type is SectionType {
@@ -167,7 +197,8 @@ function isKnownSectionType(type: unknown): type is SectionType {
  * Zod-parsed value, so the snapshot holds exactly what the schema admits.
  */
 function validateWorkingSet(
-  sections: SectionWithItems[]
+  sections: SectionWithItems[],
+  visibleSkillItemIds: Set<string>
 ): PublishResult<SerializedSection[]> {
   const serialized: SerializedSection[] = [];
   for (const section of sections) {
@@ -204,6 +235,26 @@ function validateWorkingSet(
           `Invalid data for item ${item.id} (${section.type}): ${parsedItem.error.message}`
         );
       }
+
+      // Skill Refs v1.8 enforcement gate: every `skill_refs` entry on a portfolio
+      // item must resolve to a visible skills item (non-hidden item of a
+      // non-hidden skills section). A dangling or hidden ref is a named issue
+      // (portfolio item title + offending id) that 422s the publish. Hidden
+      // portfolio items are checked too — a hidden-but-invalid item still blocks.
+      if (section.type === "portfolio") {
+        const data = parsedItem.data as { title?: unknown; skill_refs?: unknown };
+        const refs = Array.isArray(data.skill_refs) ? data.skill_refs : [];
+        const title = typeof data.title === "string" ? data.title : item.id;
+        for (const ref of refs) {
+          if (!visibleSkillItemIds.has(ref as string)) {
+            return fail(
+              "ref_validation",
+              `Portfolio item "${title}" references skill "${ref}" which does not resolve to a visible skills item`
+            );
+          }
+        }
+      }
+
       if (!item.is_hidden) {
         items.push({ id: item.id, data: parsedItem.data as Record<string, unknown> });
       }
@@ -393,10 +444,15 @@ export async function publish(
   // Validate + serialize each page's sections. Hidden pages and hidden sections
   // are still validated (§3.9) but never serialized: only non-hidden pages, each
   // with its non-hidden sections, reach the document.
-  const byPage = groupSectionsByPage(await getWorkingSet());
+  const workingSet = await getWorkingSet();
+  // Built from the ENTIRE working set (§Skill Refs v1.8): a portfolio item may
+  // reference a skills item on a different page, so the allowed-ref set is global,
+  // not per-page.
+  const visibleSkillItemIds = collectVisibleSkillItemIds(workingSet);
+  const byPage = groupSectionsByPage(workingSet);
   const serializedPages: SerializedPage[] = [];
   for (const page of pages) {
-    const validated = validateWorkingSet(byPage.get(page.id) ?? []);
+    const validated = validateWorkingSet(byPage.get(page.id) ?? [], visibleSkillItemIds);
     if (!validated.ok) return validated;
     if (!page.is_hidden) {
       serializedPages.push({
