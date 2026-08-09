@@ -40,7 +40,12 @@ export const portfolioItemSchema = z
     media_id: z.string().uuid(),
     playback_rate: z.number().positive().optional(),
     transform_value: z.string().optional(),
-    tech_icons: z.array(z.string()),
+    // Ordered references to skills `section_items.id` uuids (§Skill Refs v1.8).
+    // Render order = array order. Replaces the legacy `tech_icons` URL list so
+    // portfolio icons are enforced-by-construction to match the skills sphere.
+    // Empty array allowed; publish validates each ref resolves to a non-hidden
+    // skills item of a non-hidden skills section.
+    skill_refs: z.array(z.string().uuid()),
     links: z.array(linkSchema),
   })
   .strict();

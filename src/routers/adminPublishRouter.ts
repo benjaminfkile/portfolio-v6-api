@@ -29,6 +29,11 @@ function statusForCode(code: PublishFailureCode): number {
   switch (code) {
     case "not_found":
       return 404;
+    // Skill Refs v1.8: the working set is well-formed but a portfolio item's
+    // `skill_refs` does not resolve to a visible skills item — 422 Unprocessable
+    // Entity, distinct from the 400 malformed-content refusals.
+    case "ref_validation":
+      return 422;
     case "validation":
     case "bad_request":
     default:

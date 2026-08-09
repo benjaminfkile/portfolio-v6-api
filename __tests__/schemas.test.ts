@@ -278,7 +278,10 @@ describe("section item schemas (§3.4 table)", () => {
         intro: "short",
         description: "long",
         media_id: "22222222-2222-2222-2222-222222222222",
-        tech_icons: ["react", "node"],
+        skill_refs: [
+          "33333333-3333-3333-3333-333333333333",
+          "44444444-4444-4444-4444-444444444444",
+        ],
         links: [{ type: "repo", label: "Code", url: "https://github.com/x" }],
       }).success
     ).toBe(true);
@@ -289,7 +292,7 @@ describe("section item schemas (§3.4 table)", () => {
         intro: "short",
         description: "long",
         media_id: "not-a-uuid",
-        tech_icons: [],
+        skill_refs: [],
         links: [],
       }).success
     ).toBe(false);
@@ -300,8 +303,62 @@ describe("section item schemas (§3.4 table)", () => {
         intro: "short",
         description: "long",
         media_id: "22222222-2222-2222-2222-222222222222",
-        tech_icons: [],
+        skill_refs: [],
         links: [{ type: "repo", label: "x", url: "javascript:alert(1)" }],
+      }).success
+    ).toBe(false);
+  });
+
+  it("portfolio item — skill_refs must be uuids (§Skill Refs v1.8)", () => {
+    // A well-formed uuid array is accepted.
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "",
+        description: "",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        skill_refs: ["33333333-3333-3333-3333-333333333333"],
+        links: [],
+      }).success
+    ).toBe(true);
+
+    // A non-uuid entry (e.g. a legacy pasted icon name/URL) is rejected.
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "",
+        description: "",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        skill_refs: ["react"],
+        links: [],
+      }).success
+    ).toBe(false);
+  });
+
+  it("portfolio item — legacy tech_icons is rejected by the strict canonical schema", () => {
+    // The field was REPLACED by skill_refs; the strict schema now treats
+    // tech_icons as an unknown key. Present-tech_icons (even alongside a valid
+    // skill_refs) fails, and an item missing skill_refs fails too.
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "",
+        description: "",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        tech_icons: ["react", "node"],
+        skill_refs: [],
+        links: [],
+      }).success
+    ).toBe(false);
+
+    expect(
+      portfolioItemSchema.safeParse({
+        title: "Project",
+        intro: "",
+        description: "",
+        media_id: "22222222-2222-2222-2222-222222222222",
+        tech_icons: ["react", "node"],
+        links: [],
       }).success
     ).toBe(false);
   });
