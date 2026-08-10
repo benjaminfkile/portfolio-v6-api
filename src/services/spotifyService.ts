@@ -5,8 +5,9 @@
  * endpoint, which requires a USER-authorized token (`user-read-currently-playing`
  * scope). The API proxies it server-side for the same reasons `/api/status`
  * proxies the gateway (§3.5): the refresh token never leaves the server, the
- * exposed shape is a deliberate curated choice, and a ~30s cache means visitor
- * traffic never multiplies upstream calls (Spotify sees ≤ ~2 req/min regardless).
+ * exposed shape is a deliberate curated choice, and a short cache means visitor
+ * traffic never multiplies upstream calls (Spotify sees ≤ ~12 req/min regardless
+ * — far under its rolling-30s-window rate limit).
  *
  * Runtime flow (§4.6):
  *   - The current ACCESS token is held in memory, exchanged from the refresh
@@ -25,8 +26,12 @@ export const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 export const SPOTIFY_NOW_PLAYING_URL =
   "https://api.spotify.com/v1/me/player/currently-playing";
 
-/** In-memory now-playing cache TTL (§4.6 "~30s"). */
-export const NOW_PLAYING_CACHE_TTL_MS = 30_000;
+/**
+ * In-memory now-playing cache TTL. §4.6 originally said "~30s"; lowered to 5s
+ * (2026-08-10) so track changes surface quickly — still ≤ 6 upstream calls per
+ * Spotify's rolling 30s rate-limit window, single-flight regardless of traffic.
+ */
+export const NOW_PLAYING_CACHE_TTL_MS = 5_000;
 /**
  * Safety margin subtracted from the token's advertised lifetime so we refresh
  * slightly BEFORE the real ~1h expiry rather than racing a 401 (§4.6).
@@ -249,7 +254,8 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
 }
 
 /**
- * Get the curated now-playing payload, served from a ~30s in-memory cache (§4.6).
+ * Get the curated now-playing payload, served from a short in-memory cache
+ * (`NOW_PLAYING_CACHE_TTL_MS`, §4.6).
  * Concurrent cache-miss callers share a single upstream call (single-flight).
  * Always resolves — never rejects — so `GET /api/now-playing` never returns a 5xx.
  */
@@ -276,7 +282,7 @@ export async function getNowPlaying(config: SpotifyConfig): Promise<NowPlaying> 
 }
 
 /**
- * Clear the in-memory access token and the ~30s cache. Called by the admin
+ * Clear the in-memory access token and the now-playing cache. Called by the admin
  * reconnect flow after storing a new refresh token so the very next
  * /api/now-playing request runs on the new authorization instead of riding out
  * the old token/cache.
