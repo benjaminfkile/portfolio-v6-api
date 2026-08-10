@@ -130,7 +130,9 @@ describe("OAuth state (spotifyOAuthService)", () => {
     expect(url.searchParams.get("client_id")).toBe("cid");
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("redirect_uri")).toBe("http://cb/here");
-    expect(url.searchParams.get("scope")).toBe("user-read-currently-playing");
+    expect(url.searchParams.get("scope")).toBe(
+      "user-read-currently-playing user-read-recently-played"
+    );
     expect(url.searchParams.get("state")).toBe("st4te");
     expect(url.toString()).not.toContain("client-secret");
   });

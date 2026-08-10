@@ -3,10 +3,12 @@ import app from "../src/app";
 import {
   getNowPlaying,
   mapCurrentlyPlaying,
+  mapRecentlyPlayed,
   _resetSpotifyStateForTests,
   NOW_PLAYING_CACHE_TTL_MS,
   SPOTIFY_TOKEN_URL,
   SPOTIFY_NOW_PLAYING_URL,
+  SPOTIFY_RECENTLY_PLAYED_URL,
   SpotifyConfig,
 } from "../src/services/spotifyService";
 
@@ -69,10 +71,50 @@ function statusResponse(status: number): Response {
   } as unknown as Response;
 }
 
-/** Route the mock by URL so token vs currently-playing are answered separately. */
+/** A recently-played 200 body — `items[0].track` mirrors currently-playing's item. */
+function recentlyPlayed200(): Response {
+  return {
+    status: 200,
+    ok: true,
+    json: async () => ({
+      items: [
+        {
+          played_at: "2026-08-10T20:15:00.000Z",
+          track: {
+            name: "Last Song",
+            duration_ms: 199000,
+            artists: [{ name: "Last Artist" }],
+            album: {
+              name: "Last Album",
+              images: [{ url: "https://i.scdn.co/image/last" }],
+            },
+            external_urls: { spotify: "https://open.spotify.com/track/last" },
+          },
+        },
+      ],
+    }),
+  } as unknown as Response;
+}
+
+/** The curated shape recentlyPlayed200() maps to. */
+const LAST_PLAYED = {
+  track: {
+    title: "Last Song",
+    artists: ["Last Artist"],
+    album: "Last Album",
+    art_url: "https://i.scdn.co/image/last",
+    url: "https://open.spotify.com/track/last",
+    progress_ms: null,
+    duration_ms: 199000,
+  },
+  played_at: "2026-08-10T20:15:00.000Z",
+};
+
+/** Route the mock by URL so each Spotify endpoint is answered separately. */
 function routeFetch(handlers: {
   token?: () => Response | Promise<Response>;
   nowPlaying?: () => Response | Promise<Response>;
+  recentlyPlayed?: () => Response | Promise<Response>;
 }): void {
   mockFetch.mockImplementation((url: string) => {
     if (url === SPOTIFY_TOKEN_URL) {
@@ -82,6 +124,16 @@ function routeFetch(handlers: {
     }
     if (url === SPOTIFY_NOW_PLAYING_URL) {
       return Promise.resolve((handlers.nowPlaying ?? nowPlaying200)());
+    }
+    if (url === SPOTIFY_RECENTLY_PLAYED_URL) {
+      return Promise.resolve(
+        // Default: empty history — the idle payload simply has no last_played.
+        (handlers.recentlyPlayed ?? (() => ({
+          status: 200,
+          ok: true,
+          json: async () => ({ items: [] }),
+        }) as unknown as Response))()
+      );
     }
     return Promise.reject(new Error(`unexpected url ${url}`));
   });
@@ -100,6 +152,12 @@ beforeEach(() => {
   (global as unknown as { fetch: jest.Mock }).fetch = mockFetch;
   mockFetch.mockReset();
   _resetSpotifyStateForTests();
+});
+
+afterEach(() => {
+  // Undo any console spy a test installed (mockFetch is unaffected — it is a
+  // standalone jest.fn, not a jest.spyOn mock).
+  jest.restoreAllMocks();
 });
 
 describe("mapCurrentlyPlaying (§4.6 curated shape)", () => {
@@ -262,6 +320,103 @@ describe("getNowPlaying (§4.6)", () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe("last-played fallback when idle", () => {
+  it("mapRecentlyPlayed maps items[0] to the curated shape", () => {
+    expect(
+      mapRecentlyPlayed({
+        items: [
+          {
+            played_at: "2026-08-10T20:15:00.000Z",
+            track: {
+              name: "Last Song",
+              duration_ms: 199000,
+              artists: [{ name: "Last Artist" }],
+              album: {
+                name: "Last Album",
+                images: [{ url: "https://i.scdn.co/image/last" }],
+              },
+              external_urls: { spotify: "https://open.spotify.com/track/last" },
+            },
+          },
+        ],
+      })
+    ).toEqual(LAST_PLAYED);
+  });
+
+  it("mapRecentlyPlayed degrades to null on empty/malformed bodies", () => {
+    expect(mapRecentlyPlayed(null)).toBeNull();
+    expect(mapRecentlyPlayed({})).toBeNull();
+    expect(mapRecentlyPlayed({ items: [] })).toBeNull();
+    expect(mapRecentlyPlayed({ items: [{ played_at: "x", track: null }] })).toBeNull();
+  });
+
+  it("204 idle carries last_played when recently-played answers", async () => {
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: recentlyPlayed200,
+    });
+
+    const payload = await getNowPlaying(CONFIG);
+    expect(payload).toEqual({ playing: false, last_played: LAST_PLAYED });
+  });
+
+  it("200-with-no-item (ad/private session) idle also carries last_played", async () => {
+    routeFetch({
+      nowPlaying: () =>
+        ({
+          status: 200,
+          ok: true,
+          json: async () => ({ item: null }),
+        }) as unknown as Response,
+      recentlyPlayed: recentlyPlayed200,
+    });
+
+    const payload = await getNowPlaying(CONFIG);
+    expect(payload).toEqual({ playing: false, last_played: LAST_PLAYED });
+  });
+
+  it("a 403 (token lacks the scope) yields plain idle — fallback off, no error", async () => {
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: () => statusResponse(403),
+    });
+
+    const payload = await getNowPlaying(CONFIG);
+    expect(payload).toEqual({ playing: false });
+  });
+
+  it("a recently-played failure yields plain idle, never a rejection", async () => {
+    jest.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch.mockImplementation((url: string) => {
+      if (url === SPOTIFY_TOKEN_URL)
+        return Promise.resolve(tokenResponse(ACCESS_TOKEN));
+      if (url === SPOTIFY_NOW_PLAYING_URL)
+        return Promise.resolve(statusResponse(204));
+      return Promise.reject(new Error("ETIMEDOUT"));
+    });
+
+    const payload = await getNowPlaying(CONFIG);
+    expect(payload).toEqual({ playing: false });
+  });
+
+  it("GET /api/now-playing idle response carries last_played and NO token", async () => {
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: recentlyPlayed200,
+    });
+
+    const res = await request(app).get("/api/now-playing");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ playing: false, last_played: LAST_PLAYED });
+
+    const raw = JSON.stringify(res.body);
+    expect(raw).not.toContain(ACCESS_TOKEN);
+    expect(raw).not.toContain(CONFIG.refreshToken);
+    expect(raw).not.toContain(CONFIG.clientSecret);
   });
 });
 

@@ -21,8 +21,14 @@ import { IAppSecrets } from "../interfaces";
 export const SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
 /** Same token endpoint the now-playing refresh uses (spotifyService). */
 export const SPOTIFY_OAUTH_TOKEN_URL = "https://accounts.spotify.com/api/token";
-/** The only scope now-playing needs (§4.6). */
-export const SPOTIFY_OAUTH_SCOPE = "user-read-currently-playing";
+/**
+ * Scopes now-playing needs (§4.6): currently-playing for the live track,
+ * recently-played for the last-played fallback shown when idle. Existing
+ * stored tokens keep their original grant — the fallback silently stays off
+ * until the admin reconnects and re-authorizes with both scopes.
+ */
+export const SPOTIFY_OAUTH_SCOPE =
+  "user-read-currently-playing user-read-recently-played";
 /** Authorize flows are human-paced; 10 minutes is generous but still bounded. */
 export const SPOTIFY_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 

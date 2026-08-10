@@ -25,6 +25,14 @@ export const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 /** Spotify "currently playing" endpoint (§4.6). */
 export const SPOTIFY_NOW_PLAYING_URL =
   "https://api.spotify.com/v1/me/player/currently-playing";
+/**
+ * Spotify "recently played" endpoint — the last-played fallback shown when
+ * nothing is playing. Needs the `user-read-recently-played` scope; a token
+ * authorized before that scope was added 403s here, which quietly disables
+ * the fallback (never the endpoint).
+ */
+export const SPOTIFY_RECENTLY_PLAYED_URL =
+  "https://api.spotify.com/v1/me/player/recently-played?limit=1";
 
 /**
  * In-memory now-playing cache TTL. §4.6 originally said "~30s"; lowered to 5s
@@ -58,9 +66,19 @@ export interface NowPlayingTrack {
   duration_ms: number | null;
 }
 
-/** Curated /api/now-playing payload (§4.6). Never contains any token. */
+/** The last-played track and when it finished (ISO 8601), curated shape. */
+export interface LastPlayed {
+  track: NowPlayingTrack;
+  played_at: string;
+}
+
+/**
+ * Curated /api/now-playing payload (§4.6). Never contains any token. When idle,
+ * `last_played` carries the most recently played track (best-effort: absent
+ * when the recently-played call fails or the token lacks the scope).
+ */
 export type NowPlaying =
-  | { playing: false }
+  | { playing: false; last_played?: LastPlayed }
   | { playing: true; track: NowPlayingTrack };
 
 interface AccessToken {
@@ -79,6 +97,10 @@ interface NowPlayingCacheEntry {
 let accessToken: AccessToken | null = null;
 let cache: NowPlayingCacheEntry | null = null;
 let inFlight: Promise<NowPlaying> | null = null;
+// A 403 from recently-played means the stored token predates the
+// recently-played scope — a steady state until the admin reconnects, so it is
+// logged once per process rather than on every idle cache miss.
+let recentlyPlayedScopeWarned = false;
 
 const NOT_PLAYING: NowPlaying = { playing: false };
 
@@ -176,6 +198,18 @@ async function callCurrentlyPlaying(token: string): Promise<Response> {
   }
 }
 
+async function callRecentlyPlayed(token: string): Promise<Response> {
+  const { signal, clear } = timeoutSignal();
+  try {
+    return await fetch(SPOTIFY_RECENTLY_PLAYED_URL, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      signal,
+    });
+  } finally {
+    clear();
+  }
+}
+
 /** Map a Spotify currently-playing 200 body to the curated shape (§4.6). */
 export function mapCurrentlyPlaying(body: unknown): NowPlaying {
   if (body == null || typeof body !== "object") return NOT_PLAYING;
@@ -214,9 +248,80 @@ export function mapCurrentlyPlaying(body: unknown): NowPlaying {
 }
 
 /**
+ * Map a Spotify recently-played 200 body to the curated last-played shape.
+ * The `items[0].track` object is the same shape as currently-playing's `item`,
+ * so the track mapping is shared; `played_at` is Spotify's ISO 8601 timestamp.
+ * Anything malformed degrades to `null` (no fallback), never an error.
+ */
+export function mapRecentlyPlayed(body: unknown): LastPlayed | null {
+  if (body == null || typeof body !== "object") return null;
+  const items = (body as Record<string, unknown>).items;
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const first = items[0] as Record<string, unknown> | null | undefined;
+  if (!first || typeof first !== "object") return null;
+
+  const mapped = mapCurrentlyPlaying({ item: first.track });
+  if (!mapped.playing) return null;
+
+  return {
+    track: mapped.track,
+    played_at: typeof first.played_at === "string" ? first.played_at : "",
+  };
+}
+
+/**
+ * Best-effort last-played lookup for the idle payload. Never throws and never
+ * blocks the idle answer beyond the upstream timeout: any failure — including
+ * the 403 a pre-scope-change token gets — just means no `last_played` field.
+ */
+async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
+  try {
+    const res = await callRecentlyPlayed(token);
+
+    if (res.status === 403) {
+      if (!recentlyPlayedScopeWarned) {
+        recentlyPlayedScopeWarned = true;
+        console.warn(
+          "[spotifyService] recently-played returned 403 — the stored token" +
+            " lacks the user-read-recently-played scope; reconnect Spotify" +
+            " from the admin Integrations page to enable the last-played" +
+            " fallback (warning logged once)"
+        );
+      }
+      return null;
+    }
+
+    if (res.status !== 200) {
+      throw new Error(`Spotify recently-played returned status ${res.status}`);
+    }
+
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    return mapRecentlyPlayed(body);
+  } catch (err) {
+    console.error(
+      "[spotifyService] recently-played failed; serving idle without last_played:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
+/** The idle payload, with the last-played track attached when available. */
+async function idleWithLastPlayed(token: string): Promise<NowPlaying> {
+  const last = await fetchLastPlayed(token);
+  return last ? { playing: false, last_played: last } : NOT_PLAYING;
+}
+
+/**
  * Do the actual upstream work for a cache miss: ensure a token, call Spotify, and
  * on a 401 refresh the token once and retry (§4.6). Any failure degrades to
- * `{ playing: false }` and logs — it never throws.
+ * `{ playing: false }` and logs — it never throws. When idle, the recently-played
+ * endpoint is consulted (same token) so the payload can carry `last_played`.
  */
 async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
   try {
@@ -230,7 +335,7 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
     }
 
     // 204 = nothing playing: a normal response, not an error (§4.6).
-    if (res.status === 204) return NOT_PLAYING;
+    if (res.status === 204) return idleWithLastPlayed(token);
 
     if (res.status === 200) {
       let body: unknown = null;
@@ -239,7 +344,9 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
       } catch {
         body = null;
       }
-      return mapCurrentlyPlaying(body);
+      const mapped = mapCurrentlyPlaying(body);
+      // 200-but-no-item (ad / private session) is idle too — same fallback.
+      return mapped.playing ? mapped : idleWithLastPlayed(token);
     }
 
     // Any other status (still 401 after retry, 5xx, 429, …) → degrade.
@@ -291,6 +398,8 @@ export function clearSpotifyRuntimeState(): void {
   accessToken = null;
   cache = null;
   inFlight = null;
+  // A fresh authorization may carry the recently-played scope — warn anew if not.
+  recentlyPlayedScopeWarned = false;
 }
 
 /** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */

@@ -2,7 +2,8 @@
  * scripts/spotify-auth.ts — one-time local Spotify bootstrap (TECH_SPEC_V1.md §4.6).
  *
  * Walks the OAuth 2.0 authorization-code flow to obtain a **refresh token** for the
- * `user-read-currently-playing` scope, which client-credentials auth cannot grant.
+ * `user-read-currently-playing` + `user-read-recently-played` scopes (live track +
+ * last-played fallback), which client-credentials auth cannot grant.
  * Run it locally, on the owner's machine; store the printed refresh token (with the
  * client id and secret) in Secrets Manager (§9.3).
  *
@@ -36,7 +37,7 @@ const REDIRECT_HOST = "127.0.0.1";
 const REDIRECT_PORT = 8888;
 const REDIRECT_PATH = "/callback";
 const REDIRECT_URI = `http://${REDIRECT_HOST}:${REDIRECT_PORT}${REDIRECT_PATH}`;
-const SCOPE = "user-read-currently-playing";
+const SCOPE = "user-read-currently-playing user-read-recently-played";
 const AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 
