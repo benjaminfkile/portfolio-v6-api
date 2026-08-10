@@ -9,6 +9,7 @@ import {
 } from "../schemas";
 import { SectionWithItems, getWorkingSet } from "./sectionsService";
 import { listPages, PageRow } from "./pagesService";
+import { getBlogSlugs } from "./blogsService";
 import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
 /**
@@ -198,7 +199,8 @@ function isKnownSectionType(type: unknown): type is SectionType {
  */
 function validateWorkingSet(
   sections: SectionWithItems[],
-  visibleSkillItemIds: Set<string>
+  visibleSkillItemIds: Set<string>,
+  existingBlogSlugs: Set<string>
 ): PublishResult<SerializedSection[]> {
   const serialized: SerializedSection[] = [];
   for (const section of sections) {
@@ -215,6 +217,24 @@ function validateWorkingSet(
         "validation",
         `Invalid data for section ${section.id} (${section.type}): ${parsedSection.error.message}`
       );
+    }
+
+    // Blogs v1.13: a `blog` section may pin itself to one named blog via
+    // `data.blog` (a slug). Draft-lenient accepts any string; at publish the slug
+    // must resolve to an existing blog. A dangling reference is a `ref_validation`
+    // (→ 422 naming the section), distinct from malformed content (400).
+    if (section.type === "blog") {
+      const blogSlug = (parsedSection.data as { blog?: unknown }).blog;
+      if (
+        typeof blogSlug === "string" &&
+        blogSlug.length > 0 &&
+        !existingBlogSlugs.has(blogSlug)
+      ) {
+        return fail(
+          "ref_validation",
+          `Blog section ${section.id} references blog "${blogSlug}" which does not exist`
+        );
+      }
     }
 
     const itemSchema = ITEM_SCHEMAS[section.type as keyof typeof ITEM_SCHEMAS];
@@ -449,10 +469,18 @@ export async function publish(
   // reference a skills item on a different page, so the allowed-ref set is global,
   // not per-page.
   const visibleSkillItemIds = collectVisibleSkillItemIds(workingSet);
+  // Blogs v1.13: the set of existing blog slugs a `blog` section's `data.blog`
+  // may reference. Built once before per-page validation (a blog section may
+  // live on any page).
+  const existingBlogSlugs = await getBlogSlugs();
   const byPage = groupSectionsByPage(workingSet);
   const serializedPages: SerializedPage[] = [];
   for (const page of pages) {
-    const validated = validateWorkingSet(byPage.get(page.id) ?? [], visibleSkillItemIds);
+    const validated = validateWorkingSet(
+      byPage.get(page.id) ?? [],
+      visibleSkillItemIds,
+      existingBlogSlugs
+    );
     if (!validated.ok) return validated;
     if (!page.is_hidden) {
       serializedPages.push({

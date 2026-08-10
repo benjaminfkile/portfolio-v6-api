@@ -31,6 +31,10 @@ export const postMetadataSchema = z
     title: z.string().min(1),
     excerpt: z.string().default(""),
     cover_media_id: z.string().uuid().nullable().optional(),
+    // Blogs v1.13: the owning blog, by id. Nullable/optional — a post may belong
+    // to no blog. The resolved `blog: {slug, name} | null` is a read-time shape
+    // (see `blogRefSchema`), not a write field.
+    blog_id: z.string().uuid().nullable().optional(),
     tags: z.array(z.string().min(1)).default([]),
   })
   .strict();

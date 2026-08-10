@@ -117,7 +117,7 @@ adminPostsRouter.post(
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { slug, title, excerpt, cover_media_id, tags, draft_body } =
+      const { slug, title, excerpt, cover_media_id, blog_id, tags, draft_body } =
         req.body ?? {};
       send(
         res,
@@ -126,6 +126,7 @@ adminPostsRouter.post(
           title,
           excerpt,
           cover_media_id,
+          blog_id,
           tags,
           draft_body,
         }),
@@ -158,7 +159,7 @@ adminPostsRouter.patch(
     try {
       const expected = requireExpectedUpdatedAt(req, res);
       if (expected === null) return;
-      const { slug, title, excerpt, cover_media_id, tags, draft_body } =
+      const { slug, title, excerpt, cover_media_id, blog_id, tags, draft_body } =
         req.body ?? {};
       send(
         res,
@@ -168,6 +169,7 @@ adminPostsRouter.patch(
           title,
           excerpt,
           cover_media_id,
+          blog_id,
           tags,
           draft_body,
         })
