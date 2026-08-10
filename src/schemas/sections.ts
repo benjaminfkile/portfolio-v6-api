@@ -96,11 +96,18 @@ export const statusData = z
   })
   .strict();
 
-/** §3.5 — how many posts, optional tag filter. */
+/**
+ * §3.5 — how many posts, optional tag filter, and (Blogs v1.13) an optional
+ * `blog` slug scoping the section to one named blog's posts. `blog` is a plain
+ * string here: draft-lenient (§3.9) accepts ANY string; publish-time validation
+ * (`publishService.validateWorkingSet`) is what refuses a slug that matches no
+ * existing blog, as a `ref_validation` → 422 naming the section.
+ */
 export const blogData = z
   .object({
     limit: z.number().int().positive(),
     tag: z.string().min(1).optional(),
+    blog: z.string().min(1).optional(),
   })
   .strict();
 

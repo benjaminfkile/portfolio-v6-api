@@ -7,6 +7,7 @@ import { ITEM_SCHEMAS } from "./items";
 import { SECTION_DATA_SCHEMAS } from "./sections";
 import { postSchema, postMetadataSchema } from "./posts";
 import { pageSchema } from "./pages";
+import { blogRefSchema } from "./blogs";
 
 export * from "./link";
 export * from "./blocks";
@@ -14,6 +15,7 @@ export * from "./items";
 export * from "./sections";
 export * from "./posts";
 export * from "./pages";
+export * from "./blogs";
 
 /**
  * The canonical schema surface — TECH_SPEC_V1.md §3.9 / §8.4.
@@ -34,6 +36,9 @@ export const contentRootSchema = z
     postMetadata: postMetadataSchema,
     post: postSchema,
     page: pageSchema,
+    // Blogs v1.13: the resolved blog reference a public post/summary carries
+    // (`blog: {slug, name} | null`). Surfaced so `sync:types` generates `Blog`.
+    blog: blogRefSchema,
   })
   .strict();
 

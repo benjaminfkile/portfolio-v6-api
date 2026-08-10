@@ -65,6 +65,7 @@ postsRouter.get(
           limit: req.query.limit,
           tag: req.query.tag,
           cursor: req.query.cursor,
+          blog: req.query.blog,
         },
         cdnDomain(req)
       );

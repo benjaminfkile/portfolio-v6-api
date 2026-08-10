@@ -1,6 +1,7 @@
 import { Knex } from "knex";
 import { getDb } from "../db/db";
 import { blockArraySchema, draftBlockArraySchema, slugSchema, BlockArray } from "../schemas";
+import { BlogRef } from "../schemas/blogs";
 import { stripEmptyStrings } from "../utils/draftData";
 import { collectMediaIds } from "../utils/mediaRefs";
 import { resolveMediaMap, toCdnUrl, MediaRef } from "../utils/cdn";
@@ -44,6 +45,7 @@ function ok<T>(data: T): PostResult<T> {
 
 const POSTS = "posts";
 const MEDIA_ASSETS = "media_assets";
+const BLOGS = "blogs";
 
 /** Default / maximum page size for the public summaries endpoint (§4.1). */
 export const DEFAULT_POSTS_LIMIT = 20;
@@ -57,6 +59,7 @@ export interface PostRow {
   title: string;
   excerpt: string;
   cover_media_id: string | null;
+  blog_id: string | null;
   tags: string[];
   draft_body: BlockArray;
   published_body: BlockArray | null;
@@ -73,6 +76,8 @@ export interface PostSummary {
   cover: MediaRef | null;
   tags: string[];
   published_at: string;
+  /** Owning blog (Blogs v1.13), or null when the post belongs to no blog. */
+  blog: BlogRef | null;
 }
 
 /** One public published post — §4.1. `published_body` only. */
@@ -83,6 +88,8 @@ export interface PublicPost {
   cover: MediaRef | null;
   tags: string[];
   published_at: string;
+  /** Owning blog (Blogs v1.13), or null when the post belongs to no blog. */
+  blog: BlogRef | null;
   body: BlockArray;
   media: Record<string, MediaRef>;
 }
@@ -177,6 +184,29 @@ function validateCover(value: unknown): PostResult<string | null> {
   return ok(value);
 }
 
+/**
+ * Blogs v1.13: `blog_id` is optional and nullable — `null`/absent means the post
+ * belongs to no blog. A provided value must be a uuid; the assignment is a
+ * validation failure (→ 400) if it references no existing blog.
+ */
+function validateBlogId(value: unknown): PostResult<string | null> {
+  if (value === null || value === undefined) return ok(null);
+  if (typeof value !== "string" || !UUID_RE.test(value)) {
+    return fail("validation", "blog_id must be a uuid or null");
+  }
+  return ok(value);
+}
+
+async function assertBlogExists(
+  db: Knex,
+  blogId: string | null
+): Promise<PostResult<null>> {
+  if (blogId === null) return ok(null);
+  const row = await db(BLOGS).where({ id: blogId }).select("id").first();
+  if (!row) return fail("validation", "blog_id references no blog");
+  return ok(null);
+}
+
 // ---- Media resolution (§6.8) ------------------------------------------------
 
 /** Resolve a single cover media id to an absolute CDN URL, or null. */
@@ -224,6 +254,38 @@ async function buildBodyMediaMap(
   return resolveMediaMap(cdnDomain, keyMap, alts);
 }
 
+// ---- Blog resolution (Blogs v1.13) ------------------------------------------
+
+/** Resolve a single `blog_id` to its `{ slug, name }` reference, or null. */
+async function resolveBlog(
+  db: Knex,
+  blogId: string | null
+): Promise<BlogRef | null> {
+  if (!blogId) return null;
+  const row = await db<{ id: string; slug: string; name: string }>(BLOGS)
+    .where({ id: blogId })
+    .select("slug", "name")
+    .first();
+  return row ? { slug: row.slug, name: row.name } : null;
+}
+
+/** Batch-resolve a set of `blog_id`s into a `blog_id → {slug,name}` map. */
+async function buildBlogMap(
+  db: Knex,
+  blogIds: (string | null)[]
+): Promise<Record<string, BlogRef>> {
+  const ids = Array.from(
+    new Set(blogIds.filter((v): v is string => !!v))
+  );
+  if (ids.length === 0) return {};
+  const rows = await db<{ id: string; slug: string; name: string }>(BLOGS)
+    .whereIn("id", ids)
+    .select("id", "slug", "name");
+  const map: Record<string, BlogRef> = {};
+  for (const r of rows) map[r.id] = { slug: r.slug, name: r.name };
+  return map;
+}
+
 // ---- Admin: list (§4.2 GET /api/admin/posts) --------------------------------
 
 export interface AdminPostSummary {
@@ -232,6 +294,9 @@ export interface AdminPostSummary {
   title: string;
   excerpt: string;
   cover_media_id: string | null;
+  blog_id: string | null;
+  /** Owning blog resolved to {slug, name} (Blogs v1.13), or null. */
+  blog: BlogRef | null;
   tags: string[];
   published_at: Date | null;
   created_at: Date;
@@ -241,33 +306,56 @@ export interface AdminPostSummary {
 /**
  * GET /api/admin/posts — every post, drafts included, newest-first. Bodies are
  * omitted from the list (they are fetched one at a time via GET /posts/:id);
- * `published_at = null` marks a never-published draft.
+ * `published_at = null` marks a never-published draft. Each row carries its
+ * `blog_id` and the resolved `blog: {slug, name} | null` (Blogs v1.13).
  */
 export async function listAdminPosts(): Promise<AdminPostSummary[]> {
-  const rows = await getDb()<PostRow>(POSTS)
+  const db = getDb();
+  const rows = await db<PostRow>(POSTS)
     .select(
       "id",
       "slug",
       "title",
       "excerpt",
       "cover_media_id",
+      "blog_id",
       "tags",
       "published_at",
       "created_at",
       "updated_at"
     )
     .orderBy("created_at", "desc");
-  return rows as AdminPostSummary[];
+  const blogMap = await buildBlogMap(db, rows.map((r) => r.blog_id));
+  return rows.map((r) => ({
+    id: r.id,
+    slug: r.slug,
+    title: r.title,
+    excerpt: r.excerpt,
+    cover_media_id: r.cover_media_id,
+    blog_id: r.blog_id,
+    blog: r.blog_id ? blogMap[r.blog_id] ?? null : null,
+    tags: r.tags,
+    published_at: r.published_at,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  }));
 }
 
 // ---- Admin: get one (§4.2 GET /api/admin/posts/:id) -------------------------
 
-/** GET /api/admin/posts/:id — one post with `draft_body` (and metadata). */
-export async function getAdminPost(id: string): Promise<PostResult<PostRow>> {
+/** The admin single-post view — the row plus its resolved `blog` (Blogs v1.13). */
+export interface AdminPost extends PostRow {
+  blog: BlogRef | null;
+}
+
+/** GET /api/admin/posts/:id — one post with `draft_body`, `blog_id`, `blog`. */
+export async function getAdminPost(id: string): Promise<PostResult<AdminPost>> {
   if (!UUID_RE.test(id)) return fail("not_found", "post not found");
-  const row = await getDb()<PostRow>(POSTS).where({ id }).first();
+  const db = getDb();
+  const row = await db<PostRow>(POSTS).where({ id }).first();
   if (!row) return fail("not_found", "post not found");
-  return ok(row);
+  const blog = await resolveBlog(db, row.blog_id);
+  return ok({ ...row, blog });
 }
 
 // ---- Admin: create (§4.2 POST /api/admin/posts) -----------------------------
@@ -277,6 +365,7 @@ export interface CreatePostInput {
   title?: unknown;
   excerpt?: unknown;
   cover_media_id?: unknown;
+  blog_id?: unknown;
   tags?: unknown;
   draft_body?: unknown;
 }
@@ -302,11 +391,17 @@ export async function createPost(
   if (!tags.ok) return tags;
   const cover = validateCover(input.cover_media_id);
   if (!cover.ok) return cover;
+  const blogId = validateBlogId(input.blog_id);
+  if (!blogId.ok) return blogId;
   const body =
     input.draft_body === undefined ? ok([]) : validateDraftBody(input.draft_body);
   if (!body.ok) return body;
 
   const db = getDb();
+  // A supplied blog_id must reference an existing blog (Blogs v1.13) → 400.
+  const blogExists = await assertBlogExists(db, blogId.data);
+  if (!blogExists.ok) return blogExists;
+
   const existing = await db<PostRow>(POSTS)
     .where({ slug: slug.data })
     .select("id")
@@ -319,6 +414,7 @@ export async function createPost(
       title: title.data,
       excerpt: excerpt.data,
       cover_media_id: cover.data,
+      blog_id: blogId.data,
       tags: tags.data as never,
       draft_body: JSON.stringify(body.data) as never,
     })
@@ -334,6 +430,7 @@ export interface UpdatePostInput {
   title?: unknown;
   excerpt?: unknown;
   cover_media_id?: unknown;
+  blog_id?: unknown;
   tags?: unknown;
   draft_body?: unknown;
 }
@@ -356,6 +453,7 @@ export async function updatePost(
     !has("title") &&
     !has("excerpt") &&
     !has("cover_media_id") &&
+    !has("blog_id") &&
     !has("tags") &&
     !has("draft_body")
   ) {
@@ -421,6 +519,13 @@ export async function updatePost(
       const cover = validateCover(input.cover_media_id);
       if (!cover.ok) return cover;
       patch.cover_media_id = cover.data;
+    }
+    if (has("blog_id")) {
+      const blogId = validateBlogId(input.blog_id);
+      if (!blogId.ok) return blogId;
+      const blogExists = await assertBlogExists(trx as unknown as Knex, blogId.data);
+      if (!blogExists.ok) return blogExists;
+      patch.blog_id = blogId.data;
     }
     if (has("draft_body")) {
       const body = validateDraftBody(input.draft_body);
@@ -540,6 +645,8 @@ export interface ListPublishedInput {
   limit?: unknown;
   tag?: unknown;
   cursor?: unknown;
+  /** Blogs v1.13: filter to one blog's posts by slug (composes with tag/cursor). */
+  blog?: unknown;
 }
 
 export interface ListPublishedResult {
@@ -585,6 +692,23 @@ export async function listPublishedPosts(
   }
 
   const db = getDb();
+
+  // Blogs v1.13: an optional `?blog=<slug>` filter, composing with tag/cursor. An
+  // UNKNOWN blog slug is an empty page, not an error — resolve the slug to its id
+  // and short-circuit to an empty result when it matches no blog.
+  let blogId: string | null = null;
+  if (input.blog !== undefined) {
+    if (typeof input.blog !== "string" || input.blog.length === 0) {
+      return fail("bad_request", "blog must be a non-empty string");
+    }
+    const blogRow = await db<{ id: string; slug: string }>(BLOGS)
+      .where({ slug: input.blog })
+      .select("id")
+      .first();
+    if (!blogRow) return ok({ posts: [], next_cursor: null });
+    blogId = blogRow.id;
+  }
+
   const query = db<PostRow>(POSTS)
     .whereNotNull("published_at")
     .orderBy([
@@ -595,6 +719,9 @@ export async function listPublishedPosts(
 
   if (tag) {
     query.whereRaw("? = ANY(tags)", [tag]);
+  }
+  if (blogId) {
+    query.where({ blog_id: blogId });
   }
   if (cursor) {
     // Keyset boundary: strictly older than the last item on the previous page.
@@ -611,6 +738,7 @@ export async function listPublishedPosts(
     "title",
     "excerpt",
     "cover_media_id",
+    "blog_id",
     "tags",
     "published_at"
   );
@@ -636,6 +764,9 @@ export async function listPublishedPosts(
     }
   }
 
+  // Resolve every owning blog in one query (Blogs v1.13).
+  const blogMap = await buildBlogMap(db, page.map((r) => r.blog_id));
+
   const posts: PostSummary[] = page.map((r) => ({
     slug: r.slug,
     title: r.title,
@@ -649,6 +780,7 @@ export async function listPublishedPosts(
         : null,
     tags: r.tags ?? [],
     published_at: new Date(r.published_at as Date).toISOString(),
+    blog: r.blog_id ? blogMap[r.blog_id] ?? null : null,
   }));
 
   const last = page[page.length - 1];
@@ -685,9 +817,10 @@ export async function getPublishedPost(
   }
 
   const body = (row.published_body ?? []) as BlockArray;
-  const [cover, media] = await Promise.all([
+  const [cover, media, blog] = await Promise.all([
     resolveCover(db, row.cover_media_id, cdnDomain),
     buildBodyMediaMap(db, body, cdnDomain),
+    resolveBlog(db, row.blog_id),
   ]);
 
   return ok({
@@ -698,6 +831,7 @@ export async function getPublishedPost(
       cover,
       tags: row.tags ?? [],
       published_at: new Date(row.published_at).toISOString(),
+      blog,
       body,
       media,
     },
@@ -715,6 +849,8 @@ export interface PostPreview {
   cover: MediaRef | null;
   tags: string[];
   published_at: string | null;
+  /** Owning blog (Blogs v1.13), or null when the post belongs to no blog. */
+  blog: BlogRef | null;
   body: BlockArray;
   media: Record<string, MediaRef>;
 }
@@ -736,9 +872,10 @@ export async function getDraftPostPreview(
   if (!row) return fail("not_found", "post not found");
 
   const body = (row.draft_body ?? []) as BlockArray;
-  const [cover, media] = await Promise.all([
+  const [cover, media, blog] = await Promise.all([
     resolveCover(db, row.cover_media_id, cdnDomain),
     buildBodyMediaMap(db, body, cdnDomain),
+    resolveBlog(db, row.blog_id),
   ]);
 
   return ok({
@@ -751,6 +888,7 @@ export async function getDraftPostPreview(
     published_at: row.published_at
       ? new Date(row.published_at).toISOString()
       : null,
+    blog,
     body,
     media,
   });

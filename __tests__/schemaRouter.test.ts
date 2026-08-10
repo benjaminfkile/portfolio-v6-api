@@ -27,4 +27,25 @@ describe("GET /api/schema (§8.4)", () => {
     expect(defs).toHaveProperty("Link");
     expect(defs).toHaveProperty("Block");
   });
+
+  it("surfaces the Blogs v1.13 shapes (blog ref, post blog_id, section blog field)", async () => {
+    const res = await request(app).get("/api/schema");
+    const root = (res.body.definitions ?? res.body["$defs"])[
+      "PortfolioV6Content"
+    ] as { properties: Record<string, any> };
+
+    // The resolved blog reference ({slug, name}) a public post/summary carries.
+    expect(root.properties).toHaveProperty("blog");
+    expect(Object.keys(root.properties.blog.properties)).toEqual(
+      expect.arrayContaining(["slug", "name"])
+    );
+
+    // The post write shape carries the nullable blog_id.
+    expect(root.properties.postMetadata.properties).toHaveProperty("blog_id");
+
+    // The blog SECTION config gains the optional `blog` slug field.
+    expect(
+      root.properties.sectionData.properties.blog.properties
+    ).toHaveProperty("blog");
+  });
 });

@@ -9,6 +9,7 @@ import adminSectionsRouter from "./routers/adminSectionsRouter";
 import adminPublishRouter from "./routers/adminPublishRouter";
 import adminMediaRouter from "./routers/adminMediaRouter";
 import adminPostsRouter from "./routers/adminPostsRouter";
+import adminBlogsRouter from "./routers/adminBlogsRouter";
 import adminIntegrationsRouter from "./routers/adminIntegrationsRouter";
 import adminAnalyticsRouter from "./routers/adminAnalyticsRouter";
 import adminIconsRouter from "./routers/adminIconsRouter";
@@ -112,6 +113,9 @@ app.use("/api/admin", adminMediaRouter);
 // Blog admin pipeline (§4.2, §3.6, §3.7): post CRUD, publish/unpublish lifecycle,
 // and the draft-body preview route (requireAdminOrPreviewToken).
 app.use("/api/admin", adminPostsRouter);
+// Blogs admin (Blogs v1.13): named-blog CRUD (post_count, optimistic
+// concurrency, delete-unassigns). Non-matching requests fall through.
+app.use("/api/admin", adminBlogsRouter);
 // Integrations (§4.7): the generalized integrations surface — GET /integrations,
 // PUT /integrations/:key/value, and the oauth connect/callback flow, plus the
 // legacy /api/admin/spotify/* aliases (§4.6) kept working until the admin's own

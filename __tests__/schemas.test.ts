@@ -398,6 +398,14 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(blogData.safeParse({ limit: 0 }).success).toBe(false);
   });
 
+  it("blog — optional `blog` slug accepts any string (Blogs v1.13)", () => {
+    // Draft-lenient / publish schema takes a plain string here; the existence
+    // check is a publish-time concern, not a schema one.
+    expect(blogData.safeParse({ limit: 5, blog: "code" }).success).toBe(true);
+    expect(blogData.safeParse({ limit: 5, blog: "Not A Real Slug" }).success).toBe(true);
+    expect(blogData.safeParse({ limit: 5, blog: 42 }).success).toBe(false);
+  });
+
   it("now_playing — idle enum only hide|message", () => {
     expect(nowPlayingData.safeParse({ idle: "hide" }).success).toBe(true);
     expect(
