@@ -76,4 +76,27 @@ describe("loadConfig — IS_LOCAL path", () => {
     expect(config.dbSecrets.username).toBe("node");
     expect(clientCtor).not.toHaveBeenCalled();
   });
+
+  it("leaves Machine Auth OFF by default (machine_client_id undefined) with the default scope (Machine Auth v1.15)", async () => {
+    process.env.IS_LOCAL = "true";
+    delete process.env.MACHINE_CLIENT_ID;
+    delete process.env.MACHINE_SCOPE;
+
+    const config = await loadConfig();
+
+    expect(config.appSecrets.machine_client_id).toBeUndefined();
+    expect(config.appSecrets.machine_scope).toBe("portfolio-api/machine");
+  });
+
+  it("wires MACHINE_CLIENT_ID / MACHINE_SCOPE from the environment when set", async () => {
+    process.env.IS_LOCAL = "true";
+    process.env.MACHINE_CLIENT_ID = "bot-client-abc";
+    process.env.MACHINE_SCOPE = "portfolio-api/custom";
+
+    const config = await loadConfig();
+
+    expect(config.appSecrets.machine_client_id).toBe("bot-client-abc");
+    expect(config.appSecrets.machine_scope).toBe("portfolio-api/custom");
+    expect(clientCtor).not.toHaveBeenCalled();
+  });
 });

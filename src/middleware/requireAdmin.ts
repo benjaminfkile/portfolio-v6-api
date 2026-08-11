@@ -3,6 +3,7 @@ import { verifyAdminIdToken } from "../aws/cognitoAuth";
 import { isValidPreviewToken } from "../services/previewTokenService";
 import { IAppSecrets } from "../interfaces";
 import { failure } from "../utils/envelope";
+import { checkMachine } from "./machineAuth";
 
 // The verified admin's Cognito `sub` is attached to the request for handlers
 // that want to attribute a write (§5.3). No `users` row is loaded — portfolio v6
@@ -28,11 +29,11 @@ declare global {
 export const PREVIEW_TOKEN_QUERY_PARAMS = ["token", "preview"] as const;
 export const PREVIEW_TOKEN_HEADER = "x-preview-token";
 
-function getSecrets(req: Request): IAppSecrets | undefined {
+export function getSecrets(req: Request): IAppSecrets | undefined {
   return req.app.get("secrets") as IAppSecrets | undefined;
 }
 
-function bearerToken(req: Request): string | undefined {
+export function bearerToken(req: Request): string | undefined {
   const authHeader = req.headers["authorization"];
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return undefined;
@@ -41,7 +42,7 @@ function bearerToken(req: Request): string | undefined {
   return token.length > 0 ? token : undefined;
 }
 
-interface AdminAuthResult {
+export interface AdminAuthResult {
   ok: boolean;
   status?: 401 | 403;
   message?: string;
@@ -57,7 +58,7 @@ interface AdminAuthResult {
  * - missing/invalid/expired token → 401
  * - valid token but not in "admins" → 403
  */
-async function checkAdmin(req: Request): Promise<AdminAuthResult> {
+export async function checkAdmin(req: Request): Promise<AdminAuthResult> {
   const token = bearerToken(req);
   if (!token) {
     return { ok: false, status: 401, message: "Unauthorized" };
@@ -97,13 +98,27 @@ export function requireAdmin(): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
       const result = await checkAdmin(req);
-      if (!result.ok) {
-        return res
-          .status(result.status as number)
-          .json(failure(result.message as string));
+      if (result.ok) {
+        req.adminSub = result.sub;
+        return next();
       }
-      req.adminSub = result.sub;
-      next();
+
+      // The admin path is UNCHANGED for humans (valid admin ID token → next;
+      // missing → 401; wrong group → 403). One added denial: when the Machine
+      // Auth feature is configured (Machine Auth v1.15) and the caller presents a
+      // VALID machine access token, this route is outside the machine's narrow
+      // surface, so deny with 403 (authenticated principal, not authorized here)
+      // instead of the bare 401. This is a strict no-op when `machine_client_id`
+      // is unset — `checkMachine` returns `off` and makes no AWS call — so with
+      // the feature off behavior is byte-for-byte identical to before.
+      const machine = await checkMachine(req);
+      if (machine.status === "valid") {
+        return res.status(403).json(failure("Forbidden"));
+      }
+
+      return res
+        .status(result.status as number)
+        .json(failure(result.message as string));
     } catch (err) {
       next(err as Error);
     }

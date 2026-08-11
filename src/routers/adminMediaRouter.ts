@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import { requireAdmin } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import {
   MediaFailureCode,
@@ -15,8 +16,12 @@ import {
  * Admin media router — TECH_SPEC_V1.md §4.2, §6.7, §6.9.
  *
  * Presigned uploads, confirm, the media library listing, hard delete, and the
- * on-demand GC sweep. Every route is behind `requireAdmin()`. Business logic and
- * all S3 access live in `mediaService`/`s3Service`; this router only shapes the
+ * on-demand GC sweep. The three routes a post image needs — `POST /media/
+ * upload-url`, `POST /media/:id/confirm`, and `GET /media` — are behind
+ * `requireAdminOrMachine()` so the external posting bot (Machine Auth v1.15) can
+ * attach images to a post; `POST /media/sweep` and `DELETE /media/:id` stay
+ * admin-only (`requireAdmin()`), so a machine token gets 403 there. Business logic
+ * and all S3 access live in `mediaService`/`s3Service`; this router only shapes the
  * request/response envelope and maps `MediaResult` failure codes to HTTP status.
  */
 const adminMediaRouter = express.Router();
@@ -46,7 +51,7 @@ function send<T>(res: Response, result: MediaResult<T>, okStatus = 200): Respons
  */
 adminMediaRouter.post(
   "/media/upload-url",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { filename, mime, size } = req.body ?? {};
@@ -63,7 +68,7 @@ adminMediaRouter.post(
  */
 adminMediaRouter.post(
   "/media/:id/confirm",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await confirmUpload(req.params.id));
@@ -92,7 +97,7 @@ adminMediaRouter.post(
 /** GET /api/admin/media (§4.2) — all assets with orphan status + deletion date. */
 adminMediaRouter.get(
   "/media",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(200).json(success({ assets: await listAssets() }));

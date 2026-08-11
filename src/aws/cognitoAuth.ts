@@ -62,3 +62,62 @@ export async function verifyAdminIdToken(
   const payload = await verifier.verify(token);
   return payload as unknown as AdminIdTokenPayload;
 }
+
+// ---- Machine (client-credentials) ACCESS-token path — Machine Auth v1.15 -----
+
+/**
+ * Claims we rely on from a Cognito client-credentials ACCESS token. Cognito puts
+ * the granted resource-server scopes in a single space-delimited `scope` string
+ * (e.g. `"portfolio-api/machine"`); `client_id` echoes the app client the token
+ * was issued to (which the verifier already pins). `sub` is the app client id too.
+ */
+export interface MachineAccessTokenPayload {
+  sub: string;
+  scope?: string;
+  client_id?: string;
+  [claim: string]: unknown;
+}
+
+// A separate verifier from the ID-token one: an ACCESS token has
+// `token_use: "access"` and is issued to the MACHINE app client, so it fails the
+// admin ID-token verifier (wrong token_use AND wrong client id — §5.1). Cached
+// per (pool, client) exactly like the ID verifier above.
+type AccessVerifier = ReturnType<
+  typeof CognitoJwtVerifier.create<{
+    userPoolId: string;
+    clientId: string;
+    tokenUse: "access";
+  }>
+>;
+
+const accessVerifierCache = new Map<string, AccessVerifier>();
+
+function getAccessVerifier(userPoolId: string, clientId: string): AccessVerifier {
+  const key = `${userPoolId}|${clientId}`;
+  let verifier = accessVerifierCache.get(key);
+  if (!verifier) {
+    verifier = CognitoJwtVerifier.create({
+      userPoolId,
+      clientId,
+      tokenUse: "access",
+    });
+    accessVerifierCache.set(key, verifier);
+  }
+  return verifier;
+}
+
+/**
+ * Verify a Cognito **ACCESS** token against the configured pool and the MACHINE
+ * app client (Machine Auth v1.15). Resolves with the decoded payload; rejects if
+ * the token is missing, malformed, expired, not an access token, or signed for a
+ * different pool/client. The caller then enforces the resource-server `scope`.
+ */
+export async function verifyMachineAccessToken(
+  token: string,
+  userPoolId: string,
+  clientId: string
+): Promise<MachineAccessTokenPayload> {
+  const verifier = getAccessVerifier(userPoolId, clientId);
+  const payload = await verifier.verify(token);
+  return payload as unknown as MachineAccessTokenPayload;
+}
