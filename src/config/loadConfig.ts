@@ -36,6 +36,10 @@ function loadLocalConfig(): LoadedConfig {
       process.env.GATEWAY_HEALTH_URL || "http://localhost:3000/api/health",
     cloudwatch_dashboard_name:
       process.env.CLOUDWATCH_DASHBOARD_NAME || undefined,
+    // Machine Auth v1.15 — OFF unless MACHINE_CLIENT_ID is set. The scope carries
+    // a sensible default so a configured install need only supply the client id.
+    machine_client_id: process.env.MACHINE_CLIENT_ID || undefined,
+    machine_scope: process.env.MACHINE_SCOPE || "portfolio-api/machine",
   };
 
   const dbSecrets: IDBSecrets = {

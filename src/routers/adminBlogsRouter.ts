@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
 import { requireAdmin } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import { FailureCode, ServiceResult } from "../services/sectionsService";
 import {
@@ -10,9 +11,11 @@ import {
 } from "../services/blogsService";
 
 /**
- * Admin blogs router — Blogs v1.13. Mirrors `adminPagesRouter`: every route
- * behind `requireAdmin()`, all logic in `blogsService`, and the service's
- * `ServiceResult` failure codes mapped to HTTP statuses here (§4.3 envelope).
+ * Admin blogs router — Blogs v1.13. Mirrors `adminPagesRouter`: all logic in
+ * `blogsService`, and the service's `ServiceResult` failure codes mapped to HTTP
+ * statuses here (§4.3 envelope). Every route is behind `requireAdmin()` EXCEPT the
+ * read-only `GET /blogs`, which is behind `requireAdminOrMachine()` (Machine Auth
+ * v1.15) so the posting bot can resolve a `blog_id`.
  */
 const adminBlogsRouter = express.Router();
 
@@ -51,10 +54,15 @@ function requireExpectedUpdatedAt(req: Request, res: Response): string | null {
 
 // ---- Routes -----------------------------------------------------------------
 
-/** GET /api/admin/blogs — all blogs (with post_count) ordered by name. */
+/**
+ * GET /api/admin/blogs — all blogs (with post_count) ordered by name. Behind
+ * `requireAdminOrMachine()` (Machine Auth v1.15): read-only, so the posting bot
+ * can resolve a `blog_id` when creating a post. The write routes below stay
+ * admin-only, so a machine token gets 403 on POST/PATCH/DELETE.
+ */
 adminBlogsRouter.get(
   "/blogs",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(200).json(success({ blogs: await listBlogs() }));

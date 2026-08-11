@@ -1,8 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
-import {
-  requireAdmin,
-  requireAdminOrPreviewToken,
-} from "../middleware/requireAdmin";
+import { requireAdminOrPreviewToken } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { IAppSecrets } from "../interfaces";
 import { success, failure } from "../utils/envelope";
 import { runGcSafely } from "../services/mediaService";
@@ -22,8 +20,10 @@ import {
 /**
  * Admin posts router — TECH_SPEC_V1.md §4.2, §4.5, §3.6, §3.7, §7.
  *
- * The blog CRUD + publish lifecycle. Every route is behind `requireAdmin()`
- * except the draft-preview route, which is behind `requireAdminOrPreviewToken()`
+ * The blog CRUD + publish lifecycle. Every route is behind
+ * `requireAdminOrMachine()` (Machine Auth v1.15) — so the external posting bot
+ * reaches the whole post surface with its client-credentials access token — EXCEPT
+ * the draft-preview route, which is behind `requireAdminOrPreviewToken()`
  * (§4.2 †, §7) so the public site can serialize a post's draft body inside its
  * preview iframe. Business logic lives in `postsService`; this router parses the
  * request, enforces the `expected_updated_at` precondition's presence on PATCH
@@ -54,6 +54,18 @@ function send<T>(res: Response, result: PostResult<T>, okStatus = 200): Response
 function cdnDomain(req: Request): string {
   const secrets = req.app.get("secrets") as IAppSecrets | undefined;
   return secrets?.cdn_domain ?? "";
+}
+
+/**
+ * Attribution for a publish (Machine Auth v1.15). A human admin is recorded by
+ * their Cognito `sub` (`req.adminSub`); the external posting bot is recorded as
+ * `machine:<client_id>` from the verified machine app-client id
+ * (`req.machineClient`). Exactly one is set by `requireAdminOrMachine`.
+ */
+function publishedBy(req: Request): string | undefined {
+  if (req.adminSub) return req.adminSub;
+  if (req.machineClient) return `machine:${req.machineClient}`;
+  return undefined;
 }
 
 /**
@@ -101,7 +113,7 @@ adminPostsRouter.get(
 /** GET /api/admin/posts — all posts, drafts included (§4.2). */
 adminPostsRouter.get(
   "/posts",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(200).json(success({ posts: await listAdminPosts() }));
@@ -114,7 +126,7 @@ adminPostsRouter.get(
 /** POST /api/admin/posts — create a post (§4.2). */
 adminPostsRouter.post(
   "/posts",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { slug, title, excerpt, cover_media_id, blog_id, tags, draft_body } =
@@ -141,7 +153,7 @@ adminPostsRouter.post(
 /** GET /api/admin/posts/:id — one post with draft_body (§4.2). */
 adminPostsRouter.get(
   "/posts/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await getAdminPost(req.params.id));
@@ -154,7 +166,7 @@ adminPostsRouter.get(
 /** PATCH /api/admin/posts/:id — metadata or wholesale draft_body (§4.2 / §4.5). */
 adminPostsRouter.patch(
   "/posts/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const expected = requireExpectedUpdatedAt(req, res);
@@ -183,7 +195,7 @@ adminPostsRouter.patch(
 /** DELETE /api/admin/posts/:id — delete a post (§4.2). */
 adminPostsRouter.delete(
   "/posts/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deletePost(req.params.id));
@@ -203,10 +215,12 @@ adminPostsRouter.delete(
  */
 adminPostsRouter.post(
   "/posts/:id/publish",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await publishPost(req.params.id);
+      const result = await publishPost(req.params.id, {
+        publishedBy: publishedBy(req),
+      });
       if (result.ok) await runGcSafely();
       send(res, result);
     } catch (err) {
@@ -221,7 +235,7 @@ adminPostsRouter.post(
  */
 adminPostsRouter.post(
   "/posts/:id/unpublish",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await unpublishPost(req.params.id));
