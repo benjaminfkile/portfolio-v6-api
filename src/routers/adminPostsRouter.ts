@@ -21,9 +21,9 @@ import {
  * Admin posts router — TECH_SPEC_V1.md §4.2, §4.5, §3.6, §3.7, §7.
  *
  * The blog CRUD + publish lifecycle. Every route is behind
- * `requireAdminOrMachine()` (Machine Auth v1.15) — so the external posting bot
- * reaches the whole post surface with its client-credentials access token — EXCEPT
- * the draft-preview route, which is behind `requireAdminOrPreviewToken()`
+ * `requireAdminOrMachine()` (API Keys v1.16) — so the external posting bot reaches
+ * the whole post surface with a dashboard-minted API key — EXCEPT the
+ * draft-preview route, which is behind `requireAdminOrPreviewToken()`
  * (§4.2 †, §7) so the public site can serialize a post's draft body inside its
  * preview iframe. Business logic lives in `postsService`; this router parses the
  * request, enforces the `expected_updated_at` precondition's presence on PATCH
@@ -57,14 +57,14 @@ function cdnDomain(req: Request): string {
 }
 
 /**
- * Attribution for a publish (Machine Auth v1.15). A human admin is recorded by
- * their Cognito `sub` (`req.adminSub`); the external posting bot is recorded as
- * `machine:<client_id>` from the verified machine app-client id
- * (`req.machineClient`). Exactly one is set by `requireAdminOrMachine`.
+ * Attribution for a publish (API Keys v1.16). A human admin is recorded by their
+ * Cognito `sub` (`req.adminSub`); a key-driven publish is recorded as
+ * `key:<name>` from the authenticated key's name (`req.apiKeyName`). Exactly one
+ * is set by `requireAdminOrMachine`.
  */
 function publishedBy(req: Request): string | undefined {
   if (req.adminSub) return req.adminSub;
-  if (req.machineClient) return `machine:${req.machineClient}`;
+  if (req.apiKeyName) return `key:${req.apiKeyName}`;
   return undefined;
 }
 

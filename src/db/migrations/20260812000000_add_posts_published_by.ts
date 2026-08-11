@@ -1,10 +1,10 @@
 import { Knex } from "knex";
 
 /**
- * Machine Auth v1.15 — record WHO published a post so a machine publish can be
- * attributed. `publishPost` stamps `published_by` on every publish: a human
- * admin's Cognito `sub`, or `machine:<client_id>` when the external posting bot
- * publishes via its client-credentials access token (see `requireAdminOrMachine`).
+ * Record WHO published a post so a key-driven publish can be attributed.
+ * `publishPost` stamps `published_by` on every publish: a human admin's Cognito
+ * `sub`, or `key:<name>` when the external posting bot publishes via a
+ * dashboard-minted API key (API Keys v1.16; see `requireAdminOrMachine`).
  *
  * Nullable with no default and no backfill: rows published before this migration
  * (and never re-published since) simply read `NULL` for attribution, and every

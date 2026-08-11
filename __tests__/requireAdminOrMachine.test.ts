@@ -2,57 +2,53 @@ import express, { Express, NextFunction, Request, Response } from "express";
 import request from "supertest";
 
 /**
- * Machine Auth v1.15 — `requireAdminOrMachine` unit tests. The Cognito verifiers
- * are mocked WHOLESALE (no AWS/JWKS call is ever made, exactly like auth.test.ts):
- * `verifyAdminIdToken` is the human ID-token path, `verifyMachineAccessToken` the
- * client-credentials ACCESS-token path. We drive both per-test.
+ * API Keys v1.16 — `requireAdminOrMachine` / `requireAdmin` unit tests. The admin
+ * ID-token verifier is mocked WHOLESALE (no AWS/JWKS call is ever made, exactly
+ * like auth.test.ts), and the `apiKeysService` is mocked so no DB is touched —
+ * `verifyApiKey` drives the key path per-test.
  *
- * Covered (task #601 DoD):
- *  - the admin ID-token path is UNCHANGED (200/401/403, sets req.adminSub);
- *  - a machine access token WITH the scope is accepted and sets req.machineClient;
- *  - a valid machine token with the WRONG scope → 403;
- *  - a bad-signature/invalid token → 401;
- *  - a machine token on a plain `requireAdmin` route → 403 (blocked elsewhere);
- *  - the feature is fully OFF when `machine_client_id` is unset — a machine token
- *    behaves exactly as it does today (401) and the machine verifier is never
- *    even called.
+ * Covered:
+ *  - the admin ID-token path is UNCHANGED (200/401/403, sets req.adminSub) and the
+ *    key path is never consulted when the admin succeeds;
+ *  - an ACTIVE `pv6k_` key is accepted, sets req.apiKeyId/req.apiKeyName, and fires
+ *    the (fire-and-forget) last_used_at touch;
+ *  - a revoked/unknown `pv6k_` key → 401;
+ *  - a non-`pv6k_` invalid bearer falls back to the admin failure (401/403);
+ *  - an API key on a plain `requireAdmin` route is denied (401) — it can only
+ *    succeed on the narrow machine surface.
  */
 
 jest.mock("../src/aws/cognitoAuth", () => ({
   verifyAdminIdToken: jest.fn(),
-  verifyMachineAccessToken: jest.fn(),
 }));
 
-import {
-  verifyAdminIdToken,
-  verifyMachineAccessToken,
-} from "../src/aws/cognitoAuth";
+jest.mock("../src/services/apiKeysService", () => ({
+  API_KEY_PREFIX: "pv6k_",
+  verifyApiKey: jest.fn(),
+  touchApiKeyLastUsed: jest.fn(),
+}));
+
+import { verifyAdminIdToken } from "../src/aws/cognitoAuth";
+import { verifyApiKey, touchApiKeyLastUsed } from "../src/services/apiKeysService";
 import { requireAdmin } from "../src/middleware/requireAdmin";
 import { requireAdminOrMachine } from "../src/middleware/requireAdminOrMachine";
-import { DEFAULT_MACHINE_SCOPE } from "../src/middleware/machineAuth";
 
 const mockVerifyAdmin = verifyAdminIdToken as jest.Mock;
-const mockVerifyMachine = verifyMachineAccessToken as jest.Mock;
+const mockVerifyApiKey = verifyApiKey as jest.Mock;
+const mockTouch = touchApiKeyLastUsed as jest.Mock;
 
 const POOL_ID = "us-east-1_testpool";
 const ADMIN_CLIENT_ID = "test-admin-client";
-const MACHINE_CLIENT_ID = "test-machine-client";
-const MACHINE_SCOPE = "portfolio-api/machine";
 
-const ADMIN_PAYLOAD = { sub: "admin-sub-601", "cognito:groups": ["admins"] };
+const ADMIN_PAYLOAD = { sub: "admin-sub-616", "cognito:groups": ["admins"] };
+const API_KEY = "pv6k_abcdef0123456789";
 
-/** Build an app whose secrets may or may not enable the machine feature. */
-function buildApp(opts: {
-  machine_client_id?: string;
-  machine_scope?: string;
-}): Express {
+function buildApp(): Express {
   const app = express();
   app.use(express.json());
   app.set("secrets", {
     cognito_user_pool_id: POOL_ID,
     cognito_client_id: ADMIN_CLIENT_ID,
-    machine_client_id: opts.machine_client_id,
-    machine_scope: opts.machine_scope,
   });
 
   // Stand-in for the narrow machine surface (posts/media/blogs GET).
@@ -62,13 +58,14 @@ function buildApp(opts: {
     (req: Request, res: Response) => {
       res.status(200).json({
         adminSub: req.adminSub ?? null,
-        machineClient: req.machineClient ?? null,
+        apiKeyId: req.apiKeyId ?? null,
+        apiKeyName: req.apiKeyName ?? null,
       });
     }
   );
 
-  // Stand-in for every OTHER admin route (pages/sections/site-publish/…): a
-  // machine token must be blocked here.
+  // Stand-in for every OTHER admin route (pages/sections/site-publish/…): an API
+  // key must be blocked here.
   app.get("/admin-only", requireAdmin(), (req: Request, res: Response) => {
     res.status(200).json({ adminSub: req.adminSub ?? null });
   });
@@ -86,197 +83,123 @@ function buildApp(opts: {
   return app;
 }
 
-const ON = { machine_client_id: MACHINE_CLIENT_ID, machine_scope: MACHINE_SCOPE };
-
 beforeEach(() => {
   mockVerifyAdmin.mockReset();
-  mockVerifyMachine.mockReset();
+  mockVerifyApiKey.mockReset();
+  mockTouch.mockReset();
 });
 
 describe("requireAdminOrMachine — admin ID-token path is unchanged", () => {
-  it("accepts a valid admin token, sets adminSub, never touches the machine verifier", async () => {
+  it("accepts a valid admin token, sets adminSub, never consults the key path", async () => {
     mockVerifyAdmin.mockResolvedValue(ADMIN_PAYLOAD);
-    const app = buildApp(ON);
+    const app = buildApp();
 
     const res = await request(app)
       .get("/machine-surface")
       .set("Authorization", "Bearer good.admin.token");
 
     expect(res.status).toBe(200);
-    expect(res.body.adminSub).toBe("admin-sub-601");
-    expect(res.body.machineClient).toBeNull();
+    expect(res.body.adminSub).toBe("admin-sub-616");
+    expect(res.body.apiKeyName).toBeNull();
     expect(mockVerifyAdmin).toHaveBeenCalledWith(
       "good.admin.token",
       POOL_ID,
       ADMIN_CLIENT_ID
     );
-    // Admin succeeded first, so the machine path is never consulted.
-    expect(mockVerifyMachine).not.toHaveBeenCalled();
+    // Admin succeeded first, so the key path is never consulted.
+    expect(mockVerifyApiKey).not.toHaveBeenCalled();
   });
 
   it("returns 401 when no Authorization header is present", async () => {
-    const app = buildApp(ON);
+    const app = buildApp();
     const res = await request(app).get("/machine-surface");
     expect(res.status).toBe(401);
-    expect(mockVerifyAdmin).not.toHaveBeenCalled();
-    // No bearer at all → machine path short-circuits without a verify call.
-    expect(mockVerifyMachine).not.toHaveBeenCalled();
+    expect(mockVerifyApiKey).not.toHaveBeenCalled();
   });
 
   it("returns 403 for a valid admin token whose group is not 'admins'", async () => {
     mockVerifyAdmin.mockResolvedValue({ sub: "u", "cognito:groups": ["viewers"] });
-    // The wrong-group ID token is not a machine token either.
-    mockVerifyMachine.mockRejectedValue(new Error("not an access token"));
-    const app = buildApp(ON);
+    const app = buildApp();
 
     const res = await request(app)
       .get("/machine-surface")
       .set("Authorization", "Bearer valid.wrong.group");
 
     expect(res.status).toBe(403);
+    // A wrong-group ID token is not a `pv6k_` bearer, so no key lookup happens.
+    expect(mockVerifyApiKey).not.toHaveBeenCalled();
   });
 });
 
-describe("requireAdminOrMachine — machine ACCESS-token path", () => {
-  it("accepts a machine token carrying the scope and sets req.machineClient", async () => {
-    mockVerifyAdmin.mockRejectedValue(new Error("token_use=access, wrong client"));
-    mockVerifyMachine.mockResolvedValue({
-      sub: MACHINE_CLIENT_ID,
-      client_id: MACHINE_CLIENT_ID,
-      scope: `openid ${MACHINE_SCOPE}`,
-    });
-    const app = buildApp(ON);
+describe("requireAdminOrMachine — API-key path", () => {
+  it("accepts an ACTIVE key, sets req.apiKeyId/apiKeyName, fires the last_used touch", async () => {
+    mockVerifyAdmin.mockRejectedValue(new Error("not an admin id token"));
+    mockVerifyApiKey.mockResolvedValue({ id: "key-1", name: "posting-bot" });
+    const app = buildApp();
 
     const res = await request(app)
       .get("/machine-surface")
-      .set("Authorization", "Bearer machine.access.token");
+      .set("Authorization", `Bearer ${API_KEY}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.machineClient).toBe(MACHINE_CLIENT_ID);
+    expect(res.body.apiKeyId).toBe("key-1");
+    expect(res.body.apiKeyName).toBe("posting-bot");
     expect(res.body.adminSub).toBeNull();
-    // Verified as an ACCESS token against the MACHINE client, same pool.
-    expect(mockVerifyMachine).toHaveBeenCalledWith(
-      "machine.access.token",
-      POOL_ID,
-      MACHINE_CLIENT_ID
-    );
+    expect(mockVerifyApiKey).toHaveBeenCalledWith(API_KEY);
+    expect(mockTouch).toHaveBeenCalledWith("key-1");
   });
 
-  it("defaults the required scope to portfolio-api/machine when machine_scope is unset", async () => {
-    expect(DEFAULT_MACHINE_SCOPE).toBe("portfolio-api/machine");
-    mockVerifyAdmin.mockRejectedValue(new Error("not an id token"));
-    mockVerifyMachine.mockResolvedValue({
-      sub: MACHINE_CLIENT_ID,
-      scope: DEFAULT_MACHINE_SCOPE,
-    });
-    // machine_scope intentionally omitted from secrets.
-    const app = buildApp({ machine_client_id: MACHINE_CLIENT_ID });
+  it("returns 401 for a revoked/unknown key and never touches last_used", async () => {
+    mockVerifyAdmin.mockRejectedValue(new Error("not an admin id token"));
+    mockVerifyApiKey.mockResolvedValue(null); // revoked or unknown
+    const app = buildApp();
 
     const res = await request(app)
       .get("/machine-surface")
-      .set("Authorization", "Bearer machine.access.token");
-
-    expect(res.status).toBe(200);
-    expect(res.body.machineClient).toBe(MACHINE_CLIENT_ID);
-  });
-
-  it("returns 403 for a valid machine token WITHOUT the required scope", async () => {
-    mockVerifyAdmin.mockRejectedValue(new Error("not an id token"));
-    mockVerifyMachine.mockResolvedValue({
-      sub: MACHINE_CLIENT_ID,
-      scope: "openid email", // no portfolio-api/machine
-    });
-    const app = buildApp(ON);
-
-    const res = await request(app)
-      .get("/machine-surface")
-      .set("Authorization", "Bearer machine.wrong.scope");
-
-    expect(res.status).toBe(403);
-    expect(res.body.errorMsg).toBe("Forbidden");
-  });
-
-  it("returns 401 for a bad-signature token (both verifiers reject)", async () => {
-    mockVerifyAdmin.mockRejectedValue(new Error("JwtInvalidSignatureError"));
-    mockVerifyMachine.mockRejectedValue(new Error("JwtInvalidSignatureError"));
-    const app = buildApp(ON);
-
-    const res = await request(app)
-      .get("/machine-surface")
-      .set("Authorization", "Bearer tampered.token");
+      .set("Authorization", `Bearer ${API_KEY}`);
 
     expect(res.status).toBe(401);
+    expect(mockTouch).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for a malformed non-pv6k bearer (falls back to admin failure)", async () => {
+    mockVerifyAdmin.mockRejectedValue(new Error("bad signature"));
+    const app = buildApp();
+
+    const res = await request(app)
+      .get("/machine-surface")
+      .set("Authorization", "Bearer not-a-key-token");
+
+    expect(res.status).toBe(401);
+    // Not a `pv6k_` bearer, so the key path is never consulted.
+    expect(mockVerifyApiKey).not.toHaveBeenCalled();
   });
 });
 
-describe("requireAdminOrMachine — feature OFF (machine_client_id unset)", () => {
-  it("behaves exactly like requireAdmin: a machine token yields 401 and the machine verifier is never called", async () => {
-    // Even if it WERE called it would pass — prove it is not consulted at all.
-    mockVerifyAdmin.mockRejectedValue(new Error("not an id token"));
-    mockVerifyMachine.mockResolvedValue({
-      sub: MACHINE_CLIENT_ID,
-      scope: MACHINE_SCOPE,
-    });
-    const app = buildApp({}); // no machine_client_id
+describe("requireAdmin — an API key is blocked on every other admin route", () => {
+  it("denies an active API key with 401 on a plain requireAdmin route", async () => {
+    mockVerifyAdmin.mockRejectedValue(new Error("not an admin id token"));
+    // Even a valid key has no reach here — requireAdmin never checks keys.
+    mockVerifyApiKey.mockResolvedValue({ id: "key-1", name: "posting-bot" });
+    const app = buildApp();
 
     const res = await request(app)
-      .get("/machine-surface")
-      .set("Authorization", "Bearer machine.access.token");
+      .get("/admin-only")
+      .set("Authorization", `Bearer ${API_KEY}`);
 
     expect(res.status).toBe(401);
-    expect(mockVerifyMachine).not.toHaveBeenCalled();
+    expect(mockVerifyApiKey).not.toHaveBeenCalled();
   });
 
-  it("still accepts a valid admin token on the machine surface when the feature is off", async () => {
+  it("still admits a real admin on the plain requireAdmin route", async () => {
     mockVerifyAdmin.mockResolvedValue(ADMIN_PAYLOAD);
-    const app = buildApp({});
+    const app = buildApp();
 
     const res = await request(app)
-      .get("/machine-surface")
+      .get("/admin-only")
       .set("Authorization", "Bearer good.admin.token");
 
     expect(res.status).toBe(200);
-    expect(res.body.adminSub).toBe("admin-sub-601");
-  });
-});
-
-describe("requireAdmin — a machine token is blocked (403) on every other admin route", () => {
-  it("denies a valid machine token with 403 on a plain requireAdmin route", async () => {
-    mockVerifyAdmin.mockRejectedValue(new Error("not an id token"));
-    mockVerifyMachine.mockResolvedValue({
-      sub: MACHINE_CLIENT_ID,
-      scope: MACHINE_SCOPE, // even a fully-scoped machine token has no reach here
-    });
-    const app = buildApp(ON);
-
-    const res = await request(app)
-      .get("/admin-only")
-      .set("Authorization", "Bearer machine.access.token");
-
-    expect(res.status).toBe(403);
-    expect(res.body.errorMsg).toBe("Forbidden");
-  });
-
-  it("still admits a real admin, and (feature off) is a strict no-op — machine token 401, verifier untouched", async () => {
-    // Admin still works.
-    mockVerifyAdmin.mockResolvedValue(ADMIN_PAYLOAD);
-    let app = buildApp(ON);
-    let res = await request(app)
-      .get("/admin-only")
-      .set("Authorization", "Bearer good.admin.token");
-    expect(res.status).toBe(200);
-    expect(res.body.adminSub).toBe("admin-sub-601");
-
-    // Feature off: machine token → 401, and the machine verifier is never called.
-    mockVerifyAdmin.mockReset();
-    mockVerifyMachine.mockReset();
-    mockVerifyAdmin.mockRejectedValue(new Error("not an id token"));
-    mockVerifyMachine.mockResolvedValue({ sub: MACHINE_CLIENT_ID, scope: MACHINE_SCOPE });
-    app = buildApp({});
-    res = await request(app)
-      .get("/admin-only")
-      .set("Authorization", "Bearer machine.access.token");
-    expect(res.status).toBe(401);
-    expect(mockVerifyMachine).not.toHaveBeenCalled();
+    expect(res.body.adminSub).toBe("admin-sub-616");
   });
 });
