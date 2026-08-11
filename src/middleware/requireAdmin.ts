@@ -3,7 +3,6 @@ import { verifyAdminIdToken } from "../aws/cognitoAuth";
 import { isValidPreviewToken } from "../services/previewTokenService";
 import { IAppSecrets } from "../interfaces";
 import { failure } from "../utils/envelope";
-import { checkMachine } from "./machineAuth";
 
 // The verified admin's Cognito `sub` is attached to the request for handlers
 // that want to attribute a write (§5.3). No `users` row is loaded — portfolio v6
@@ -90,9 +89,14 @@ export async function checkAdmin(req: Request): Promise<AdminAuthResult> {
 }
 
 /**
- * requireAdmin() — TECH_SPEC_V1.md §5.3. Guards every admin route except the two
+ * requireAdmin() — TECH_SPEC_V1.md §5.3. Guards every admin route except the
+ * narrow machine surface (behind `requireAdminOrMachine`) and the two
  * preview-serialization routes (§4.2). On success attaches `req.adminSub` and
  * calls next(); otherwise responds 401 (missing/invalid) or 403 (wrong group).
+ *
+ * A dashboard-minted API key (API Keys v1.16) is NOT a valid admin ID token, so
+ * it fails `checkAdmin` and is denied here (401) — every route outside the narrow
+ * machine surface stays humans-only.
  */
 export function requireAdmin(): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -101,19 +105,6 @@ export function requireAdmin(): RequestHandler {
       if (result.ok) {
         req.adminSub = result.sub;
         return next();
-      }
-
-      // The admin path is UNCHANGED for humans (valid admin ID token → next;
-      // missing → 401; wrong group → 403). One added denial: when the Machine
-      // Auth feature is configured (Machine Auth v1.15) and the caller presents a
-      // VALID machine access token, this route is outside the machine's narrow
-      // surface, so deny with 403 (authenticated principal, not authorized here)
-      // instead of the bare 401. This is a strict no-op when `machine_client_id`
-      // is unset — `checkMachine` returns `off` and makes no AWS call — so with
-      // the feature off behavior is byte-for-byte identical to before.
-      const machine = await checkMachine(req);
-      if (machine.status === "valid") {
-        return res.status(403).json(failure("Forbidden"));
       }
 
       return res

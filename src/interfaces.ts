@@ -49,25 +49,6 @@ export interface IAppSecrets {
    * empty, `/api/ops` serves `{ available: false }` and makes no AWS call.
    */
   cloudwatch_dashboard_name?: string;
-  /**
-   * Machine Auth v1.15 — client id of the Cognito **client-credentials** app
-   * client an external automation (the posting bot) uses. When set, the narrow
-   * machine surface (posts CRUD/publish, the post-image media routes, and the
-   * read-only `GET /api/admin/blogs`) additionally accepts a Cognito ACCESS
-   * token issued to this client that carries `machine_scope` (see
-   * `requireAdminOrMachine`). OPTIONAL and OFF by default: when unset/empty the
-   * feature is entirely disabled and behavior is identical to before — humans
-   * keep using Cognito ID tokens via `requireAdmin`. This is an infra identifier
-   * and never appears in repo content or logs.
-   */
-  machine_client_id?: string;
-  /**
-   * Resource-server scope the machine ACCESS token must carry to be accepted on
-   * the machine surface (Machine Auth v1.15). Defaults to
-   * `portfolio-api/machine` when unset. Only consulted when `machine_client_id`
-   * is configured.
-   */
-  machine_scope?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----

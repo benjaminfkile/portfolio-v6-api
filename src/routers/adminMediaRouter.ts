@@ -18,9 +18,10 @@ import {
  * Presigned uploads, confirm, the media library listing, hard delete, and the
  * on-demand GC sweep. The three routes a post image needs — `POST /media/
  * upload-url`, `POST /media/:id/confirm`, and `GET /media` — are behind
- * `requireAdminOrMachine()` so the external posting bot (Machine Auth v1.15) can
- * attach images to a post; `POST /media/sweep` and `DELETE /media/:id` stay
- * admin-only (`requireAdmin()`), so a machine token gets 403 there. Business logic
+ * `requireAdminOrMachine()` so the external posting bot (API Keys v1.16) can
+ * attach images to a post with its API key; `POST /media/sweep` and `DELETE
+ * /media/:id` stay admin-only (`requireAdmin()`), so an API key gets 401 there.
+ * Business logic
  * and all S3 access live in `mediaService`/`s3Service`; this router only shapes the
  * request/response envelope and maps `MediaResult` failure codes to HTTP status.
  */

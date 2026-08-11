@@ -65,9 +65,9 @@ export interface PostRow {
   published_body: BlockArray | null;
   published_at: Date | null;
   /**
-   * Who last published this post (Machine Auth v1.15): an admin's Cognito `sub`,
-   * or `machine:<client_id>` for a machine publish. NULL for a post that has
-   * never been published since the column was introduced.
+   * Who last published this post (API Keys v1.16): an admin's Cognito `sub`, or
+   * `key:<name>` for a key-driven publish. NULL for a post that has never been
+   * published since the column was introduced.
    */
   published_by: string | null;
   created_at: Date;
@@ -640,8 +640,8 @@ export async function publishPost(
       .update({
         published_body: JSON.stringify(body.data) as never,
         published_at: publishedAt,
-        // Machine Auth v1.15: attribute the publish. `publishedBy` is the admin's
-        // Cognito `sub` or `machine:<client_id>`; null only if a caller omits it.
+        // API Keys v1.16: attribute the publish. `publishedBy` is the admin's
+        // Cognito `sub` or `key:<name>`; null only if a caller omits it.
         published_by: (opts.publishedBy ?? null) as never,
         updated_at: trx.fn.now(),
       } as never)

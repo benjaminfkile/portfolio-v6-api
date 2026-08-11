@@ -14,8 +14,8 @@ import {
  * Admin blogs router — Blogs v1.13. Mirrors `adminPagesRouter`: all logic in
  * `blogsService`, and the service's `ServiceResult` failure codes mapped to HTTP
  * statuses here (§4.3 envelope). Every route is behind `requireAdmin()` EXCEPT the
- * read-only `GET /blogs`, which is behind `requireAdminOrMachine()` (Machine Auth
- * v1.15) so the posting bot can resolve a `blog_id`.
+ * read-only `GET /blogs`, which is behind `requireAdminOrMachine()` (API Keys
+ * v1.16) so the posting bot can resolve a `blog_id` with its API key.
  */
 const adminBlogsRouter = express.Router();
 

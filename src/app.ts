@@ -13,6 +13,7 @@ import adminBlogsRouter from "./routers/adminBlogsRouter";
 import adminIntegrationsRouter from "./routers/adminIntegrationsRouter";
 import adminAnalyticsRouter from "./routers/adminAnalyticsRouter";
 import adminIconsRouter from "./routers/adminIconsRouter";
+import adminApiKeysRouter from "./routers/adminApiKeysRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
@@ -133,6 +134,11 @@ app.use("/api/admin", adminAnalyticsRouter);
 // and S3 access is server-side. The `icons/` prefix is deliberately outside the
 // §6.9 media orphan sweep (icons are referenced by URL, not media_id).
 app.use("/api/admin", adminIconsRouter);
+// API keys (API Keys v1.16): mint / list / revoke dashboard-minted keys used on
+// the narrow machine surface (posts/media/blogs) in place of the removed Cognito
+// client-credentials path. Humans only — every route is behind requireAdmin();
+// the full key is returned once at mint and only its SHA-256 hash is stored.
+app.use("/api/admin", adminApiKeysRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
 // configured, so errors return a clean JSON 500, never res.render.
