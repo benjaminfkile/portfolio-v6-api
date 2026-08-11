@@ -286,6 +286,59 @@ async function buildBlogMap(
   return map;
 }
 
+// ---- Post-ref resolution support (§Post Refs v1.14) -------------------------
+
+/**
+ * Every existing `posts.id` — the allowed-ref set for a portfolio item's
+ * `post_refs` at publish (§Post Refs v1.14). Membership is EXISTENCE only:
+ * unpublished posts are valid refs (they simply resolve to nothing at read), so
+ * `published_at` is not consulted here. A ref outside this set is dangling and
+ * blocks publish (422).
+ */
+export async function getAllPostIds(): Promise<Set<string>> {
+  const rows = await getDb()<PostRow>(POSTS).select("id");
+  return new Set(rows.map((r) => r.id));
+}
+
+/** A `post_refs` entry resolved to a currently-published post (§Post Refs v1.14). */
+export interface ResolvedPostRef {
+  id: string;
+  slug: string;
+  title: string;
+  blog: BlogRef | null;
+}
+
+/**
+ * Resolve a set of `posts.id`s to their read-time reference shape (§Post Refs
+ * v1.14), keyed by id — ONLY currently-published posts (`published_at` not
+ * null). Unpublished/deleted ids are simply absent from the map, so the caller's
+ * order-preserving lookup silently omits them. One query for the posts, one for
+ * their owning blogs.
+ */
+export async function resolvePublishedPostRefs(
+  ids: string[]
+): Promise<Map<string, ResolvedPostRef>> {
+  const map = new Map<string, ResolvedPostRef>();
+  const unique = Array.from(new Set(ids.filter((v) => UUID_RE.test(v))));
+  if (unique.length === 0) return map;
+
+  const db = getDb();
+  const rows = await db<PostRow>(POSTS)
+    .whereIn("id", unique)
+    .whereNotNull("published_at")
+    .select("id", "slug", "title", "blog_id");
+  const blogMap = await buildBlogMap(db, rows.map((r) => r.blog_id));
+  for (const r of rows) {
+    map.set(r.id, {
+      id: r.id,
+      slug: r.slug,
+      title: r.title,
+      blog: r.blog_id ? blogMap[r.blog_id] ?? null : null,
+    });
+  }
+  return map;
+}
+
 // ---- Admin: list (§4.2 GET /api/admin/posts) --------------------------------
 
 export interface AdminPostSummary {

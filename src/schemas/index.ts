@@ -3,7 +3,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 
 import { linkSchema } from "./link";
 import { blockSchema, blockArraySchema } from "./blocks";
-import { ITEM_SCHEMAS } from "./items";
+import { ITEM_SCHEMAS, postRefSchema } from "./items";
 import { SECTION_DATA_SCHEMAS } from "./sections";
 import { postSchema, postMetadataSchema } from "./posts";
 import { pageSchema } from "./pages";
@@ -53,6 +53,10 @@ export function buildContentJsonSchema(): Record<string, unknown> {
     definitions: {
       Link: linkSchema,
       Block: blockSchema,
+      // Post Refs v1.14: emit the read-time resolved reference once as a named
+      // `PostRef` so `sync:types` generates the type instead of an anonymous
+      // inline shape on the portfolio item's `posts` array (§8.4).
+      PostRef: postRefSchema,
     },
   }) as Record<string, unknown>;
 }
