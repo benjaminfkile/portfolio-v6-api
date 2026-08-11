@@ -8,6 +8,8 @@ import {
   timelineItemSchema,
   skillsItemSchema,
   portfolioItemSchema,
+  postRefSchema,
+  DRAFT_ITEM_SCHEMAS,
   heroData,
   statusData,
   blogData,
@@ -359,6 +361,102 @@ describe("section item schemas (§3.4 table)", () => {
         media_id: "22222222-2222-2222-2222-222222222222",
         tech_icons: ["react", "node"],
         links: [],
+      }).success
+    ).toBe(false);
+  });
+
+  // ---- Post Refs v1.14: portfolio post_refs -------------------------------
+  const PORTFOLIO_BASE = {
+    title: "Project",
+    intro: "",
+    description: "",
+    media_id: "22222222-2222-2222-2222-222222222222",
+    skill_refs: [],
+    links: [],
+  };
+  const PID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const PID_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+  it("portfolio item — post_refs is an optional ordered uuid array (§Post Refs v1.14)", () => {
+    // Absent is fine (optional).
+    expect(portfolioItemSchema.safeParse(PORTFOLIO_BASE).success).toBe(true);
+    // An empty array is fine.
+    expect(
+      portfolioItemSchema.safeParse({ ...PORTFOLIO_BASE, post_refs: [] }).success
+    ).toBe(true);
+    // Well-formed uuids are accepted.
+    expect(
+      portfolioItemSchema.safeParse({
+        ...PORTFOLIO_BASE,
+        post_refs: [PID_A, PID_B],
+      }).success
+    ).toBe(true);
+  });
+
+  it("portfolio item — post_refs rejects non-uuids, >12 entries, and duplicates", () => {
+    // Non-uuid entry rejected.
+    expect(
+      portfolioItemSchema.safeParse({
+        ...PORTFOLIO_BASE,
+        post_refs: ["not-a-uuid"],
+      }).success
+    ).toBe(false);
+    // More than 12 entries rejected.
+    const thirteen = Array.from(
+      { length: 13 },
+      (_v, i) => `0000000${i.toString(16).padStart(1, "0")}-0000-0000-0000-000000000000`
+    );
+    expect(
+      portfolioItemSchema.safeParse({ ...PORTFOLIO_BASE, post_refs: thirteen })
+        .success
+    ).toBe(false);
+    // Duplicate ids rejected.
+    expect(
+      portfolioItemSchema.safeParse({
+        ...PORTFOLIO_BASE,
+        post_refs: [PID_A, PID_A],
+      }).success
+    ).toBe(false);
+  });
+
+  it("draft-lenient portfolio — post_refs stays permissive (array of strings)", () => {
+    const draft = DRAFT_ITEM_SCHEMAS.portfolio;
+    // A not-yet-valid id string is accepted in a draft (publish re-parses).
+    expect(draft.safeParse({ post_refs: ["draft-id", "another"] }).success).toBe(
+      true
+    );
+    // Still must be an array of strings when present.
+    expect(draft.safeParse({ post_refs: [123] }).success).toBe(false);
+    // Absent is fine.
+    expect(draft.safeParse({}).success).toBe(true);
+  });
+
+  it("postRefSchema — resolved read shape {id, slug, title, blog}", () => {
+    // With an owning blog.
+    expect(
+      postRefSchema.safeParse({
+        id: PID_A,
+        slug: "hello-world",
+        title: "Hello World",
+        blog: { slug: "code", name: "Code" },
+      }).success
+    ).toBe(true);
+    // With no blog (null).
+    expect(
+      postRefSchema.safeParse({
+        id: PID_A,
+        slug: "hello-world",
+        title: "Hello World",
+        blog: null,
+      }).success
+    ).toBe(true);
+    // A non-uuid id is rejected.
+    expect(
+      postRefSchema.safeParse({
+        id: "nope",
+        slug: "x",
+        title: "X",
+        blog: null,
       }).success
     ).toBe(false);
   });

@@ -140,6 +140,8 @@ beforeEach(async () => {
   await getDb()("section_items").del();
   await getDb()("sections").del();
   await getDb()("page_versions").del();
+  await getDb()("posts").del();
+  await getDb()("blogs").del();
   await getDb()("media_assets").del();
   await getDb()("pages").del();
 });
@@ -505,6 +507,178 @@ describe("publish skill_refs validation (§Skill Refs v1.8)", () => {
 
     const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
     expect(pub.status).toBe(201);
+  });
+});
+
+// ---- post_refs publish validation + read resolution (§Post Refs v1.14) -----
+
+describe("Post Refs v1.14 — publish validation + read resolution", () => {
+  const PORTFOLIO_MEDIA = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+  /** Insert a blog row directly; returns its id. */
+  async function insertBlog(slug: string, name: string): Promise<string> {
+    const [row] = await getDb()("blogs").insert({ slug, name }).returning("id");
+    return row.id as string;
+  }
+
+  /**
+   * Insert a post row directly. `published` controls whether it is live
+   * (`published_at` set); `blogId` optionally assigns it to a blog. Returns its id.
+   */
+  async function insertPost(opts: {
+    slug: string;
+    title: string;
+    published?: boolean;
+    blogId?: string | null;
+  }): Promise<string> {
+    const [row] = await getDb()("posts")
+      .insert({
+        slug: opts.slug,
+        title: opts.title,
+        blog_id: opts.blogId ?? null,
+        published_body: opts.published ? JSON.stringify([]) : null,
+        published_at: opts.published ? new Date().toISOString() : null,
+      })
+      .returning("id");
+    return row.id as string;
+  }
+
+  /** Create a portfolio section + one item referencing `postRefs`. */
+  async function makePortfolioItem(
+    postRefs: string[],
+    title = "My Project"
+  ): Promise<void> {
+    const section = (await createSection({ type: "portfolio", data: {} })).body.data;
+    await createItem(section.id, {
+      title,
+      intro: "i",
+      description: "d",
+      media_id: PORTFOLIO_MEDIA,
+      skill_refs: [],
+      post_refs: postRefs,
+      links: [],
+    });
+  }
+
+  it("422s with a named issue when a post_ref points at an unknown/deleted post id", async () => {
+    const DANGLING = "deadbeef-dead-dead-dead-deaddeafbeef";
+    await makePortfolioItem([DANGLING], "Ghost Refs");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(422);
+    expect(pub.body.errorMsg).toContain("Ghost Refs");
+    expect(pub.body.errorMsg).toContain(DANGLING);
+
+    // Nothing was published.
+    const content = await request(app).get("/api/content");
+    expect(content.body.version).toBe(0);
+  });
+
+  it("publishes OK when a post_ref points at an EXISTING but UNPUBLISHED post, and omits it at read", async () => {
+    const unpublishedId = await insertPost({
+      slug: "wip",
+      title: "Work In Progress",
+      published: false,
+    });
+    await makePortfolioItem([unpublishedId], "Has Draft Ref");
+
+    // A ref to an existing-but-unpublished post is valid at publish.
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    // …but it resolves to nothing at read (unpublished silently omitted).
+    const content = await request(app).get("/api/content");
+    const portfolio = content.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "portfolio"
+    );
+    // The raw id-based refs are retained in the document.
+    expect(portfolio.items[0].data.post_refs).toEqual([unpublishedId]);
+    // The resolved `posts` array is empty — the ref points at an unpublished post.
+    expect(portfolio.items[0].data.posts).toEqual([]);
+  });
+
+  it("resolves published post_refs at read: order preserved, unpublished omitted, blog included", async () => {
+    const blogId = await insertBlog("code", "Code");
+    // Author order: A (published, blog), B (unpublished — will be omitted),
+    // C (published, no blog).
+    const idA = await insertPost({
+      slug: "alpha",
+      title: "Alpha",
+      published: true,
+      blogId,
+    });
+    const idB = await insertPost({
+      slug: "bravo",
+      title: "Bravo",
+      published: false,
+    });
+    const idC = await insertPost({
+      slug: "charlie",
+      title: "Charlie",
+      published: true,
+    });
+    await makePortfolioItem([idA, idB, idC], "Related Reads");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const portfolio = content.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "portfolio"
+    );
+    // Raw refs keep all three ids in author order.
+    expect(portfolio.items[0].data.post_refs).toEqual([idA, idB, idC]);
+    // Resolved `posts`: only the two published, B omitted, order preserved.
+    expect(portfolio.items[0].data.posts).toEqual([
+      { id: idA, slug: "alpha", title: "Alpha", blog: { slug: "code", name: "Code" } },
+      { id: idC, slug: "charlie", title: "Charlie", blog: null },
+    ]);
+  });
+
+  it("resolution follows the LIVE post lifecycle — unpublishing a post drops it at read without republishing the site", async () => {
+    const idA = await insertPost({ slug: "alpha", title: "Alpha", published: true });
+    await makePortfolioItem([idA], "Live Lifecycle");
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    // Initially resolves.
+    let content = await request(app).get("/api/content");
+    let portfolio = content.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "portfolio"
+    );
+    expect(portfolio.items[0].data.posts).toHaveLength(1);
+
+    // Unpublish the post directly (no site republish) — read now omits it.
+    await getDb()("posts").where({ id: idA }).update({ published_at: null });
+    content = await request(app).get("/api/content");
+    portfolio = content.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "portfolio"
+    );
+    expect(portfolio.items[0].data.posts).toEqual([]);
+    // The document still carries the raw id (id-based document never drifts).
+    expect(portfolio.items[0].data.post_refs).toEqual([idA]);
+  });
+
+  it("preview resolves post_refs identically to /api/content (parity)", async () => {
+    const blogId = await insertBlog("food", "Food");
+    const idA = await insertPost({
+      slug: "alpha",
+      title: "Alpha",
+      published: true,
+      blogId,
+    });
+    const idB = await insertPost({ slug: "bravo", title: "Bravo", published: false });
+    await makePortfolioItem([idA, idB], "Preview Reads");
+
+    const preview = await request(app).get("/api/admin/preview").set(...AUTH);
+    expect(preview.status).toBe(200);
+    const portfolio = preview.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "portfolio"
+    );
+    expect(portfolio.items[0].data.posts).toEqual([
+      { id: idA, slug: "alpha", title: "Alpha", blog: { slug: "food", name: "Food" } },
+    ]);
   });
 });
 

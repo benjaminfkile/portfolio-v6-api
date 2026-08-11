@@ -48,4 +48,27 @@ describe("GET /api/schema (§8.4)", () => {
       root.properties.sectionData.properties.blog.properties
     ).toHaveProperty("blog");
   });
+
+  it("surfaces the Post Refs v1.14 shapes (portfolio post_refs + resolved posts + PostRef)", async () => {
+    const res = await request(app).get("/api/schema");
+    const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
+    const root = defs["PortfolioV6Content"] as { properties: Record<string, any> };
+
+    const portfolio = root.properties.itemData.properties.portfolio;
+
+    // The item write field: an ordered uuid array of related-post references.
+    expect(portfolio.properties).toHaveProperty("post_refs");
+    expect(portfolio.properties.post_refs.type).toBe("array");
+
+    // The read-time resolved shape serialized onto each portfolio item.
+    expect(portfolio.properties).toHaveProperty("posts");
+    expect(portfolio.properties.posts.type).toBe("array");
+
+    // PostRef is emitted once as a named definition (like Link/Block) and the
+    // portfolio `posts` array references it — the resolved {id,slug,title,blog}.
+    expect(defs).toHaveProperty("PostRef");
+    expect(Object.keys(defs.PostRef.properties)).toEqual(
+      expect.arrayContaining(["id", "slug", "title", "blog"])
+    );
+  });
 });

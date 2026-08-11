@@ -10,6 +10,7 @@ import {
 import { SectionWithItems, getWorkingSet } from "./sectionsService";
 import { listPages, PageRow } from "./pagesService";
 import { getBlogSlugs } from "./blogsService";
+import { getAllPostIds, resolvePublishedPostRefs } from "./postsService";
 import { resolveMediaMap, MediaRef } from "../utils/cdn";
 
 /**
@@ -200,7 +201,8 @@ function isKnownSectionType(type: unknown): type is SectionType {
 function validateWorkingSet(
   sections: SectionWithItems[],
   visibleSkillItemIds: Set<string>,
-  existingBlogSlugs: Set<string>
+  existingBlogSlugs: Set<string>,
+  existingPostIds: Set<string>
 ): PublishResult<SerializedSection[]> {
   const serialized: SerializedSection[] = [];
   for (const section of sections) {
@@ -262,7 +264,11 @@ function validateWorkingSet(
       // (portfolio item title + offending id) that 422s the publish. Hidden
       // portfolio items are checked too — a hidden-but-invalid item still blocks.
       if (section.type === "portfolio") {
-        const data = parsedItem.data as { title?: unknown; skill_refs?: unknown };
+        const data = parsedItem.data as {
+          title?: unknown;
+          skill_refs?: unknown;
+          post_refs?: unknown;
+        };
         const refs = Array.isArray(data.skill_refs) ? data.skill_refs : [];
         const title = typeof data.title === "string" ? data.title : item.id;
         for (const ref of refs) {
@@ -270,6 +276,22 @@ function validateWorkingSet(
             return fail(
               "ref_validation",
               `Portfolio item "${title}" references skill "${ref}" which does not resolve to a visible skills item`
+            );
+          }
+        }
+
+        // Post Refs v1.14 enforcement gate: every `post_refs` entry must exist in
+        // the `posts` table. A ref to a deleted/unknown post id is a named issue
+        // (portfolio item title + offending id) that 422s the publish. A ref to an
+        // existing-but-UNPUBLISHED post is valid — it simply resolves to nothing
+        // at read until the post publishes; documents stay id-based, resolution is
+        // deferred to read time so a later publish/unpublish never drifts.
+        const postRefs = Array.isArray(data.post_refs) ? data.post_refs : [];
+        for (const ref of postRefs) {
+          if (!existingPostIds.has(ref as string)) {
+            return fail(
+              "ref_validation",
+              `Portfolio item "${title}" references post "${ref}" which does not exist`
             );
           }
         }
@@ -417,6 +439,47 @@ async function fetchAlts(
   return map;
 }
 
+// ---- Post-ref read-time resolution (§Post Refs v1.14) -----------------------
+
+/**
+ * Walk every portfolio item across the serialized pages and inject a resolved
+ * `posts` array beside its raw `post_refs` (§Post Refs v1.14). Resolution mirrors
+ * how media ids resolve to CDN URLs at read: the stored document keeps only the
+ * id-based `post_refs`, and `posts: [{id, slug, title, blog}]` is materialized
+ * here so a post publish/unpublish after a site publish never drifts. Only
+ * currently-published posts resolve; input order is preserved and
+ * unpublished/deleted refs are silently omitted.
+ */
+async function resolvePostRefsIntoPages(pages: SerializedPage[]): Promise<void> {
+  const ids: string[] = [];
+  const portfolioItems: Array<Record<string, unknown>> = [];
+  for (const page of pages) {
+    for (const section of page.sections) {
+      if (section.type !== "portfolio") continue;
+      for (const item of section.items) {
+        const data = item.data as Record<string, unknown>;
+        portfolioItems.push(data);
+        const refs = data.post_refs;
+        if (Array.isArray(refs)) {
+          for (const r of refs) if (typeof r === "string") ids.push(r);
+        }
+      }
+    }
+  }
+  if (portfolioItems.length === 0) return;
+
+  const resolved = await resolvePublishedPostRefs(ids);
+  for (const data of portfolioItems) {
+    const refs = data.post_refs;
+    const list = Array.isArray(refs)
+      ? (refs
+          .map((r) => (typeof r === "string" ? resolved.get(r) : undefined))
+          .filter((p) => p !== undefined) as unknown[])
+      : [];
+    data.posts = list;
+  }
+}
+
 // ---- Publish (§3.3, §4.2 POST /api/admin/publish) ---------------------------
 
 export interface PublishedVersion {
@@ -473,13 +536,17 @@ export async function publish(
   // may reference. Built once before per-page validation (a blog section may
   // live on any page).
   const existingBlogSlugs = await getBlogSlugs();
+  // Post Refs v1.14: the set of existing `posts.id`s a portfolio item's
+  // `post_refs` may reference. Existence only — unpublished posts are valid refs.
+  const existingPostIds = await getAllPostIds();
   const byPage = groupSectionsByPage(workingSet);
   const serializedPages: SerializedPage[] = [];
   for (const page of pages) {
     const validated = validateWorkingSet(
       byPage.get(page.id) ?? [],
       visibleSkillItemIds,
-      existingBlogSlugs
+      existingBlogSlugs,
+      existingPostIds
     );
     if (!validated.ok) return validated;
     if (!page.is_hidden) {
@@ -542,12 +609,16 @@ export async function getLatestContent(cdnDomain: string): Promise<ContentRespon
   const doc = row.document;
   const keyMap = doc.media ?? {};
   const alts = await fetchAlts(db, Object.keys(keyMap));
+  // A pre-v1.1 document (flat `sections`) is normalized to the pages shape so
+  // /api/content never serves the legacy shape (§3.10 back-compat).
+  const pages = documentToPages(doc);
+  // Post Refs v1.14: resolve each portfolio item's `post_refs` to its currently
+  // -published `posts` at READ time (the document stays id-based).
+  await resolvePostRefsIntoPages(pages);
   return {
     version: doc.version,
     published_at: doc.published_at,
-    // A pre-v1.1 document (flat `sections`) is normalized to the pages shape so
-    // /api/content never serves the legacy shape (§3.10 back-compat).
-    pages: documentToPages(doc),
+    pages,
     media: resolveMediaMap(cdnDomain, keyMap, alts),
   };
 }
@@ -739,6 +810,9 @@ export async function getDraftContent(cdnDomain: string): Promise<{
 
   const keyMap = await buildMediaKeyMap(getDb(), serializedPages);
   const alts = await fetchAlts(getDb(), Object.keys(keyMap));
+  // Post Refs v1.14: resolve `post_refs` → `posts` at read, exactly as
+  // /api/content does, so preview matches what visitors will see (§4.1 parity).
+  await resolvePostRefsIntoPages(serializedPages);
   return {
     version: null,
     published_at: null,

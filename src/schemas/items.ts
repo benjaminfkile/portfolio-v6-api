@@ -32,6 +32,43 @@ export const skillsItemSchema = z
   })
   .strict();
 
+/**
+ * A related-post reference resolved onto a portfolio item at READ time (§Post
+ * Refs v1.14). The stored document only ever holds the raw `post_refs` uuid
+ * array; `GET /api/content` and the admin preview resolve each ref to a
+ * currently-published post and serialize it here — `{ id, slug, title, blog }`,
+ * with `blog` the owning blog `{slug, name}` or `null`. Surfaced in the schema so
+ * `sync:types` generates the `PostRef` type once (§8.4).
+ */
+export const postRefSchema = z
+  .object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    title: z.string(),
+    // The owning blog `{slug, name}` or `null`. Structurally identical to
+    // `blogRefSchema`, but a distinct instance so the derived JSON Schema keeps
+    // both this and the root `blog` reference inlined (§8.4).
+    blog: z
+      .object({ slug: z.string(), name: z.string() })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
+/**
+ * Ordered references to `posts.id` uuids (§Post Refs v1.14): the "related posts"
+ * a portfolio project links to. Max 12, no duplicates, render order = array
+ * order. Empty/absent is allowed. Publish validates each ref exists in the
+ * `posts` table (a dangling ref → 422); refs to UNPUBLISHED posts are valid at
+ * publish and simply resolve to nothing at read.
+ */
+export const postRefsSchema = z
+  .array(z.string().uuid())
+  .max(12, "at most 12 post_refs are allowed")
+  .refine((refs) => new Set(refs).size === refs.length, {
+    message: "post_refs must not contain duplicate ids",
+  });
+
 export const portfolioItemSchema = z
   .object({
     title: z.string().min(1),
@@ -46,13 +83,23 @@ export const portfolioItemSchema = z
     // Empty array allowed; publish validates each ref resolves to a non-hidden
     // skills item of a non-hidden skills section.
     skill_refs: z.array(z.string().uuid()),
+    // Ordered references to `posts.id` uuids (§Post Refs v1.14) — the related
+    // published posts this project links to. Optional; canonical rules (uuid,
+    // max 12, no duplicates) enforced at publish, existence validated there too.
+    post_refs: postRefsSchema.optional(),
     links: z.array(linkSchema),
+    // READ-time resolution of `post_refs` (§Post Refs v1.14). Never written by a
+    // client and never stored in a document — `GET /api/content` / preview inject
+    // it, resolving each ref to a currently-published post in author order.
+    // Optional so publish (which parses stored, id-only data) round-trips cleanly.
+    posts: z.array(postRefSchema).optional(),
   })
   .strict();
 
 export type TimelineItem = z.infer<typeof timelineItemSchema>;
 export type SkillsItem = z.infer<typeof skillsItemSchema>;
 export type PortfolioItem = z.infer<typeof portfolioItemSchema>;
+export type PostRef = z.infer<typeof postRefSchema>;
 
 /**
  * Item schema keyed by the owning section type. Section types absent from this
@@ -74,5 +121,11 @@ export type ItemBearingSectionType = keyof typeof ITEM_SCHEMAS;
 export const DRAFT_ITEM_SCHEMAS = {
   timeline: timelineItemSchema.partial(),
   skills: skillsItemSchema.partial(),
-  portfolio: portfolioItemSchema.partial(),
+  // Draft-lenient portfolio (§3.9 / §Post Refs v1.14): every canonical field is
+  // optional, but `post_refs` is relaxed to a bare string array — a half-built
+  // draft may hold not-yet-valid ids without blocking the save. Publish re-parses
+  // against the canonical `post_refs` (uuid, max 12, no duplicates).
+  portfolio: portfolioItemSchema.partial().extend({
+    post_refs: z.array(z.string()).optional(),
+  }),
 } as const;
