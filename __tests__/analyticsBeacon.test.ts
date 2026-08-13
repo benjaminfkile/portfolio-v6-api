@@ -255,6 +255,61 @@ describe("POST /api/beacon ingest (§4.8)", () => {
     expect(await rows()).toHaveLength(0);
   });
 
+  // Cross-origin `navigator.sendBeacon` cannot preflight, so the client sends
+  // its JSON body under a CORS-safelisted content type (text/plain, or a
+  // type-less Blob). The router must ingest those exactly like application/json.
+  it("ingests a text/plain body carrying valid JSON exactly like application/json", async () => {
+    const res = await request(app)
+      .post("/api/beacon")
+      .set("Content-Type", "text/plain;charset=UTF-8")
+      .set("X-Forwarded-For", FIXTURE_IP)
+      .set("User-Agent", FIXTURE_UA)
+      .set("Origin", SITE_ORIGIN)
+      .send(JSON.stringify({ event: "pageview", path: "/" }));
+    expect(res.status).toBe(204);
+    const all = await rows();
+    expect(all).toHaveLength(1);
+    expect(all[0].event).toBe("pageview");
+    expect(all[0].path).toBe("/");
+  });
+
+  it("ingests a body with no Content-Type header (type-less Blob case)", async () => {
+    const res = await request(app)
+      .post("/api/beacon")
+      .set("Content-Type", "")
+      .set("X-Forwarded-For", FIXTURE_IP)
+      .set("User-Agent", FIXTURE_UA)
+      .set("Origin", SITE_ORIGIN)
+      .send(JSON.stringify({ event: "pageview", path: "/" }));
+    expect(res.status).toBe(204);
+    const all = await rows();
+    expect(all).toHaveLength(1);
+    expect(all[0].event).toBe("pageview");
+    expect(all[0].path).toBe("/");
+  });
+
+  it("answers 204 on a malformed JSON body sent as text/plain and stores nothing", async () => {
+    const res = await request(app)
+      .post("/api/beacon")
+      .set("Content-Type", "text/plain;charset=UTF-8")
+      .set("X-Forwarded-For", FIXTURE_IP)
+      .set("User-Agent", FIXTURE_UA)
+      .send('{"event": "pageview", ');
+    expect(res.status).toBe(204);
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it("answers 204 on an empty text/plain body and stores nothing", async () => {
+    const res = await request(app)
+      .post("/api/beacon")
+      .set("Content-Type", "text/plain;charset=UTF-8")
+      .set("X-Forwarded-For", FIXTURE_IP)
+      .set("User-Agent", FIXTURE_UA)
+      .send("");
+    expect(res.status).toBe(204);
+    expect(await rows()).toHaveLength(0);
+  });
+
   it("answers 204 even when the database is down (must run last — closes the pool)", async () => {
     await closeDb();
     const res = await beacon({ event: "pageview", path: "/" });

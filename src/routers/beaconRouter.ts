@@ -19,9 +19,13 @@ import { ingestBeacon } from "../services/analyticsService";
  */
 const beaconRouter = express.Router();
 
-// A local JSON body parser. On a malformed body it calls back with an error,
-// which we deliberately ignore so the endpoint still answers 204.
-const parseJsonBody = express.json();
+// A local JSON body parser. `type: () => true` makes it parse every request
+// body as JSON regardless of the declared Content-Type — cross-origin
+// `navigator.sendBeacon` cannot preflight, so it can only send with a
+// CORS-safelisted type (text/plain, or a type-less Blob), and we still need to
+// read the JSON payload. On a malformed body it calls back with an error, which
+// we deliberately ignore so the endpoint still answers 204.
+const parseJsonBody = express.json({ type: () => true });
 
 /**
  * Client IP = FIRST `X-Forwarded-For` entry when present (the gateway/ALB sets
