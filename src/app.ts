@@ -36,7 +36,15 @@ const app: Express = express();
 // themselves, so disabling the automatic one changes nothing for them.
 app.set("etag", false);
 
-app.use(helmet());
+// helmet defaults set Cross-Origin-Resource-Policy: same-origin, which causes
+// Chrome to block the (empty) 204 that navigator.sendBeacon receives cross-
+// origin — the server processes the event but the browser logs
+// ERR_BLOCKED_BY_RESPONSE.NotSameOrigin on every page load. This API is
+// consumed exclusively cross-origin by the Vercel frontends (wildcard CORS is
+// already enabled below), so cross-origin CORP app-wide is the correct posture.
+// Every other helmet default (CSP, COOP, HSTS, X-Content-Type-Options, …) is
+// left untouched.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
 // CORS is enabled only for direct local access (IS_LOCAL). In production the
 // gateway owns CORS — TECH_SPEC_V1.md §5 / §10.
