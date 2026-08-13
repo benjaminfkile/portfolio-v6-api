@@ -48,6 +48,34 @@ describe("GET /api/health (§11.1) — no DB call", () => {
   });
 });
 
+describe("security response headers (helmet)", () => {
+  // Chrome blocks the (empty) 204 that navigator.sendBeacon receives with
+  // ERR_BLOCKED_BY_RESPONSE.NotSameOrigin unless Cross-Origin-Resource-Policy
+  // is cross-origin. The API is consumed exclusively cross-origin by the Vercel
+  // frontends, so CORP: cross-origin app-wide is the correct posture while every
+  // other helmet default (CSP, COOP, HSTS, X-Content-Type-Options) is kept.
+  const assertHelmetHeaders = (res: request.Response) => {
+    expect(res.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(res.headers["content-security-policy"]).toBeDefined();
+    expect(res.headers["cross-origin-opener-policy"]).toBeDefined();
+    expect(res.headers["strict-transport-security"]).toBeDefined();
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+  };
+
+  it("GET /api/posts carries CORP: cross-origin and the other helmet defaults", async () => {
+    const res = await request(app).get("/api/posts");
+    assertHelmetHeaders(res);
+  });
+
+  it("POST /api/beacon carries CORP: cross-origin and the other helmet defaults", async () => {
+    const res = await request(app)
+      .post("/api/beacon")
+      .set("Content-Type", "application/json")
+      .send({ event: "pageview", path: "/" });
+    assertHelmetHeaders(res);
+  });
+});
+
 describe("JSON error handler (§4.4)", () => {
   it("returns a JSON 500 envelope, not an HTML/view error", async () => {
     const res = await request(app)
