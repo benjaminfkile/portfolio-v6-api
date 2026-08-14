@@ -2,7 +2,7 @@ name: Build and Deploy Portfolio v6 API
 
 on:
   push:
-    branches: ["dev"]
+    branches: ["main", "dev"]
     paths-ignore:
       - "**/*.md"
 
