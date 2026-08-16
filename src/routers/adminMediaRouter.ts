@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin } from "../middleware/requireAdmin";
 import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import {
@@ -16,14 +15,11 @@ import {
  * Admin media router — TECH_SPEC_V1.md §4.2, §6.7, §6.9.
  *
  * Presigned uploads, confirm, the media library listing, hard delete, and the
- * on-demand GC sweep. The three routes a post image needs — `POST /media/
- * upload-url`, `POST /media/:id/confirm`, and `GET /media` — are behind
- * `requireAdminOrMachine()` so the external posting bot (API Keys v1.16) can
- * attach images to a post with its API key; `POST /media/sweep` and `DELETE
- * /media/:id` stay admin-only (`requireAdmin()`), so an API key gets 401 there.
- * Business logic
- * and all S3 access live in `mediaService`/`s3Service`; this router only shapes the
- * request/response envelope and maps `MediaResult` failure codes to HTTP status.
+ * on-demand GC sweep. Every route is behind `requireAdminOrMachine()` (API Keys
+ * v1.16 — an AI editing agent needs the full media surface for debugging as well
+ * as attaching post images). Business logic and all S3 access live in
+ * `mediaService`/`s3Service`; this router only shapes the request/response
+ * envelope and maps `MediaResult` failure codes to HTTP status.
  */
 const adminMediaRouter = express.Router();
 
@@ -85,7 +81,7 @@ adminMediaRouter.post(
  */
 adminMediaRouter.post(
   "/media/sweep",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(200).json(success(await runGc()));
@@ -111,7 +107,7 @@ adminMediaRouter.get(
 /** DELETE /api/admin/media/:id (§4.2) — hard delete: S3 object + row. */
 adminMediaRouter.delete(
   "/media/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deleteAsset(req.params.id));

@@ -6,7 +6,7 @@ import { getDb } from "../db/db";
  * API Keys service — API Keys v1.16.
  *
  * Owns the `api_keys` table behind the admin API-keys router and the middleware
- * that accepts a key on the narrow machine surface (see `requireAdminOrMachine`).
+ * that accepts a key on the content-editing surface (see `requireAdminOrMachine`).
  * These keys REPLACE the never-activated Cognito client-credentials machine path
  * from Machine Auth v1.15 — a consuming app authenticates with a first-class key
  * and needs zero Cognito/AWS dependencies.

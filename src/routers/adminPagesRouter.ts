@@ -1,5 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import { FailureCode, ServiceResult } from "../services/sectionsService";
 import {
@@ -13,8 +13,10 @@ import {
 /**
  * Admin pages router — TECH_SPEC_V1.md §4.2 (the v1.1 pages rows), §4.5
  * (optimistic concurrency), §3.10 (pages model). Mirrors `adminSectionsRouter`:
- * every route behind `requireAdmin()`, all logic in `pagesService`, and the
- * service's `ServiceResult` failure codes mapped to HTTP statuses here.
+ * every route behind `requireAdminOrMachine()` (API Keys v1.16 — an AI editing
+ * agent needs to touch pages the same way an admin does), all logic in
+ * `pagesService`, and the service's `ServiceResult` failure codes mapped to HTTP
+ * statuses here.
  */
 const adminPagesRouter = express.Router();
 
@@ -68,7 +70,7 @@ function extractOrder(body: unknown): unknown {
 /** GET /api/admin/pages — all pages ordered by nav_position (§4.2). */
 adminPagesRouter.get(
   "/pages",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       const pages = await listPages();
@@ -82,7 +84,7 @@ adminPagesRouter.get(
 /** POST /api/admin/pages — create a page (slug validated, reserved list). */
 adminPagesRouter.post(
   "/pages",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { slug, title, nav_label, nav_position } = req.body ?? {};
@@ -100,7 +102,7 @@ adminPagesRouter.post(
  */
 adminPagesRouter.put(
   "/pages/order",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await reorderPages(extractOrder(req.body)));
@@ -113,7 +115,7 @@ adminPagesRouter.put(
 /** PATCH /api/admin/pages/:id — update metadata (precondition, §4.5). */
 adminPagesRouter.patch(
   "/pages/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const expected = requireExpectedUpdatedAt(req, res);
@@ -139,7 +141,7 @@ adminPagesRouter.patch(
 /** DELETE /api/admin/pages/:id — delete page + its sections (cascade, §3.10). */
 adminPagesRouter.delete(
   "/pages/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deletePage(req.params.id));

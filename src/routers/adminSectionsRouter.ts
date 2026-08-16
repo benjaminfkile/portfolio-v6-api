@@ -1,5 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import {
   FailureCode,
@@ -19,10 +19,12 @@ import {
  * Admin sections & items router — TECH_SPEC_V1.md §4.2 (the sections/items rows
  * of the admin table), §4.5 (optimistic concurrency), §3.9 (Zod validation).
  *
- * Every route is behind `requireAdmin()`. Business logic and DB access live in
- * `sectionsService`; this router only parses/validates the request envelope,
- * enforces the `expected_updated_at` precondition's *presence* on PATCH routes,
- * and maps the service's `ServiceResult` failure codes to HTTP statuses.
+ * Every route is behind `requireAdminOrMachine()` (API Keys v1.16 — an AI editing
+ * agent needs to touch sections/items the same way an admin does). Business
+ * logic and DB access live in `sectionsService`; this router only parses/
+ * validates the request envelope, enforces the `expected_updated_at`
+ * precondition's *presence* on PATCH routes, and maps the service's
+ * `ServiceResult` failure codes to HTTP statuses.
  */
 const adminSectionsRouter = express.Router();
 
@@ -85,7 +87,7 @@ function extractOrder(body: unknown): unknown {
  */
 adminSectionsRouter.get(
   "/sections",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pageId = req.query.page_id;
@@ -102,7 +104,7 @@ adminSectionsRouter.get(
 /** POST /api/admin/sections — create a section (`page_id` required, §4.2 v1.1). */
 adminSectionsRouter.post(
   "/sections",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { type, data, is_hidden, page_id } = req.body ?? {};
@@ -121,7 +123,7 @@ adminSectionsRouter.post(
  */
 adminSectionsRouter.put(
   "/sections/order",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pageId = (req.body ?? {}).page_id;
@@ -141,7 +143,7 @@ adminSectionsRouter.put(
  */
 adminSectionsRouter.patch(
   "/sections/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const expected = requireExpectedUpdatedAt(req, res);
@@ -165,7 +167,7 @@ adminSectionsRouter.patch(
 /** DELETE /api/admin/sections/:id — delete (cascades to items). */
 adminSectionsRouter.delete(
   "/sections/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deleteSection(req.params.id));
@@ -180,7 +182,7 @@ adminSectionsRouter.delete(
 /** POST /api/admin/sections/:id/items — create an item. */
 adminSectionsRouter.post(
   "/sections/:id/items",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { data, is_hidden } = req.body ?? {};
@@ -194,7 +196,7 @@ adminSectionsRouter.post(
 /** PUT /api/admin/sections/:id/items/order — reorder a section's items. */
 adminSectionsRouter.put(
   "/sections/:id/items/order",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(
@@ -210,7 +212,7 @@ adminSectionsRouter.put(
 /** PATCH /api/admin/items/:id — update an item (precondition). */
 adminSectionsRouter.patch(
   "/items/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const expected = requireExpectedUpdatedAt(req, res);
@@ -233,7 +235,7 @@ adminSectionsRouter.patch(
 /** DELETE /api/admin/items/:id — delete an item. */
 adminSectionsRouter.delete(
   "/items/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deleteItem(req.params.id));

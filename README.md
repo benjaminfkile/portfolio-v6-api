@@ -18,8 +18,8 @@ Four classes of route guard:
 | Guard | Accepts | Notes |
 |---|---|---|
 | none | — | Public reads + `POST /api/beacon`. |
-| `requireAdmin()` | Cognito **ID token** whose `cognito:groups` includes `admins` | 401 missing/invalid/expired token, **403** valid token without the group. No users table — identity is the token. |
-| `requireAdminOrMachine()` | Admin ID token **or** an API key (`Authorization: Bearer pv6k_…`) | Machine keys are minted/revoked in the admin (Integrations page). Only the SHA-256 hash is stored; `last_used_at` is stamped on use. A `pv6k_` bearer on a `requireAdmin()`-only route gets **401**. |
+| `requireAdmin()` | Cognito **ID token** whose `cognito:groups` includes `admins` | 401 missing/invalid/expired token, **403** valid token without the group. No users table — identity is the token. Only the api-keys and integrations (incl. legacy `/spotify`) surfaces stay behind this — a machine key must never mint another key or read/write stored credentials. |
+| `requireAdminOrMachine()` | Admin ID token **or** an API key (`Authorization: Bearer pv6k_…`) | Guards the full content-editing surface (pages, sections/items, posts, blogs, media, publish/versions/restore, preview-token, analytics, icons). Machine keys are minted/revoked in the admin (API Keys page). Only the SHA-256 hash is stored; `last_used_at` is stamped on use. Key-driven writes that record an actor persist it as `key:<name>`. A `pv6k_` bearer on a `requireAdmin()`-only route gets **401**. |
 | `requireAdminOrPreviewToken()` | Admin ID token **or** a short-lived preview token (`?token=`, `?preview=`, or `X-Preview-Token`) | Tokens minted via `POST /api/admin/preview-token`, ~15 min, read-only. |
 
 The two OAuth callback routes (`GET /api/admin/integrations/:key/callback` and the legacy
@@ -63,31 +63,31 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/api/admin/pages` | A | All pages + nav order. |
-| POST | `/api/admin/pages` | A | Create page → 201. |
-| PUT | `/api/admin/pages/order` | A | Reorder nav (full ordered id array). |
-| PATCH | `/api/admin/pages/:id` | A | Update; requires `expected_updated_at`. |
-| DELETE | `/api/admin/pages/:id` | A | Delete page + its sections. |
-| GET | `/api/admin/sections` | A | Working set incl. drafts; `?page_id=` filter. |
-| POST | `/api/admin/sections` | A | Create section (`page_id` required). |
-| PUT | `/api/admin/sections/order` | A | Reorder within a page (`{ page_id, ids }`). |
-| PATCH | `/api/admin/sections/:id` | A | Update; requires `expected_updated_at`. |
-| DELETE | `/api/admin/sections/:id` | A | Delete (cascades to items). |
-| POST | `/api/admin/sections/:id/items` | A | Create item. |
-| PUT | `/api/admin/sections/:id/items/order` | A | Reorder items. |
-| PATCH | `/api/admin/items/:id` | A | Update item; requires `expected_updated_at`. |
-| DELETE | `/api/admin/items/:id` | A | Delete item. |
-| POST | `/api/admin/preview-token` | A | Mint ~15-min read-only preview token. |
+| GET | `/api/admin/pages` | A\|K | All pages + nav order. |
+| POST | `/api/admin/pages` | A\|K | Create page → 201. |
+| PUT | `/api/admin/pages/order` | A\|K | Reorder nav (full ordered id array). |
+| PATCH | `/api/admin/pages/:id` | A\|K | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/pages/:id` | A\|K | Delete page + its sections. |
+| GET | `/api/admin/sections` | A\|K | Working set incl. drafts; `?page_id=` filter. |
+| POST | `/api/admin/sections` | A\|K | Create section (`page_id` required). |
+| PUT | `/api/admin/sections/order` | A\|K | Reorder within a page (`{ page_id, ids }`). |
+| PATCH | `/api/admin/sections/:id` | A\|K | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/sections/:id` | A\|K | Delete (cascades to items). |
+| POST | `/api/admin/sections/:id/items` | A\|K | Create item. |
+| PUT | `/api/admin/sections/:id/items/order` | A\|K | Reorder items. |
+| PATCH | `/api/admin/items/:id` | A\|K | Update item; requires `expected_updated_at`. |
+| DELETE | `/api/admin/items/:id` | A\|K | Delete item. |
+| POST | `/api/admin/preview-token` | A\|K | Mint ~15-min read-only preview token. |
 | GET | `/api/admin/preview` | A\|P | Draft serialized in `/api/content` shape (raw). |
 | GET | `/api/admin/preview/posts/:id` | A\|P | A post's draft body (raw). |
-| POST | `/api/admin/publish` | A | Validate + snapshot working set → new version. |
-| GET | `/api/admin/versions` | A | Version history. |
-| POST | `/api/admin/versions/:v/restore` | A | Re-publish version *v* and rebuild the working set (destroys unpublished edits). |
+| POST | `/api/admin/publish` | A\|K | Validate + snapshot working set → new version; key-driven publishes attribute as `key:<name>`. |
+| GET | `/api/admin/versions` | A\|K | Version history. |
+| POST | `/api/admin/versions/:v/restore` | A\|K | Re-publish version *v* and rebuild the working set (destroys unpublished edits); key-driven restores attribute as `key:<name>`. |
 | POST | `/api/admin/media/upload-url` | A\|K | Presigned S3 PUT + pending asset row → 201. |
 | POST | `/api/admin/media/:id/confirm` | A\|K | Confirm the upload landed; finalize the asset. |
 | GET | `/api/admin/media` | A\|K | List assets with orphan status. |
-| POST | `/api/admin/media/sweep` | A | Run orphan GC on demand (§6.9). |
-| DELETE | `/api/admin/media/:id` | A | Hard delete (S3 object + row). |
+| POST | `/api/admin/media/sweep` | A\|K | Run orphan GC on demand (§6.9). |
+| DELETE | `/api/admin/media/:id` | A\|K | Hard delete (S3 object + row). |
 | GET | `/api/admin/posts` | A\|K | All posts, drafts included. |
 | POST | `/api/admin/posts` | A\|K | Create post → 201. |
 | GET | `/api/admin/posts/:id` | A\|K | One post with `draft_body`. |
@@ -95,23 +95,23 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 | DELETE | `/api/admin/posts/:id` | A\|K | Delete post. |
 | POST | `/api/admin/posts/:id/publish` | A\|K | Re-validate (400 if invalid) then publish; key-driven publishes attribute as `key:<name>`. |
 | POST | `/api/admin/posts/:id/unpublish` | A\|K | Null `published_at`, retain `published_body`. |
-| GET | `/api/admin/blogs` | A\|K | All blogs with `post_count` (lets a machine resolve `blog_id`). |
-| POST | `/api/admin/blogs` | A | Create blog `{slug,name}` → 201. |
-| PATCH | `/api/admin/blogs/:id` | A | Update; requires `expected_updated_at`. |
-| DELETE | `/api/admin/blogs/:id` | A | Delete; assigned posts get `blog_id = NULL`. |
+| GET | `/api/admin/blogs` | A\|K | All blogs with `post_count`. |
+| POST | `/api/admin/blogs` | A\|K | Create blog `{slug,name}` → 201. |
+| PATCH | `/api/admin/blogs/:id` | A\|K | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/blogs/:id` | A\|K | Delete; assigned posts get `blog_id = NULL`. |
 | POST | `/api/admin/api-keys` | A | Mint key → 201; full `pv6k_…` secret returned **this once only**. |
 | GET | `/api/admin/api-keys` | A | List keys (never a hash or full key). |
 | POST | `/api/admin/api-keys/:id/revoke` | A | Revoke; idempotent. |
-| GET | `/api/admin/analytics` | A | Aggregates; `?days=7\|30\|90` (else 30). |
+| GET | `/api/admin/analytics` | A\|K | Aggregates; `?days=7\|30\|90` (else 30). |
 | GET | `/api/admin/integrations` | A | Status of spotify/github/duolingo (never the stored value). |
 | PUT | `/api/admin/integrations/:key/value` | A | Set an api_key/value credential (encrypted at rest). |
 | POST | `/api/admin/integrations/:key/connect` | A | Begin OAuth; mints single-use `state`. |
 | GET | `/api/admin/integrations/:key/callback` | state | OAuth redirect target. |
 | DELETE | `/api/admin/integrations/:key` | A | Remove stored credential. |
 | GET/POST/DELETE | `/api/admin/spotify[/status|/connect|/callback]` | A / state | Legacy aliases for the spotify integration. |
-| GET | `/api/admin/icons/devicon-manifest` | A | Pinned, slimmed devicon manifest. |
-| GET | `/api/admin/icons/simpleicons-manifest` | A | Same for simple-icons. |
-| POST | `/api/admin/icons/import` | A | Download a pinned icon SVG server-side → S3 `icons/` → CDN URL. Idempotent. |
+| GET | `/api/admin/icons/devicon-manifest` | A\|K | Pinned, slimmed devicon manifest. |
+| GET | `/api/admin/icons/simpleicons-manifest` | A\|K | Same for simple-icons. |
+| POST | `/api/admin/icons/import` | A\|K | Download a pinned icon SVG server-side → S3 `icons/` → CDN URL. Idempotent. |
 
 ## Configuration
 

@@ -21,7 +21,7 @@ import {
  * Admin posts router — TECH_SPEC_V1.md §4.2, §4.5, §3.6, §3.7, §7.
  *
  * The blog CRUD + publish lifecycle. Every route is behind
- * `requireAdminOrMachine()` (API Keys v1.16) — so the external posting bot reaches
+ * `requireAdminOrMachine()` (API Keys v1.16) — so an AI editing agent reaches
  * the whole post surface with a dashboard-minted API key — EXCEPT the
  * draft-preview route, which is behind `requireAdminOrPreviewToken()`
  * (§4.2 †, §7) so the public site can serialize a post's draft body inside its

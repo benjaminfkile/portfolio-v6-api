@@ -1,5 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { IAppSecrets } from "../interfaces";
 import { success, failure } from "../utils/envelope";
 import {
@@ -21,9 +21,10 @@ import {
  *     server-side, stores it under the `icons/` prefix in the existing media S3
  *     bucket, and returns its media-CDN URL. Deterministic key + idempotent.
  *
- * Every route is behind `requireAdmin()`. All upstream fetch + S3 logic lives in
- * `iconsService`/`s3Service`; this router only shapes the envelope and maps
- * `IconResult` failure codes to HTTP status.
+ * Every route is behind `requireAdminOrMachine()` (API Keys v1.16 — an AI editing
+ * agent needs to import icons for the pages it builds, same as an admin). All
+ * upstream fetch + S3 logic lives in `iconsService`/`s3Service`; this router only
+ * shapes the envelope and maps `IconResult` failure codes to HTTP status.
  */
 const adminIconsRouter = express.Router();
 
@@ -61,7 +62,7 @@ function cdnDomain(req: Request): string {
  */
 adminIconsRouter.get(
   "/icons/devicon-manifest",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await getDeviconManifest());
@@ -78,7 +79,7 @@ adminIconsRouter.get(
  */
 adminIconsRouter.get(
   "/icons/simpleicons-manifest",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await getSimpleIconsManifest());
@@ -102,7 +103,7 @@ adminIconsRouter.get(
  */
 adminIconsRouter.post(
   "/icons/import",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const body = req.body ?? {};

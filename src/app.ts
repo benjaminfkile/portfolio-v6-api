@@ -109,9 +109,9 @@ app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
 });
 // Preview-token mint route (§7), the sections/items CRUD (§4.2), and the publish
 // pipeline (§4.2: publish/versions/restore/preview). All mount under /api/admin;
-// each router guards its own routes with requireAdmin() (or, for the preview
-// route, requireAdminOrPreviewToken()), and requests one router does not match
-// fall through to the next. Later tasks (440–441) add their routers likewise.
+// each router guards its own routes with requireAdminOrMachine() (or, for the
+// preview route, requireAdminOrPreviewToken()), and requests one router does not
+// match fall through to the next.
 app.use("/api/admin", adminAuthRouter);
 // Pages CRUD + nav reorder (§4.2 v1.1, §3.10). Mounted before the sections
 // router; both live under /api/admin and non-matching requests fall through.
@@ -135,19 +135,22 @@ app.use("/api/admin", adminBlogsRouter);
 app.use("/api/admin", adminIntegrationsRouter);
 // Analytics aggregates (§4.8 v1.4, read half): GET /api/admin/analytics returns
 // the curated, privacy-respecting summary (totals/daily/top pages/referrers/
-// events/outbound) over a 7/30/90-day window. Admin-only; all aggregation runs
-// in Postgres and the underlying rows carry no PII.
+// events/outbound) over a 7/30/90-day window. Reachable by admins and machine
+// keys (API Keys v1.16 — the agent uses it to debug the site); all aggregation
+// runs in Postgres and the underlying rows carry no PII.
 app.use("/api/admin", adminAnalyticsRouter);
 // Icons (§Icons v1.6): the devicon manifest proxy (pinned, cached, slimmed) and
 // the icon import that stores a pinned SVG under the `icons/` prefix in the
-// existing media bucket and returns its CDN URL. Admin-only; all upstream fetch
-// and S3 access is server-side. The `icons/` prefix is deliberately outside the
-// §6.9 media orphan sweep (icons are referenced by URL, not media_id).
+// existing media bucket and returns its CDN URL. Reachable by admins and
+// machine keys; all upstream fetch and S3 access is server-side. The `icons/`
+// prefix is deliberately outside the §6.9 media orphan sweep (icons are
+// referenced by URL, not media_id).
 app.use("/api/admin", adminIconsRouter);
 // API keys (API Keys v1.16): mint / list / revoke dashboard-minted keys used on
-// the narrow machine surface (posts/media/blogs) in place of the removed Cognito
-// client-credentials path. Humans only — every route is behind requireAdmin();
-// the full key is returned once at mint and only its SHA-256 hash is stored.
+// the content-editing surface in place of the removed Cognito client-credentials
+// path. Humans only — every route is behind requireAdmin() (a key can never
+// mint, list, or revoke another key); the full key is returned once at mint and
+// only its SHA-256 hash is stored.
 app.use("/api/admin", adminApiKeysRouter);
 
 // JSON error handler ported from file-manager-api (§4.4). No view engine is
