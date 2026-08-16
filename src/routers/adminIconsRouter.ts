@@ -16,6 +16,7 @@ import {
  *
  *   - GET  /api/admin/icons/devicon-manifest → the pinned, cached, slimmed
  *     devicon manifest.
+ *   - GET  /api/admin/icons/simpleicons-manifest → same for simple-icons.
  *   - POST /api/admin/icons/import { name, variant } → downloads the pinned SVG
  *     server-side, stores it under the `icons/` prefix in the existing media S3
  *     bucket, and returns its media-CDN URL. Deterministic key + idempotent.

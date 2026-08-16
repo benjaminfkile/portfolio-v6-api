@@ -56,9 +56,10 @@ function requireExpectedUpdatedAt(req: Request, res: Response): string | null {
 
 /**
  * GET /api/admin/blogs — all blogs (with post_count) ordered by name. Behind
- * `requireAdminOrMachine()` (Machine Auth v1.15): read-only, so the posting bot
- * can resolve a `blog_id` when creating a post. The write routes below stay
- * admin-only, so a machine token gets 403 on POST/PATCH/DELETE.
+ * `requireAdminOrMachine()` (API Keys v1.16): read-only, so a machine key can
+ * resolve a `blog_id` when creating a post. The write routes below stay
+ * admin-only, so a pv6k_ bearer gets 401 on POST/PATCH/DELETE (it is not a
+ * valid Cognito ID token).
  */
 adminBlogsRouter.get(
   "/blogs",

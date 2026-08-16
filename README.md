@@ -1,1 +1,151 @@
 # portfolio-v6-api
+
+Express + TypeScript API for **Portfolio v6** — serves published content to the public
+site (`portfolio-v6`) and the full editing surface to the admin (`portfolio-v6-admin`).
+Postgres via Knex, media on S3 behind a CDN, deployed as a Docker container behind the
+gateway. The authoritative content-model spec is `TECH_SPEC_V1.md` in the `portfolio-v6`
+repo; section references below (§…) point into it.
+
+Base URLs through the gateway (path prefix is stripped before it reaches this app):
+
+- prod: `https://api.benkile.com/portfolio-v6-api`
+- dev: `https://api.benkile.com/portfolio-v6-api-dev`
+
+## Auth model (§5)
+
+Four classes of route guard:
+
+| Guard | Accepts | Notes |
+|---|---|---|
+| none | — | Public reads + `POST /api/beacon`. |
+| `requireAdmin()` | Cognito **ID token** whose `cognito:groups` includes `admins` | 401 missing/invalid/expired token, **403** valid token without the group. No users table — identity is the token. |
+| `requireAdminOrMachine()` | Admin ID token **or** an API key (`Authorization: Bearer pv6k_…`) | Machine keys are minted/revoked in the admin (Integrations page). Only the SHA-256 hash is stored; `last_used_at` is stamped on use. A `pv6k_` bearer on a `requireAdmin()`-only route gets **401**. |
+| `requireAdminOrPreviewToken()` | Admin ID token **or** a short-lived preview token (`?token=`, `?preview=`, or `X-Preview-Token`) | Tokens minted via `POST /api/admin/preview-token`, ~15 min, read-only. |
+
+The two OAuth callback routes (`GET /api/admin/integrations/:key/callback` and the legacy
+`GET /api/admin/spotify/callback`) carry no bearer — they are guarded by a single-use
+10-minute `state` minted at connect time.
+
+**Response envelope (§4.3):** admin routes wrap results as
+`{ "status": "ok", "error": false, "data": { … } }`; errors everywhere are
+`{ "status": "error", "error": true, "errorMsg": "…" }`. Public reads return the resource
+**raw** (no envelope) — the one exception is `GET /api/health`, which uses the envelope.
+Every `/api/admin/*` response is `Cache-Control: no-store`. Express's automatic ETag is
+disabled; only `/api/content` and `/api/posts/:slug` set (weak) ETags by hand.
+
+**Optimistic concurrency (§4.5):** every PATCH (pages, sections, items, posts, blogs)
+requires `expected_updated_at` — 400 if absent, **409** on mismatch. Reorder and publish
+routes are exempt.
+
+## Endpoints
+
+### Public — no auth
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | Liveness string (`portfolio-v6-api[-dev]`). |
+| GET | `/api/health` | Liveness, no DB. Envelope response. |
+| GET | `/api/schema` | JSON Schema of the whole content model (§8.4) — shapes only, not the HTTP surface. Raw, unauthenticated; `npm run sync:types` in both frontends consumes it. |
+| GET | `/api/content` | Latest published document; media refs resolved to CDN URLs; `ETag`/304. |
+| GET | `/api/posts` | Published post summaries; keyset pagination via `?cursor=`; filters `?limit=`, `?tag=`, `?blog=`. |
+| GET | `/api/posts/:slug` | One published post (`published_body`); `ETag`/304; 404 for drafts. |
+| GET | `/api/status` | Curated gateway-health payload, ~30s cache; degrades, never 5xx. |
+| GET | `/api/now-playing` | Spotify proxy, ~30s cache; degrades to `{playing:false}`. |
+| GET | `/api/duolingo` | Streak/course (`?language=`), ~1h cache; degrades to `{available:false}`. |
+| GET | `/api/github` | Contribution calendar (`?year=YYYY` or trailing 12 months), ~1h cache; 400 only on invalid year. |
+| GET | `/api/ops` | Daily-replay ops report (v1.7): `?date=YYYY-MM-DD` or latest; 400 malformed date, 404 none available. |
+| POST | `/api/beacon` | Analytics ingest — **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
+
+### Admin
+
+Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key ·
+**A|P** = admin or preview token · **state** = OAuth state only.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/admin/pages` | A | All pages + nav order. |
+| POST | `/api/admin/pages` | A | Create page → 201. |
+| PUT | `/api/admin/pages/order` | A | Reorder nav (full ordered id array). |
+| PATCH | `/api/admin/pages/:id` | A | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/pages/:id` | A | Delete page + its sections. |
+| GET | `/api/admin/sections` | A | Working set incl. drafts; `?page_id=` filter. |
+| POST | `/api/admin/sections` | A | Create section (`page_id` required). |
+| PUT | `/api/admin/sections/order` | A | Reorder within a page (`{ page_id, ids }`). |
+| PATCH | `/api/admin/sections/:id` | A | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/sections/:id` | A | Delete (cascades to items). |
+| POST | `/api/admin/sections/:id/items` | A | Create item. |
+| PUT | `/api/admin/sections/:id/items/order` | A | Reorder items. |
+| PATCH | `/api/admin/items/:id` | A | Update item; requires `expected_updated_at`. |
+| DELETE | `/api/admin/items/:id` | A | Delete item. |
+| POST | `/api/admin/preview-token` | A | Mint ~15-min read-only preview token. |
+| GET | `/api/admin/preview` | A\|P | Draft serialized in `/api/content` shape (raw). |
+| GET | `/api/admin/preview/posts/:id` | A\|P | A post's draft body (raw). |
+| POST | `/api/admin/publish` | A | Validate + snapshot working set → new version. |
+| GET | `/api/admin/versions` | A | Version history. |
+| POST | `/api/admin/versions/:v/restore` | A | Re-publish version *v* and rebuild the working set (destroys unpublished edits). |
+| POST | `/api/admin/media/upload-url` | A\|K | Presigned S3 PUT + pending asset row → 201. |
+| POST | `/api/admin/media/:id/confirm` | A\|K | Confirm the upload landed; finalize the asset. |
+| GET | `/api/admin/media` | A\|K | List assets with orphan status. |
+| POST | `/api/admin/media/sweep` | A | Run orphan GC on demand (§6.9). |
+| DELETE | `/api/admin/media/:id` | A | Hard delete (S3 object + row). |
+| GET | `/api/admin/posts` | A\|K | All posts, drafts included. |
+| POST | `/api/admin/posts` | A\|K | Create post → 201. |
+| GET | `/api/admin/posts/:id` | A\|K | One post with `draft_body`. |
+| PATCH | `/api/admin/posts/:id` | A\|K | Update metadata / `draft_body`; requires `expected_updated_at`. |
+| DELETE | `/api/admin/posts/:id` | A\|K | Delete post. |
+| POST | `/api/admin/posts/:id/publish` | A\|K | Re-validate (400 if invalid) then publish; key-driven publishes attribute as `key:<name>`. |
+| POST | `/api/admin/posts/:id/unpublish` | A\|K | Null `published_at`, retain `published_body`. |
+| GET | `/api/admin/blogs` | A\|K | All blogs with `post_count` (lets a machine resolve `blog_id`). |
+| POST | `/api/admin/blogs` | A | Create blog `{slug,name}` → 201. |
+| PATCH | `/api/admin/blogs/:id` | A | Update; requires `expected_updated_at`. |
+| DELETE | `/api/admin/blogs/:id` | A | Delete; assigned posts get `blog_id = NULL`. |
+| POST | `/api/admin/api-keys` | A | Mint key → 201; full `pv6k_…` secret returned **this once only**. |
+| GET | `/api/admin/api-keys` | A | List keys (never a hash or full key). |
+| POST | `/api/admin/api-keys/:id/revoke` | A | Revoke; idempotent. |
+| GET | `/api/admin/analytics` | A | Aggregates; `?days=7\|30\|90` (else 30). |
+| GET | `/api/admin/integrations` | A | Status of spotify/github/duolingo (never the stored value). |
+| PUT | `/api/admin/integrations/:key/value` | A | Set an api_key/value credential (encrypted at rest). |
+| POST | `/api/admin/integrations/:key/connect` | A | Begin OAuth; mints single-use `state`. |
+| GET | `/api/admin/integrations/:key/callback` | state | OAuth redirect target. |
+| DELETE | `/api/admin/integrations/:key` | A | Remove stored credential. |
+| GET/POST/DELETE | `/api/admin/spotify[/status|/connect|/callback]` | A / state | Legacy aliases for the spotify integration. |
+| GET | `/api/admin/icons/devicon-manifest` | A | Pinned, slimmed devicon manifest. |
+| GET | `/api/admin/icons/simpleicons-manifest` | A | Same for simple-icons. |
+| POST | `/api/admin/icons/import` | A | Download a pinned icon SVG server-side → S3 `icons/` → CDN URL. Idempotent. |
+
+## Configuration
+
+`src/config/loadConfig.ts` has two mutually exclusive paths:
+
+- **`IS_LOCAL=true`** — everything from env (`.env`), zero AWS calls (the AWS SDK is never
+  imported). Wildcard CORS is enabled in this mode only.
+- **deployed** (`IS_LOCAL` unset) — app config from the Secrets Manager secret at
+  `AWS_SECRET_ARN` (includes the listen `port`, currently `8000` in both envs) and DB
+  credentials from `AWS_DB_SECRET_ARN`. No CORS headers from this app — the gateway
+  supplies wildcard CORS on proxied traffic.
+
+`.env.example` documents every variable with its default. Migrations: `npm run
+migrate:latest` (Knex, env-driven `knexfile.ts`). Deployed containers auto-run migrations
+only when `node_env !== 'production'` — **prod migrations are run manually** against the
+prod DB before deploying a schema change.
+
+## Deploy (§11)
+
+`.github/workflows/deploy.yaml` on pushes to `main` (→ service `portfolio-v6-api`, tag
+`latest`) and `dev` (→ `portfolio-v6-api-dev`, tag `dev`): buildx a multi-arch image,
+push to ECR, then one authenticated call to the gateway's management API
+(`POST /mgmt/services/<service>/deploy` with the git SHA tag). The gateway resolves the
+tag to a digest, updates its service manifest, and blue-greens the container in place —
+no instance refresh, other services unaffected. Container-internal port is 8000 (from the
+app secret); host ports are Docker-assigned by the gateway's reconciler.
+
+## Local development
+
+```bash
+cp .env.example .env   # fill in; IS_LOCAL=true
+npm install
+npm run migrate:latest
+npm run dev            # → localhost:3002
+```
+
+`npm test` runs the Vitest suite offline (AWS and Postgres mocked where needed).

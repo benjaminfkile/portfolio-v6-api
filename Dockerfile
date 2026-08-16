@@ -27,7 +27,10 @@ ARG AWS_REGION
 ARG AWS_SECRET_ARN
 ARG AWS_DB_SECRET_ARN
 ARG NODE_ENV
-ARG PORT=3002
+# Documentation only on the deployed path: the app binds the `port` from the
+# Secrets Manager app secret (8000 in both envs), and the gateway maps the
+# container port from its service-manifest row.
+ARG PORT=8000
 
 ENV AWS_REGION=$AWS_REGION
 ENV AWS_SECRET_ARN=$AWS_SECRET_ARN

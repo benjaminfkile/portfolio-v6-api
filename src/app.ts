@@ -40,8 +40,9 @@ app.set("etag", false);
 // Chrome to block the (empty) 204 that navigator.sendBeacon receives cross-
 // origin — the server processes the event but the browser logs
 // ERR_BLOCKED_BY_RESPONSE.NotSameOrigin on every page load. This API is
-// consumed exclusively cross-origin by the Vercel frontends (wildcard CORS is
-// already enabled below), so cross-origin CORP app-wide is the correct posture.
+// consumed exclusively cross-origin by the Vercel frontends (wildcard CORS
+// comes from the gateway in deployed envs, from cors() below under IS_LOCAL),
+// so cross-origin CORP app-wide is the correct posture.
 // Every other helmet default (CSP, COOP, HSTS, X-Content-Type-Options, …) is
 // left untouched.
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
@@ -92,12 +93,13 @@ app.use("/api/duolingo", duolingoRouter);
 // PAT is sent only in the upstream Authorization header and never appears in a
 // response or log.
 app.use("/api/github", githubRouter);
-// Ops / CloudWatch metrics proxy (§3.5, v1.3). Same live-section contract: a
-// ~5-minute in-memory cache and DEGRADE rather than error — no configured
-// dashboard name, any CloudWatch failure, or an unrenderable dashboard yields
-// { available: false }, a 200, never a 5xx. The dashboard name is an infra
-// identifier resolved server-side and never appears in a response or log; the
-// curated payload is allowlist-shaped so no ARN/instance-id/account-id leaks.
+// Ops daily-replay reports (§3.5, v1.7). One immutable report per UTC day
+// persisted to ops_reports (lazily built after 00:15 UTC); `?date=YYYY-MM-DD`
+// selects a day, else the latest. 400 on a malformed date, 404 when no report
+// exists, 500 on unexpected failure; Cache-Control expires just past the next
+// day boundary. The dashboard name is an infra identifier resolved server-side
+// and never appears in a response or log; the curated payload is
+// allowlist-shaped so no ARN/instance-id/account-id leaks.
 app.use("/api/ops", opsRouter);
 // Admin responses are live editing state and must never be cached or
 // revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
