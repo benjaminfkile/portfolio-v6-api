@@ -12,11 +12,15 @@ import request from "supertest";
  * full lifecycle end to end:
  *
  *  - MINT returns the full key exactly ONCE; LIST never exposes a hash or full key;
- *  - a minted key REACHES ONLY the narrow surface (posts CRUD/publish, the
- *    post-image media routes, GET /api/admin/blogs) and is 401 everywhere else;
- *  - a key-driven publish is attributed `key:<name>`;
+ *  - a minted key REACHES the full content-editing surface (pages, sections/items,
+ *    posts CRUD/publish, blogs write, media incl. sweep/delete, publish/versions/
+ *    restore, preview-token, analytics, icons) and is 401 ONLY on the humans-only
+ *    surface (api-keys, integrations, legacy /spotify);
+ *  - a key-driven post publish AND a key-driven site publish/restore attribute
+ *    as `key:<name>`;
  *  - `last_used_at` is stamped on an accepted key request;
- *  - REVOKE (idempotent; unknown id 404) then rejects the key (401);
+ *  - REVOKE (idempotent; unknown id 404) then rejects the key (401), incl. on a
+ *    newly widened route (POST /api/admin/sections);
  *  - a malformed/unknown `pv6k_` bearer is 401;
  *  - a human admin is unaffected.
  *
@@ -53,6 +57,8 @@ import adminPagesRouter from "../src/routers/adminPagesRouter";
 import adminSectionsRouter from "../src/routers/adminSectionsRouter";
 import adminPublishRouter from "../src/routers/adminPublishRouter";
 import adminIntegrationsRouter from "../src/routers/adminIntegrationsRouter";
+import adminAuthRouter from "../src/routers/adminAuthRouter";
+import adminAnalyticsRouter from "../src/routers/adminAnalyticsRouter";
 import { failure } from "../src/utils/envelope";
 
 const mockVerifyAdmin = verifyAdminIdToken as jest.Mock;
@@ -128,6 +134,7 @@ function buildApp(): Express {
     cdn_domain: CDN_DOMAIN,
   });
   app.use("/api/admin", adminApiKeysRouter);
+  app.use("/api/admin", adminAuthRouter);
   app.use("/api/admin", adminPagesRouter);
   app.use("/api/admin", adminSectionsRouter);
   app.use("/api/admin", adminPublishRouter);
@@ -135,6 +142,7 @@ function buildApp(): Express {
   app.use("/api/admin", adminPostsRouter);
   app.use("/api/admin", adminBlogsRouter);
   app.use("/api/admin", adminIntegrationsRouter);
+  app.use("/api/admin", adminAnalyticsRouter);
   app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(err);
     res.status(500).json(failure(err.message));
@@ -206,6 +214,10 @@ afterEach(async () => {
   await db("media_assets").del();
   await db("blogs").del();
   await db("api_keys").del();
+  await db("section_items").del();
+  await db("sections").del();
+  await db("pages").del();
+  await db("page_versions").del();
 });
 
 describe("mint / list — full key returned once, never exposed again", () => {
@@ -266,7 +278,128 @@ describe("mint / list — full key returned once, never exposed again", () => {
   });
 });
 
-describe("a minted key REACHES the narrow surface", () => {
+describe("a minted key REACHES the content-editing surface", () => {
+  it("pages + sections (a widened route): create page, create section, patch, delete", async () => {
+    const { key } = await mint("editing-agent");
+
+    const page = await request(app)
+      .post("/api/admin/pages")
+      .set(...keyAuth(key))
+      .send({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 });
+    expect(page.status).toBe(201);
+    const pageId = page.body.data.id as string;
+
+    const section = await request(app)
+      .post("/api/admin/sections")
+      .set(...keyAuth(key))
+      .send({ type: "about", data: { heading: "Hi", body: "hello" }, page_id: pageId });
+    expect(section.status).toBe(201);
+    const sectionId = section.body.data.id as string;
+
+    const listed = await request(app).get("/api/admin/sections").set(...keyAuth(key));
+    expect(listed.status).toBe(200);
+
+    const patched = await request(app)
+      .patch(`/api/admin/sections/${sectionId}`)
+      .set(...keyAuth(key))
+      .send({
+        expected_updated_at: section.body.data.updated_at,
+        data: { heading: "Hi again", body: "hello" },
+      });
+    expect(patched.status).toBe(200);
+
+    const deleted = await request(app)
+      .delete(`/api/admin/sections/${sectionId}`)
+      .set(...keyAuth(key));
+    expect(deleted.status).toBe(200);
+  });
+
+  it("site publish + versions + restore, attributed key:<name>", async () => {
+    const { key } = await mint("editing-agent");
+
+    // Set up a minimal publishable working set: one non-hidden `home` page.
+    const page = await request(app)
+      .post("/api/admin/pages")
+      .set(...keyAuth(key))
+      .send({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 });
+    expect(page.status).toBe(201);
+
+    const pub = await request(app)
+      .post("/api/admin/publish")
+      .set(...keyAuth(key))
+      .send({});
+    expect(pub.status).toBe(201);
+    const version = pub.body.data.version as number;
+
+    const versions = await request(app)
+      .get("/api/admin/versions")
+      .set(...keyAuth(key));
+    expect(versions.status).toBe(200);
+
+    // A key-driven publish is recorded as key:<name> in page_versions.
+    const row = await getDb()("page_versions").where({ version }).first();
+    expect(row.published_by).toBe("key:editing-agent");
+
+    // Restore is also key-attributed.
+    const restore = await request(app)
+      .post(`/api/admin/versions/${version}/restore`)
+      .set(...keyAuth(key))
+      .send({});
+    expect(restore.status).toBe(201);
+    const restoreVersion = restore.body.data.version as number;
+    const restoreRow = await getDb()("page_versions")
+      .where({ version: restoreVersion })
+      .first();
+    expect(restoreRow.published_by).toBe("key:editing-agent");
+  });
+
+  it("blogs write surface (widened): create + patch + delete", async () => {
+    const { key } = await mint("editing-agent");
+
+    const created = await request(app)
+      .post("/api/admin/blogs")
+      .set(...keyAuth(key))
+      .send({ slug: "notes", name: "Notes" });
+    expect(created.status).toBe(201);
+    const id = created.body.data.id as string;
+
+    const patched = await request(app)
+      .patch(`/api/admin/blogs/${id}`)
+      .set(...keyAuth(key))
+      .send({
+        expected_updated_at: created.body.data.updated_at,
+        name: "Notes v2",
+      });
+    expect(patched.status).toBe(200);
+
+    const removed = await request(app)
+      .delete(`/api/admin/blogs/${id}`)
+      .set(...keyAuth(key));
+    expect(removed.status).toBe(200);
+  });
+
+  it("preview-token mint, analytics, media sweep — all reachable by a key", async () => {
+    const { key } = await mint("editing-agent");
+
+    const previewToken = await request(app)
+      .post("/api/admin/preview-token")
+      .set(...keyAuth(key))
+      .send();
+    expect(previewToken.status).toBe(201);
+    expect(typeof previewToken.body.data.token).toBe("string");
+
+    const analytics = await request(app)
+      .get("/api/admin/analytics")
+      .set(...keyAuth(key));
+    expect(analytics.status).toBe(200);
+
+    const sweep = await request(app)
+      .post("/api/admin/media/sweep")
+      .set(...keyAuth(key))
+      .send();
+    expect(sweep.status).toBe(200);
+  });
+
   it("posts CRUD + publish, attributed key:<name>; last_used_at is stamped", async () => {
     const { id: keyId, key } = await mint("posting-bot");
 
@@ -348,38 +481,79 @@ describe("a minted key REACHES the narrow surface", () => {
   });
 });
 
-describe("a minted key is BLOCKED (401) everywhere else", () => {
+describe("a minted key is BLOCKED (401) on the humans-only surface", () => {
+  // Only api-keys and integrations (+ the legacy /spotify aliases) stay
+  // humans-only — a machine key must never mint another key or read/write
+  // stored credentials.
   const adminOnly: Array<[string, () => request.Test]> = [
-    ["GET /api/admin/pages", () => request(app).get("/api/admin/pages")],
-    ["GET /api/admin/sections", () => request(app).get("/api/admin/sections")],
+    // api-keys — every route
+    ["POST /api/admin/api-keys", () =>
+      request(app).post("/api/admin/api-keys").send({ name: "x" })],
+    ["GET /api/admin/api-keys", () => request(app).get("/api/admin/api-keys")],
+    [
+      "POST /api/admin/api-keys/:id/revoke",
+      () =>
+        request(app).post(
+          "/api/admin/api-keys/11111111-1111-1111-1111-111111111111/revoke"
+        ),
+    ],
+    // integrations — every route
     [
       "GET /api/admin/integrations",
       () => request(app).get("/api/admin/integrations"),
     ],
-    ["POST /api/admin/publish (site)", () => request(app).post("/api/admin/publish")],
-    ["GET /api/admin/versions", () => request(app).get("/api/admin/versions")],
-    ["POST /api/admin/media/sweep", () => request(app).post("/api/admin/media/sweep")],
-    ["GET /api/admin/api-keys", () => request(app).get("/api/admin/api-keys")],
     [
-      "POST /api/admin/blogs (write)",
-      () => request(app).post("/api/admin/blogs").send({ slug: "b", name: "B" }),
+      "PUT /api/admin/integrations/:key/value",
+      () =>
+        request(app)
+          .put("/api/admin/integrations/github/value")
+          .send({ value: "x" }),
     ],
+    [
+      "POST /api/admin/integrations/:key/connect",
+      () => request(app).post("/api/admin/integrations/spotify/connect"),
+    ],
+    [
+      "DELETE /api/admin/integrations/:key",
+      () => request(app).delete("/api/admin/integrations/spotify"),
+    ],
+    // legacy /spotify aliases
+    [
+      "GET /api/admin/spotify/status",
+      () => request(app).get("/api/admin/spotify/status"),
+    ],
+    [
+      "POST /api/admin/spotify/connect",
+      () => request(app).post("/api/admin/spotify/connect"),
+    ],
+    ["DELETE /api/admin/spotify", () => request(app).delete("/api/admin/spotify")],
   ];
 
   it.each(adminOnly)("%s → 401 for an API key", async (_label, mkReq) => {
-    const { key } = await mint("posting-bot");
+    const { key } = await mint("editing-agent");
     const res = await mkReq().set(...keyAuth(key)).send();
     expect(res.status).toBe(401);
   });
 });
 
 describe("revoke", () => {
-  it("revokes (idempotent) then rejects the key on the narrow surface", async () => {
-    const { id, key } = await mint("posting-bot");
+  it("revokes (idempotent) then rejects the key on the content-editing surface", async () => {
+    const { id, key } = await mint("editing-agent");
 
-    // Works before revoke.
-    const before = await request(app).get("/api/admin/posts").set(...keyAuth(key));
-    expect(before.status).toBe(200);
+    // Set up: an existing page so POST /sections has a valid page_id target.
+    const page = await request(app)
+      .post("/api/admin/pages")
+      .set(...keyAuth(key))
+      .send({ slug: "home", title: "Home", nav_label: "Home", nav_position: 0 });
+    expect(page.status).toBe(201);
+    const pageId = page.body.data.id as string;
+
+    // Works before revoke — a widened route (POST /api/admin/sections) succeeds.
+    const before = await request(app)
+      .post("/api/admin/sections")
+      .set(...keyAuth(key))
+      .send({ type: "about", data: { heading: "hi" }, page_id: pageId });
+    expect(before.status).toBe(201);
 
     const revoke = await request(app)
       .post(`/api/admin/api-keys/${id}/revoke`)
@@ -395,9 +569,14 @@ describe("revoke", () => {
     expect(again.status).toBe(200);
     expect(again.body.data.revoked_at).toBe(firstRevokedAt);
 
-    // The key is now rejected everywhere.
-    const after = await request(app).get("/api/admin/posts").set(...keyAuth(key));
-    expect(after.status).toBe(401);
+    // The key is now rejected everywhere — including the widened route.
+    const afterSection = await request(app)
+      .post("/api/admin/sections")
+      .set(...keyAuth(key))
+      .send({ type: "about", data: {}, page_id: pageId });
+    expect(afterSection.status).toBe(401);
+    const afterPosts = await request(app).get("/api/admin/posts").set(...keyAuth(key));
+    expect(afterPosts.status).toBe(401);
   });
 
   it("returns 404 revoking an unknown id", async () => {
@@ -416,7 +595,7 @@ describe("malformed / unknown keys are 401", () => {
     expect(res.status).toBe(401);
   });
 
-  it("a non-pv6k_ bearer is 401 on the narrow surface", async () => {
+  it("a non-pv6k_ bearer is 401 on the content-editing surface", async () => {
     const res = await request(app)
       .get("/api/admin/posts")
       .set("Authorization", "Bearer garbage.bearer.token");

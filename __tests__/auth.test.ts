@@ -144,7 +144,7 @@ describe("requireAdmin() — §5.3", () => {
 });
 
 describe("POST /api/admin/preview-token — §7", () => {
-  it("mints a token behind requireAdmin and returns it with a 15-minute expiry", async () => {
+  it("mints a token behind requireAdminOrMachine and returns it with a 15-minute expiry", async () => {
     mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
     const app = buildTestApp();
 

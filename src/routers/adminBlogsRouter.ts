@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin } from "../middleware/requireAdmin";
 import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { success, failure } from "../utils/envelope";
 import { FailureCode, ServiceResult } from "../services/sectionsService";
@@ -13,9 +12,8 @@ import {
 /**
  * Admin blogs router — Blogs v1.13. Mirrors `adminPagesRouter`: all logic in
  * `blogsService`, and the service's `ServiceResult` failure codes mapped to HTTP
- * statuses here (§4.3 envelope). Every route is behind `requireAdmin()` EXCEPT the
- * read-only `GET /blogs`, which is behind `requireAdminOrMachine()` (API Keys
- * v1.16) so the posting bot can resolve a `blog_id` with its API key.
+ * statuses here (§4.3 envelope). Every route is behind `requireAdminOrMachine()`
+ * (API Keys v1.16 — an AI editing agent needs the write surface too).
  */
 const adminBlogsRouter = express.Router();
 
@@ -54,13 +52,7 @@ function requireExpectedUpdatedAt(req: Request, res: Response): string | null {
 
 // ---- Routes -----------------------------------------------------------------
 
-/**
- * GET /api/admin/blogs — all blogs (with post_count) ordered by name. Behind
- * `requireAdminOrMachine()` (API Keys v1.16): read-only, so a machine key can
- * resolve a `blog_id` when creating a post. The write routes below stay
- * admin-only, so a pv6k_ bearer gets 401 on POST/PATCH/DELETE (it is not a
- * valid Cognito ID token).
- */
+/** GET /api/admin/blogs — all blogs (with post_count) ordered by name. */
 adminBlogsRouter.get(
   "/blogs",
   requireAdminOrMachine(),
@@ -76,7 +68,7 @@ adminBlogsRouter.get(
 /** POST /api/admin/blogs — create a blog (409 on duplicate slug). */
 adminBlogsRouter.post(
   "/blogs",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { slug, name } = req.body ?? {};
@@ -90,7 +82,7 @@ adminBlogsRouter.post(
 /** PATCH /api/admin/blogs/:id — update slug/name (precondition, §4.5). */
 adminBlogsRouter.patch(
   "/blogs/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const expected = requireExpectedUpdatedAt(req, res);
@@ -113,7 +105,7 @@ adminBlogsRouter.patch(
 /** DELETE /api/admin/blogs/:id — always allowed; assigned posts get blog_id NULL. */
 adminBlogsRouter.delete(
   "/blogs/:id",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       send(res, await deleteBlog(req.params.id));

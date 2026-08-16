@@ -24,9 +24,13 @@ declare global {
 }
 
 /**
- * requireAdminOrMachine() — API Keys v1.16. Guards the NARROW machine surface (the
- * posts admin CRUD + publish/unpublish, the post-image media routes, and the
- * read-only `GET /api/admin/blogs`). Everything else stays behind `requireAdmin`.
+ * requireAdminOrMachine() — API Keys v1.16. Guards the full content-editing
+ * surface reachable by an AI editing agent: pages, sections/items, posts,
+ * blogs, media, publish/versions/restore, preview-token, analytics, and icons.
+ * The humans-only surface — `/api/admin/api-keys/*` and
+ * `/api/admin/integrations/*` (plus the legacy `/api/admin/spotify/*` aliases)
+ * — stays behind `requireAdmin` so a key can never mint another key or read/
+ * write stored credentials.
  *
  * Resolution order:
  *  1. Try the existing admin ID-token path VERBATIM (`checkAdmin`) — same 401/403
@@ -43,9 +47,10 @@ declare global {
  *     fall back to the admin failure result, preserving its 401 (missing/invalid)
  *     or 403 (wrong group).
  *
- * A key principal reaching any OTHER admin route is denied there by `requireAdmin`
- * (a `pv6k_` bearer is not a valid admin ID token → 401), so this middleware is
- * the only place an API key can succeed.
+ * A key principal reaching any humans-only admin route (api-keys, integrations,
+ * legacy spotify aliases) is denied there by `requireAdmin` (a `pv6k_` bearer is
+ * not a valid admin ID token → 401), so this middleware is the only place an
+ * API key can succeed.
  */
 export function requireAdminOrMachine(): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {

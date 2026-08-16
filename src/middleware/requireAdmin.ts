@@ -89,14 +89,17 @@ export async function checkAdmin(req: Request): Promise<AdminAuthResult> {
 }
 
 /**
- * requireAdmin() — TECH_SPEC_V1.md §5.3. Guards every admin route except the
- * narrow machine surface (behind `requireAdminOrMachine`) and the two
- * preview-serialization routes (§4.2). On success attaches `req.adminSub` and
- * calls next(); otherwise responds 401 (missing/invalid) or 403 (wrong group).
+ * requireAdmin() — TECH_SPEC_V1.md §5.3. Guards the humans-only admin routes —
+ * the api-keys and integrations surfaces (a machine key must never mint/list/
+ * revoke keys or read/write credentials). Every other admin route is behind
+ * `requireAdminOrMachine` (content editing, publish, media, analytics, icons,
+ * preview-token) or `requireAdminOrPreviewToken` (the preview-serialization
+ * routes, §4.2). On success attaches `req.adminSub` and calls next(); otherwise
+ * responds 401 (missing/invalid) or 403 (wrong group).
  *
  * A dashboard-minted API key (API Keys v1.16) is NOT a valid admin ID token, so
- * it fails `checkAdmin` and is denied here (401) — every route outside the narrow
- * machine surface stays humans-only.
+ * it fails `checkAdmin` and is denied here (401) — every route behind this
+ * middleware stays humans-only.
  */
 export function requireAdmin(): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {

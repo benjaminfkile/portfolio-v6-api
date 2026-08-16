@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAdmin, requireAdminOrPreviewToken } from "../middleware/requireAdmin";
+import { requireAdminOrPreviewToken } from "../middleware/requireAdmin";
+import { requireAdminOrMachine } from "../middleware/requireAdminOrMachine";
 import { IAppSecrets } from "../interfaces";
 import { success, failure } from "../utils/envelope";
 import {
@@ -17,11 +18,13 @@ import { runGcSafely } from "../services/mediaService";
  *
  * Owns the snapshot-publishing endpoints: publish the working set, list version
  * history, restore an old version (re-publish + working-set rebuild), and the
- * draft preview. All routes are behind `requireAdmin()` except the preview route,
- * which is behind `requireAdminOrPreviewToken()` (§4.2 †, §7) so the public site
- * can serialize the draft inside its preview iframe with a short-lived token.
- * Business logic lives in `publishService`; this router maps `PublishResult`
- * failure codes to HTTP statuses and reads `req.adminSub` for attribution.
+ * draft preview. Every route is behind `requireAdminOrMachine()` (API Keys v1.16 —
+ * an AI editing agent needs to publish/restore/list versions the same way an
+ * admin does) except the preview route, which is behind
+ * `requireAdminOrPreviewToken()` (§4.2 †, §7) so the public site can serialize the
+ * draft inside its preview iframe with a short-lived token. Business logic lives
+ * in `publishService`; this router maps `PublishResult` failure codes to HTTP
+ * statuses and reads `req.adminSub` / `req.apiKeyName` for attribution.
  */
 const adminPublishRouter = express.Router();
 
@@ -54,6 +57,19 @@ function cdnDomain(req: Request): string {
 }
 
 /**
+ * Attribution for a publish / restore (API Keys v1.16). A human admin is
+ * recorded by their Cognito `sub` (`req.adminSub`); a key-driven call is
+ * recorded as `key:<name>` from the authenticated key's name (`req.apiKeyName`).
+ * Exactly one is set by `requireAdminOrMachine`. Falls back to `"unknown"` if
+ * neither is populated so the DB never sees a NULL `published_by`.
+ */
+function publishedBy(req: Request): string {
+  if (req.adminSub) return req.adminSub;
+  if (req.apiKeyName) return `key:${req.apiKeyName}`;
+  return "unknown";
+}
+
+/**
  * POST /api/admin/publish (§4.2). Validates the entire working set (§3.9) and,
  * on success, snapshots it as a new version attributed to the authenticated
  * admin (`req.adminSub`). A validation failure returns 400 and refuses to
@@ -61,10 +77,10 @@ function cdnDomain(req: Request): string {
  */
 adminPublishRouter.post(
   "/publish",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await publish(req.adminSub ?? "unknown");
+      const result = await publish(publishedBy(req));
       // Version pruning is what creates most orphans, so a successful publish is
       // the natural GC trigger — run the sweep in the same request (§6.9). It is
       // fire-and-safe: a sweep failure must not fail an already-committed publish.
@@ -79,7 +95,7 @@ adminPublishRouter.post(
 /** GET /api/admin/versions (§4.2) — version history, newest first. */
 adminPublishRouter.get(
   "/versions",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(200).json(success({ versions: await listVersions() }));
@@ -96,14 +112,14 @@ adminPublishRouter.get(
  */
 adminPublishRouter.post(
   "/versions/:v/restore",
-  requireAdmin(),
+  requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const v = Number(req.params.v);
       if (!Number.isInteger(v)) {
         return res.status(400).json(failure("version must be an integer"));
       }
-      const result = await restoreVersion(v, req.adminSub ?? "unknown");
+      const result = await restoreVersion(v, publishedBy(req));
       // Restore re-publishes and prunes versions, so it orphans media the same
       // way a plain publish does — sweep here too (§6.9).
       if (result.ok) await runGcSafely();
