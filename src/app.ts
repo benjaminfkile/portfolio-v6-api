@@ -14,6 +14,7 @@ import adminIntegrationsRouter from "./routers/adminIntegrationsRouter";
 import adminAnalyticsRouter from "./routers/adminAnalyticsRouter";
 import adminIconsRouter from "./routers/adminIconsRouter";
 import adminApiKeysRouter from "./routers/adminApiKeysRouter";
+import adminResumesRouter from "./routers/adminResumesRouter";
 import contentRouter from "./routers/contentRouter";
 import postsRouter from "./routers/postsRouter";
 import statusRouter from "./routers/statusRouter";
@@ -21,6 +22,7 @@ import nowPlayingRouter from "./routers/nowPlayingRouter";
 import duolingoRouter from "./routers/duolingoRouter";
 import githubRouter from "./routers/githubRouter";
 import opsRouter from "./routers/opsRouter";
+import resumeRouter from "./routers/resumeRouter";
 import beaconRouter from "./routers/beaconRouter";
 import { isLocal } from "./config/loadConfig";
 import { failure } from "./utils/envelope";
@@ -101,6 +103,12 @@ app.use("/api/github", githubRouter);
 // and never appears in a response or log; the curated payload is
 // allowlist-shaped so no ARN/instance-id/account-id leaks.
 app.use("/api/ops", opsRouter);
+// Public resume endpoints (task #92): the newest confirmed version as
+// `{available,url,filename,bytes,uploaded_at}` (no-store — a new upload must
+// go live immediately) and a streamed download with attachment
+// Content-Disposition. Degrade rather than 5xx: any failure yields
+// `{available:false}` (metadata) or a 404 (download).
+app.use("/api/resume", resumeRouter);
 // Admin responses are live editing state and must never be cached or
 // revalidated by the browser — always fresh, always 200 (§4.2, §4.5).
 app.use("/api/admin", (_req: Request, res: Response, next: NextFunction) => {
@@ -146,6 +154,12 @@ app.use("/api/admin", adminAnalyticsRouter);
 // prefix is deliberately outside the §6.9 media orphan sweep (icons are
 // referenced by URL, not media_id).
 app.use("/api/admin", adminIconsRouter);
+// Resume versions (task #92): the admin uploads resume PDFs (every version is
+// kept) and the public site always serves the newest confirmed one. Presigned
+// PUT + confirm mirrors the media flow (§6.7) but with a PDF-only allowlist
+// and 10 MB cap; resumes live under `resumes/{uuid}/{filename}` and are NOT
+// media_assets rows, so the §6.9 orphan sweep never touches them.
+app.use("/api/admin", adminResumesRouter);
 // API keys (API Keys v1.16): mint / list / revoke dashboard-minted keys used on
 // the content-editing surface in place of the removed Cognito client-credentials
 // path. Humans only — every route is behind requireAdmin() (a key can never

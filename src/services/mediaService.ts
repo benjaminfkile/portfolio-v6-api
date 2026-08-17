@@ -3,6 +3,7 @@ import { Knex } from "knex";
 import { getDb } from "../db/db";
 import * as s3 from "../aws/s3Service";
 import { collectMediaIds } from "../utils/mediaRefs";
+import { safeFilename } from "../utils/safeFilename";
 import {
   GC_GRACE_PERIOD_DAYS,
   MEDIA_CACHE_CONTROL,
@@ -118,17 +119,6 @@ function toView(row: MediaAssetRow): MediaAssetView {
     orphaned: row.unreferenced_at != null,
     scheduled_deletion_at: scheduledDeletionAt,
   };
-}
-
-/**
- * Reduce an arbitrary client-supplied filename to a single safe path segment:
- * strip any directory components so the generated key stays exactly
- * `media/{uuid}/{filename}` (§6.4) and cannot escape the `media/{uuid}/` prefix.
- */
-function safeFilename(filename: string): string {
-  const base = filename.split(/[\\/]/).pop() ?? "";
-  const trimmed = base.trim();
-  return trimmed.length > 0 ? trimmed : "file";
 }
 
 // ---- Upload URL (§6.7 POST /api/admin/media/upload-url) ---------------------

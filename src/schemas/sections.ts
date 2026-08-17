@@ -22,6 +22,7 @@ export const SECTION_TYPES = [
   "duolingo",
   "github",
   "ops",
+  "resume",
   "contact",
 ] as const;
 
@@ -170,6 +171,20 @@ export const opsData = z
   })
   .strict();
 
+/**
+ * §3.5 (Resume Versions, task #92) — the resume card. Config only; the live
+ * data is the newest confirmed resume PDF fetched at runtime from
+ * `GET /api/resume`. The section has NO items — a resume replaces itself,
+ * versioning happens on the row, not as a list — so the shape mirrors the
+ * other intro-only live sections (`opsData`, `githubData`): `{ heading?, intro? }`.
+ */
+export const resumeData = z
+  .object({
+    heading: z.string().optional(),
+    intro: z.string().optional(),
+  })
+  .strict();
+
 /** Section-type → `data` schema. Every registry type (§3.4) is covered. */
 export const SECTION_DATA_SCHEMAS = {
   hero: heroData,
@@ -183,6 +198,7 @@ export const SECTION_DATA_SCHEMAS = {
   duolingo: duolingoData,
   github: githubData,
   ops: opsData,
+  resume: resumeData,
   contact: contactData,
 } satisfies Record<SectionType, z.ZodTypeAny>;
 
@@ -206,6 +222,7 @@ export const DRAFT_SECTION_DATA_SCHEMAS: Record<SectionType, z.ZodTypeAny> = {
   duolingo: duolingoData.partial(),
   github: githubData.partial(),
   ops: opsData.partial(),
+  resume: resumeData.partial(),
   contact: contactData.partial(),
 };
 
@@ -217,4 +234,5 @@ export type NowPlayingData = z.infer<typeof nowPlayingData>;
 export type DuolingoData = z.infer<typeof duolingoData>;
 export type GithubData = z.infer<typeof githubData>;
 export type OpsData = z.infer<typeof opsData>;
+export type ResumeData = z.infer<typeof resumeData>;
 export type ContactData = z.infer<typeof contactData>;
