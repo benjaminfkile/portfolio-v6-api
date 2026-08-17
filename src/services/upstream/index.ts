@@ -34,7 +34,10 @@ import {
   type PollLoopHandle,
   type PollFetchers,
 } from "./pollLoop";
-import type { RealtimePublisherConfig } from "./realtimePublisher";
+import {
+  DEFAULT_REALTIME_SERVICE_NAME,
+  type RealtimePublisherConfig,
+} from "./realtimePublisher";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
@@ -208,6 +211,10 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       secrets.gateway_realtime_token ??
       process.env.GATEWAY_REALTIME_TOKEN ??
       "",
+    serviceName:
+      secrets.realtime_service_name ??
+      process.env.REALTIME_SERVICE_NAME ??
+      DEFAULT_REALTIME_SERVICE_NAME,
   };
 
   const pollIntervalMs =

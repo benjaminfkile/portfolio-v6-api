@@ -77,6 +77,15 @@ export interface IAppSecrets {
    * to any response and never logged.
    */
   gateway_realtime_token?: string;
+  /**
+   * Manifest service name that owns the realtime channels — prefixes every
+   * published channel as `{service_name}:{topic}`. MUST match the service the
+   * gateway's publish token is scoped to (prod: `portfolio-v6-api`, dev:
+   * `portfolio-v6-api-dev`). Optional: defaults to `portfolio-v6-api` when
+   * unset, which is correct for prod but wrong for dev — dev containers must
+   * set this or every publish is rejected with 403.
+   */
+  realtime_service_name?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----

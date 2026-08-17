@@ -153,6 +153,7 @@ Redis-free).
 | `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`, dev runs `10000`. Fast-lane services (Spotify now-playing, gateway status) refresh every tick; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
 | `GATEWAY_INTERNAL_URL` | `http://gateway:8080` | Internal base URL the container uses to reach the gateway's `POST /internal/publish` endpoint (realtime hub). |
 | `GATEWAY_REALTIME_TOKEN` | *(unset)* | Shared secret the gateway injects into every service container so the internal publish endpoint can authenticate this API. Sent as the `X-Gateway-Realtime-Token` header. Never returned to any response and never logged. |
+| `REALTIME_SERVICE_NAME` | `portfolio-v6-api` | Manifest service name that prefixes every published channel (`{service_name}:{topic}`). MUST match the service the gateway's publish token is scoped to. Prod runs `portfolio-v6-api`; the **dev deployment runs under `portfolio-v6-api-dev` and MUST set this** — a mismatched prefix is rejected with 403. Also settable via the `realtime_service_name` secret. |
 
 Only the leader publishes; changes are published on `portfolio-v6-api:now-playing` /
 `portfolio-v6-api:status` **only when the curated payload differs from the previous

@@ -53,6 +53,7 @@ function buildConfig() {
     publisher: {
       gatewayInternalUrl: "http://gateway:8080",
       realtimeToken: "SECRET-TOKEN-123",
+      serviceName: REALTIME_SERVICE_NAME,
     },
   };
 }
@@ -198,6 +199,43 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
     });
     expect(statusPublishes).toHaveLength(1);
 
+    handle.stop();
+  });
+
+  it("prefixes published channels with the configured service name (dev override)", async () => {
+    // The dev deployment runs under a different service name — the channel
+    // prefix must follow, or the gateway rejects the publish with 403.
+    const DEV_SERVICE = "portfolio-v6-api-dev";
+    const redis = createFakeRedis();
+    const lease = await acquireLease(redis);
+    const fetchers = buildFetchers();
+    const handle = startPollLoop(redis, lease, fetchers, {
+      ...buildConfig(),
+      publisher: {
+        gatewayInternalUrl: "http://gateway:8080",
+        realtimeToken: "SECRET-TOKEN-123",
+        serviceName: DEV_SERVICE,
+      },
+    });
+    await handle.runTick();
+
+    const publishCalls = mockFetch.mock.calls.filter(
+      ([url]) => url === PUBLISH_URL
+    );
+    expect(publishCalls.length).toBeGreaterThan(0);
+    // Every published channel MUST carry the dev service prefix — nothing
+    // should leak the default `portfolio-v6-api` prefix into the payload.
+    for (const [, init] of publishCalls) {
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body.channel).toMatch(new RegExp(`^${DEV_SERVICE}:`));
+      expect(body.channel).not.toMatch(/^portfolio-v6-api:/);
+    }
+    // Both fast-lane snapshot channels + the heartbeat carry the override.
+    const channels = publishCalls.map(([, init]) => {
+      return JSON.parse((init as RequestInit).body as string).channel as string;
+    });
+    expect(channels).toContain(`${DEV_SERVICE}:now-playing`);
+    expect(channels).toContain(`${DEV_SERVICE}:status`);
     handle.stop();
   });
 
