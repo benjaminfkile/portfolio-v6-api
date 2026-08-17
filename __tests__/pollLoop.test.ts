@@ -161,6 +161,14 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
     });
     expect(nowPlayingPublishes).toHaveLength(2);
 
+    // Wire contract (REALTIME.md §4): the publish body carries the payload
+    // under `payload`, never `data` — the gateway 500s on a missing `payload`.
+    for (const [, init] of publishCalls) {
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body).toHaveProperty("payload");
+      expect(body).not.toHaveProperty("data");
+    }
+
     handle.stop();
   });
 

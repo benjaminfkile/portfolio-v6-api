@@ -89,7 +89,11 @@ export async function publish<T>(
   const body = JSON.stringify({
     channel: `${serviceName}:${req.topic}`,
     event: req.event,
-    data: req.data,
+    // The gateway's /internal/publish contract names this field `payload`
+    // (REALTIME.md §4 — clients then receive it as `data` in the envelope).
+    // A missing `payload` makes the gateway 500 serializing an undefined
+    // JsonElement, so the field name is load-bearing.
+    payload: req.data,
   });
 
   const controller = new AbortController();
