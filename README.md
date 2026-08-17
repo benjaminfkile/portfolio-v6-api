@@ -137,6 +137,31 @@ migrate:latest` (Knex, env-driven `knexfile.ts`). Deployed containers auto-run m
 only when `node_env !== 'production'` — **prod migrations are run manually** against the
 prod DB before deploying a schema change.
 
+### Single-poller upstream refresh (task #84)
+
+Multiple API instances per environment would each independently poll Spotify every 5s
+and trip Spotify's 429s. Instead exactly one instance per environment polls upstreams,
+shares the curated payloads through Redis, and publishes updates to browsers through
+the gateway's realtime hub (see `REALTIME.md` in the gateway repo for the contract).
+Every variable below is **optional** — leaving `REDIS_URL` unset falls back to today's
+per-instance in-memory caches and opens no Redis connection (so local dev and CI stay
+Redis-free).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REDIS_URL` | *(unset)* | Enables the subsystem when set. Prod and dev MUST NOT share a keyspace (use different DBs, e.g. `/0` and `/1`); keys are also prefixed with the env name. Placeholders only in the repo — the real value lives in the deployed secret. |
+| `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`, dev runs `10000`. Fast-lane services (Spotify now-playing, gateway status) refresh every tick; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
+| `GATEWAY_INTERNAL_URL` | `http://gateway:8080` | Internal base URL the container uses to reach the gateway's `POST /internal/publish` endpoint (realtime hub). |
+| `GATEWAY_REALTIME_TOKEN` | *(unset)* | Shared secret the gateway injects into every service container so the internal publish endpoint can authenticate this API. Sent as the `X-Gateway-Realtime-Token` header. Never returned to any response and never logged. |
+
+Only the leader publishes; changes are published on `portfolio-v6-api:now-playing` /
+`portfolio-v6-api:status` **only when the curated payload differs from the previous
+snapshot**, and a lightweight heartbeat rides `portfolio-v6-api:now-playing` roughly
+every 30s so clients can detect a stalled stream (per REALTIME.md's polling-floor
+pattern). Publish failures are logged and swallowed — they never affect the poll loop
+or public HTTP serving. A Redis outage never breaks public reads either: routers fall
+back to the per-instance path with the existing in-memory caches.
+
 ## Deploy (§11)
 
 `.github/workflows/deploy.yaml` on pushes to `main` (→ service `portfolio-v6-api`, tag
