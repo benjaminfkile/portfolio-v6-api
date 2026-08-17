@@ -20,14 +20,20 @@ export const LINK_TYPES = [
 ] as const;
 
 /** Protocols permitted in a Link `url` — §3.4. */
-export const ALLOWED_LINK_PROTOCOLS = ["http:", "https:"] as const;
+export const ALLOWED_LINK_PROTOCOLS = [
+  "http:",
+  "https:",
+  "mailto:",
+  "tel:",
+] as const;
 
 /**
  * `z.string().url()` alone accepts `javascript:` URLs, which become stored XSS
  * the moment they are rendered into an `href`. The admin is the only path by
  * which content enters the system, so the protocol allowlist is enforced here:
- * only `http:` and `https:` pass. `javascript:`, `data:`, `file:`, etc. are
- * rejected (§3.4).
+ * only `http:`, `https:`, `mailto:`, and `tel:` pass — the last two so a
+ * contact section can carry an email or phone link. `javascript:`, `data:`,
+ * `file:`, etc. are rejected (§3.4).
  */
 export const httpUrl = z
   .string()
@@ -42,7 +48,7 @@ export const httpUrl = z
       }
       return (ALLOWED_LINK_PROTOCOLS as readonly string[]).includes(protocol);
     },
-    { message: "url must use the http or https protocol" }
+    { message: "url must use the http, https, mailto, or tel protocol" }
   );
 
 export const linkSchema = z

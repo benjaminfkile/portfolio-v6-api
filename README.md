@@ -37,6 +37,14 @@ disabled; only `/api/content` and `/api/posts/:slug` set (weak) ETags by hand.
 requires `expected_updated_at` — 400 if absent, **409** on mismatch. Reorder and publish
 routes are exempt.
 
+**Link URL validation (§3.4):** every `Link.url` — on portfolio items, on the `links`
+block, and on the contact section's `links` — is checked against a protocol allowlist.
+Only `http:`, `https:`, `mailto:`, and `tel:` pass; `javascript:`, `data:`, `file:`, and
+anything else are rejected with a 400. Contact-section email/phone links use `type:
+"other"` with `mailto:`/`tel:` URLs (no new `Link.type` enum values). The allowlist is
+enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/schema` +
+`npm run sync:types`.
+
 ## Endpoints
 
 ### Public — no auth

@@ -58,7 +58,7 @@ describe("Link schema (§3.4) — protocol allowlist", () => {
   });
 
   it.each(["data:text/html,x", "file:///etc/passwd", "ftp://host/f"])(
-    "rejects the non-http(s) protocol %s",
+    "rejects the non-allowlisted protocol %s",
     (url) => {
       expect(
         linkSchema.safeParse({ type: "other", label: "l", url }).success
@@ -66,8 +66,69 @@ describe("Link schema (§3.4) — protocol allowlist", () => {
     }
   );
 
-  it("only allows http: and https: protocols", () => {
-    expect([...ALLOWED_LINK_PROTOCOLS]).toEqual(["http:", "https:"]);
+  it("accepts mailto: URLs (contact-section email links)", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "other",
+        label: "Email",
+        url: "mailto:someone@example.com",
+      }).success
+    ).toBe(true);
+  });
+
+  it("accepts tel: URLs (contact-section phone links)", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "other",
+        label: "Phone",
+        url: "tel:+14065551234",
+      }).success
+    ).toBe(true);
+  });
+
+  it("accepts uppercase MAILTO: (URL parser normalizes the scheme to lower-case)", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "other",
+        label: "Email",
+        url: "MAILTO:someone@example.com",
+      }).success
+    ).toBe(true);
+  });
+
+  it("rejects a bare email address (no scheme) — must be a real URL", () => {
+    expect(
+      linkSchema.safeParse({
+        type: "other",
+        label: "Email",
+        url: "someone@example.com",
+      }).success
+    ).toBe(false);
+  });
+
+  it("surfaces the widened allowlist as the validation error message", () => {
+    const res = linkSchema.safeParse({
+      type: "other",
+      label: "x",
+      url: "javascript:alert(1)",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(
+        res.error.issues.some((i) =>
+          i.message.includes("http, https, mailto, or tel")
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("only allows http:, https:, mailto:, and tel: protocols", () => {
+    expect([...ALLOWED_LINK_PROTOCOLS]).toEqual([
+      "http:",
+      "https:",
+      "mailto:",
+      "tel:",
+    ]);
   });
 
   it("requires a non-empty label (never derived from type)", () => {
