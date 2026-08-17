@@ -67,6 +67,23 @@ describe("GET /api/schema (§8.4)", () => {
     expect(timeline.properties).not.toHaveProperty("media_id");
   });
 
+  it("surfaces the resume section type (task #92 — heading/intro, no items)", async () => {
+    const res = await request(app).get("/api/schema");
+    const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
+    const root = defs["PortfolioV6Content"] as { properties: Record<string, any> };
+
+    // The section-data map for the whole registry gains `resume`, and its shape
+    // is exactly `{heading?, intro?}` — mirrors ops/github, no items.
+    expect(root.properties.sectionData.properties).toHaveProperty("resume");
+    const resume = root.properties.sectionData.properties.resume;
+    expect(Object.keys(resume.properties ?? {}).sort()).toEqual(["heading", "intro"]);
+
+    // The resume section deliberately has no items, so the itemData map must
+    // NOT gain a `resume` entry (task #92 — a resume replaces itself, versioning
+    // happens on the row, not as a list).
+    expect(root.properties.itemData.properties).not.toHaveProperty("resume");
+  });
+
   it("surfaces the Post Refs v1.14 shapes (portfolio post_refs + resolved posts + PostRef)", async () => {
     const res = await request(app).get("/api/schema");
     const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
