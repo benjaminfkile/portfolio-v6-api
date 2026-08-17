@@ -37,11 +37,15 @@ jest.mock("../src/aws/s3Service", () => ({
   buildMediaKey: jest.fn(
     (uuid: string, filename: string) => `media/${uuid}/${filename}`
   ),
+  buildResumeKey: jest.fn(
+    (uuid: string, filename: string) => `resumes/${uuid}/${filename}`
+  ),
   generatePresignedUploadUrl: jest.fn().mockResolvedValue({
     url: "https://s3.example/put",
     headers: { "Content-Type": "image/png" },
   }),
   headObject: jest.fn().mockResolvedValue({ contentLength: 123 }),
+  getObjectStream: jest.fn(),
   putObjectTags: jest.fn().mockResolvedValue(undefined),
   deleteObjectTags: jest.fn().mockResolvedValue(undefined),
   deleteObject: jest.fn().mockResolvedValue(undefined),
@@ -52,6 +56,7 @@ import { initDb, closeDb, getDb } from "../src/db/db";
 import adminApiKeysRouter from "../src/routers/adminApiKeysRouter";
 import adminPostsRouter from "../src/routers/adminPostsRouter";
 import adminMediaRouter from "../src/routers/adminMediaRouter";
+import adminResumesRouter from "../src/routers/adminResumesRouter";
 import adminBlogsRouter from "../src/routers/adminBlogsRouter";
 import adminPagesRouter from "../src/routers/adminPagesRouter";
 import adminSectionsRouter from "../src/routers/adminSectionsRouter";
@@ -139,6 +144,7 @@ function buildApp(): Express {
   app.use("/api/admin", adminSectionsRouter);
   app.use("/api/admin", adminPublishRouter);
   app.use("/api/admin", adminMediaRouter);
+  app.use("/api/admin", adminResumesRouter);
   app.use("/api/admin", adminPostsRouter);
   app.use("/api/admin", adminBlogsRouter);
   app.use("/api/admin", adminIntegrationsRouter);
@@ -212,6 +218,7 @@ afterEach(async () => {
   const db = getDb();
   await db("posts").del();
   await db("media_assets").del();
+  await db("resumes").del();
   await db("blogs").del();
   await db("api_keys").del();
   await db("section_items").del();
@@ -471,6 +478,43 @@ describe("a minted key REACHES the content-editing surface", () => {
 
     const listed = await request(app).get("/api/admin/media").set(...keyAuth(key));
     expect(listed.status).toBe(200);
+  });
+
+  it("the resume routes (task #92): upload-url, confirm, list, delete", async () => {
+    const { key } = await mint("posting-bot");
+
+    // upload-url — pv6k key path.
+    const presign = await request(app)
+      .post("/api/admin/resumes/upload-url")
+      .set(...keyAuth(key))
+      .send({ filename: "resume.pdf", size: 2048 });
+    expect(presign.status).toBe(201);
+    const resumeId = presign.body.data.id as string;
+
+    // uploaded_by is attributed as `key:<name>` (the same convention as
+    // publish/restore).
+    const row = await getDb()("resumes").where({ id: resumeId }).first();
+    expect(row.uploaded_by).toBe("key:posting-bot");
+
+    // confirm — pv6k key path.
+    const confirm = await request(app)
+      .post(`/api/admin/resumes/${resumeId}/confirm`)
+      .set(...keyAuth(key))
+      .send({});
+    expect(confirm.status).toBe(200);
+
+    // list — pv6k key path.
+    const listed = await request(app)
+      .get("/api/admin/resumes")
+      .set(...keyAuth(key));
+    expect(listed.status).toBe(200);
+    expect(listed.body.data.resumes[0].id).toBe(resumeId);
+
+    // delete — pv6k key path.
+    const del = await request(app)
+      .delete(`/api/admin/resumes/${resumeId}`)
+      .set(...keyAuth(key));
+    expect(del.status).toBe(200);
   });
 
   it("GET /api/admin/blogs (read-only) so the bot can resolve a blog_id", async () => {

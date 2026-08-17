@@ -62,6 +62,8 @@ enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/s
 | GET | `/api/duolingo` | Streak/course (`?language=`), ~1h cache; degrades to `{available:false}`. |
 | GET | `/api/github` | Contribution calendar (`?year=YYYY` or trailing 12 months), ~1h cache; 400 only on invalid year. |
 | GET | `/api/ops` | Daily-replay ops report (v1.7): `?date=YYYY-MM-DD` or latest; 400 malformed date, 404 none available. |
+| GET | `/api/resume` | Newest confirmed resume PDF as `{available,url,filename,bytes,uploaded_at}` (or `{available:false}`), `Cache-Control: no-store`; degrades, never 5xx. |
+| GET | `/api/resume/download` | Streams the newest confirmed resume PDF with `Content-Disposition: attachment` and `Content-Type: application/pdf`; 404 when none. |
 | POST | `/api/beacon` | Analytics ingest — **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
 
 ### Admin
@@ -96,6 +98,10 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 | GET | `/api/admin/media` | A\|K | List assets with orphan status. |
 | POST | `/api/admin/media/sweep` | A\|K | Run orphan GC on demand (§6.9). |
 | DELETE | `/api/admin/media/:id` | A\|K | Hard delete (S3 object + row). |
+| POST | `/api/admin/resumes/upload-url` | A\|K | Presigned S3 PUT (application/pdf pinned into the signature, ≤10 MB) + pending resume row → 201. |
+| POST | `/api/admin/resumes/:id/confirm` | A\|K | HEAD the object; stamp `confirmed_at` and record the true size. |
+| GET | `/api/admin/resumes` | A\|K | All resume versions, newest first, each with a CDN url, filename, bytes, confirmed state. |
+| DELETE | `/api/admin/resumes/:id` | A\|K | Hard delete a version (S3 object + row); deleting the newest promotes the next-newest publicly. |
 | GET | `/api/admin/posts` | A\|K | All posts, drafts included. |
 | POST | `/api/admin/posts` | A\|K | Create post → 201. |
 | GET | `/api/admin/posts/:id` | A\|K | One post with `draft_body`. |

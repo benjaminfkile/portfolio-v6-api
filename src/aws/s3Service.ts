@@ -1,3 +1,4 @@
+import { Readable } from "stream";
 import {
   S3Client,
   PutObjectCommand,
@@ -5,6 +6,7 @@ import {
   DeleteObjectCommand,
   PutObjectTaggingCommand,
   DeleteObjectTaggingCommand,
+  GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -65,6 +67,16 @@ export function buildMediaKey(uuid: string, filename: string): string {
   return `media/${uuid}/${filename}`;
 }
 
+/**
+ * Resume-version object key (task #92) — `resumes/{uuid}/{filename}`. A prefix
+ * distinct from `media/` keeps resume objects out of the §6.9 media orphan sweep
+ * (whose reference scan and tagging is scoped to the `media_assets` table only)
+ * and gives resumes their own lifecycle-rule surface if one is ever needed.
+ */
+export function buildResumeKey(uuid: string, filename: string): string {
+  return `resumes/${uuid}/${filename}`;
+}
+
 export interface PresignedUpload {
   url: string;
   /** Headers the client MUST send on the PUT, byte-for-byte (§6.7 gotcha). */
@@ -87,34 +99,47 @@ export async function generatePresignedUploadUrl(params: {
   key: string;
   contentType: string;
   cacheControl: string;
-  tagging: string;
+  /**
+   * The `x-amz-tagging` string to pin into the signature. Omit (or pass empty)
+   * when the upload has no tagging requirement — resumes (task #92) skip this
+   * because there is no lifecycle rule for the `resumes/` prefix.
+   */
+  tagging?: string;
   expiresInSeconds: number;
 }): Promise<PresignedUpload> {
+  const tagging = params.tagging ?? "";
+  const hasTagging = tagging.length > 0;
   const command = new PutObjectCommand({
     Bucket: getBucket(),
     Key: params.key,
     ContentType: params.contentType,
     CacheControl: params.cacheControl,
-    Tagging: params.tagging,
+    ...(hasTagging ? { Tagging: tagging } : {}),
   });
+
+  const signableHeaders = new Set(["content-type", "cache-control"]);
+  const unhoistableHeaders = new Set<string>();
+  if (hasTagging) {
+    signableHeaders.add("x-amz-tagging");
+    unhoistableHeaders.add("x-amz-tagging");
+  }
 
   const url = await getSignedUrl(getClient(), command, {
     expiresIn: params.expiresInSeconds,
     // Keep these out of the query string and inside the signed-header set so the
     // client is obliged to echo them exactly — that is what "pinned into the
     // signature" means in §6.7.
-    signableHeaders: new Set(["content-type", "cache-control", "x-amz-tagging"]),
-    unhoistableHeaders: new Set(["x-amz-tagging"]),
+    signableHeaders,
+    unhoistableHeaders,
   });
 
-  return {
-    url,
-    headers: {
-      "Content-Type": params.contentType,
-      "Cache-Control": params.cacheControl,
-      "x-amz-tagging": params.tagging,
-    },
+  const headers: Record<string, string> = {
+    "Content-Type": params.contentType,
+    "Cache-Control": params.cacheControl,
   };
+  if (hasTagging) headers["x-amz-tagging"] = tagging;
+
+  return { url, headers };
 }
 
 export interface HeadResult {
@@ -184,6 +209,38 @@ export async function deleteObject(key: string): Promise<void> {
   await getClient().send(
     new DeleteObjectCommand({ Bucket: getBucket(), Key: key })
   );
+}
+
+export interface GetObjectResult {
+  body: Readable;
+  contentLength: number | null;
+  contentType: string | null;
+}
+
+/**
+ * GET an object as a stream. Returns `null` when the object does not exist
+ * (404 / NoSuchKey / NotFound). The AWS SDK v3 exposes `Body` as a Node
+ * `Readable` under Node; the return type here is narrowed to `Readable` so the
+ * caller can `.pipe()` it directly into an Express response (used by
+ * `/api/resume/download` — task #92).
+ */
+export async function getObjectStream(
+  key: string
+): Promise<GetObjectResult | null> {
+  try {
+    const res = await getClient().send(
+      new GetObjectCommand({ Bucket: getBucket(), Key: key })
+    );
+    return {
+      body: res.Body as Readable,
+      contentLength:
+        res.ContentLength === undefined ? null : Number(res.ContentLength),
+      contentType: res.ContentType ?? null,
+    };
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 /**

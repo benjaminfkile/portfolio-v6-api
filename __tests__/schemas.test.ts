@@ -19,7 +19,9 @@ import {
   duolingoData,
   githubData,
   opsData,
+  resumeData,
   SECTION_DATA_SCHEMAS,
+  DRAFT_SECTION_DATA_SCHEMAS,
   SECTION_TYPES,
   postMetadataSchema,
   postSchema,
@@ -665,6 +667,41 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(duolingoData.safeParse({ intro: 42 }).success).toBe(false);
     expect(githubData.safeParse({ nope: "x" }).success).toBe(false);
     expect(opsData.safeParse({ bogus: true }).success).toBe(false);
+  });
+
+  it("resume (task #92) — heading/intro only, NO items, strict on unknown keys", () => {
+    // Registry membership: the section type is real and has both canonical and
+    // draft-lenient data schemas backing it.
+    expect(SECTION_TYPES).toContain("resume");
+    expect(SECTION_DATA_SCHEMAS.resume).toBeDefined();
+    expect(DRAFT_SECTION_DATA_SCHEMAS.resume).toBeDefined();
+
+    // Empty object is valid (heading/intro both optional). Absent must round-trip
+    // as absent — not defaulted to a string.
+    const empty = resumeData.safeParse({});
+    expect(empty.success).toBe(true);
+    if (empty.success) {
+      expect("heading" in empty.data).toBe(false);
+      expect("intro" in empty.data).toBe(false);
+    }
+
+    // Both fields round-trip exactly.
+    const both = resumeData.safeParse({
+      heading: "Resume",
+      intro: "Grab the latest PDF.",
+    });
+    expect(both.success).toBe(true);
+    if (both.success) {
+      expect(both.data.heading).toBe("Resume");
+      expect(both.data.intro).toBe("Grab the latest PDF.");
+    }
+
+    // The resume section has no items (task #92): no `items` field on data,
+    // and no item schema is expected for this section type — unknown keys are
+    // rejected by .strict().
+    expect(resumeData.safeParse({ items: [{}] }).success).toBe(false);
+    expect(resumeData.safeParse({ bogus: true }).success).toBe(false);
+    expect(resumeData.safeParse({ heading: 42 }).success).toBe(false);
   });
 
   it("contact — optional links honour the protocol allowlist", () => {
