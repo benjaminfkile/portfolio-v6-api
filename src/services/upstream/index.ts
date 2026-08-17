@@ -43,6 +43,7 @@ import {
 // uses the SAME curation / degrade logic the routers used to serve directly.
 import {
   getNowPlaying,
+  isSpotifyRateLimited,
   type SpotifyConfig,
 } from "../spotifyService";
 import { getStatus } from "../statusService";
@@ -122,6 +123,10 @@ export function buildFetchers(app: Express): PollFetchers {
 
   return {
     async nowPlaying() {
+      // While under Spotify's 429 backoff (task #90) skip the tick entirely —
+      // returning null tells the poll loop to preserve the last-good snapshot
+      // and NOT record a failure. Non-Spotify lanes are unaffected.
+      if (isSpotifyRateLimited()) return null;
       try {
         return await getNowPlaying(await spotifyConfig());
       } catch (err) {
