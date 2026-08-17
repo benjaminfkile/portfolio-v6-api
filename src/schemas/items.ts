@@ -15,7 +15,6 @@ export const timelineItemSchema = z
     date_range: z.string().min(1),
     title: z.string().min(1),
     description: z.string().default(""),
-    media_id: z.string().uuid().optional(),
   })
   .strict();
 

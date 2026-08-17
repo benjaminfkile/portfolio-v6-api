@@ -274,6 +274,25 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
+  it("timeline item — media_id was removed; the strict schema rejects it (create + PATCH)", () => {
+    // Timeline entries no longer carry an image. The canonical strict schema
+    // rejects an unknown `media_id` key with a validation error…
+    const create = timelineItemSchema.safeParse({
+      date_range: "2020",
+      title: "Role",
+      description: "did things",
+      media_id: "22222222-2222-2222-2222-222222222222",
+    });
+    expect(create.success).toBe(false);
+
+    // …and the draft-lenient `.partial()` variant used by PATCH is ALSO strict
+    // on unknown keys, so a partial update trying to set `media_id` is rejected.
+    const patch = DRAFT_ITEM_SCHEMAS.timeline.safeParse({
+      media_id: "22222222-2222-2222-2222-222222222222",
+    });
+    expect(patch.success).toBe(false);
+  });
+
   it("skills item — valid without proficiency; rejects a leftover proficiency key (strict, v1.5)", () => {
     expect(
       skillsItemSchema.safeParse({

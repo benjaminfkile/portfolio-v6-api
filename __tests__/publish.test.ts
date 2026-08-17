@@ -368,6 +368,75 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
   });
 });
 
+// ---- timeline items no longer contribute media refs (§3.4 v1.17) ----------
+
+describe("publish media-ref collection — timeline items", () => {
+  it("publishes a timeline item AND a hero (with a background_media_id), and the resolved media map contains ONLY the hero's media", async () => {
+    // A rehearsal of what a page carrying a timeline section looks like now:
+    // the timeline items are the {date_range, title, description} shape only;
+    // the section-level collector picks up the hero's background_media_id but
+    // there is no per-timeline-item media reference to sweep in.
+    const HERO_MEDIA = "11111111-1111-1111-1111-111111111111";
+    await insertMedia(HERO_MEDIA, "media/hero.webp");
+
+    await createSection({
+      type: "hero",
+      data: { title: "Ben", background_media_id: HERO_MEDIA },
+    });
+    const timeline = (await createSection({ type: "timeline", data: {} })).body.data;
+    await createItem(timeline.id, {
+      date_range: "2020–2022",
+      title: "Role",
+      description: "did things",
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    // The published document resolves the hero's media, and the media map
+    // holds exactly one entry — proof that the collector does not sweep in a
+    // timeline reference (there is none to sweep now that the field is gone).
+    expect(Object.keys(content.body.media)).toEqual([HERO_MEDIA]);
+  });
+
+  it("publish succeeds against a working set produced by the migration (item bodies stripped of media_id)", async () => {
+    // Simulate the state the strip migration leaves behind: existing timeline
+    // items whose `data` no longer carries `media_id`. Publish must accept the
+    // new canonical shape without complaint.
+    const timeline = (await createSection({ type: "timeline", data: {} })).body.data;
+    // Insert directly — mirroring a post-migration row — with the tightened
+    // {date_range, title, description} shape and nothing else.
+    await getDb()("section_items").insert({
+      section_id: timeline.id,
+      position: 0,
+      data: {
+        date_range: "2020–2022",
+        title: "Role",
+        description: "did things",
+      },
+    });
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+    expect(pub.body.data.version).toBe(1);
+
+    // The item survives publish, still with no media_id, and the media map is
+    // empty because nothing in the working set references any asset.
+    const content = await request(app).get("/api/content");
+    const tl = content.body.pages[0].sections.find(
+      (s: { type: string }) => s.type === "timeline"
+    );
+    expect(tl.items).toHaveLength(1);
+    expect(tl.items[0].data).toEqual({
+      date_range: "2020–2022",
+      title: "Role",
+      description: "did things",
+    });
+    expect(content.body.media).toEqual({});
+  });
+});
+
 // ---- validation refusal (§3.9) ---------------------------------------------
 
 describe("publish validation refusal (§3.9)", () => {

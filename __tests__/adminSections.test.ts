@@ -496,6 +496,58 @@ describe("Zod validation on writes (§3.9)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a timeline item CREATE that carries the removed media_id key (400)", async () => {
+    // Timeline entries no longer carry an image; the strict schema rejects
+    // media_id both at create and at PATCH.
+    const section = (await createSection({ type: "timeline", data: {} })).body.data;
+
+    const create = await request(app)
+      .post(`/api/admin/sections/${section.id}/items`)
+      .set(...AUTH)
+      .send({
+        data: {
+          date_range: "2020",
+          title: "Role",
+          description: "d",
+          media_id: "22222222-2222-2222-2222-222222222222",
+        },
+      });
+    expect(create.status).toBe(400);
+    // No row was inserted — the create was rejected before hitting the DB.
+    expect(
+      await getDb()("section_items").where({ section_id: section.id })
+    ).toHaveLength(0);
+  });
+
+  it("rejects a timeline item PATCH that tries to set media_id (400)", async () => {
+    const section = (await createSection({ type: "timeline", data: {} })).body.data;
+    const item = (
+      await request(app)
+        .post(`/api/admin/sections/${section.id}/items`)
+        .set(...AUTH)
+        .send({
+          data: { date_range: "2020", title: "Role", description: "d" },
+        })
+    ).body.data;
+
+    const patch = await request(app)
+      .patch(`/api/admin/items/${item.id}`)
+      .set(...AUTH)
+      .send({
+        expected_updated_at: item.updated_at,
+        data: { media_id: "22222222-2222-2222-2222-222222222222" },
+      });
+    expect(patch.status).toBe(400);
+
+    // The row was not rewritten — original data still intact.
+    const [row] = await getDb()("section_items").where({ id: item.id });
+    expect(row.data).toEqual({
+      date_range: "2020",
+      title: "Role",
+      description: "d",
+    });
+  });
+
   it("rejects items on a section type that does not bear items (400)", async () => {
     const section = (await createSection({ type: "about", data: { body: "x" } })).body.data;
     const res = await request(app)

@@ -475,6 +475,71 @@ describe("POST /api/admin/media/sweep — rescue & reap (§6.9)", () => {
   });
 });
 
+// ---- version-history refs survive the timeline media_id removal (§6.9) ----
+
+describe("POST /api/admin/media/sweep — version-history retention after timeline media removal", () => {
+  it("does not orphan an asset that only appears inside a retained version's OLD timeline item shape", async () => {
+    // Timeline items no longer carry `media_id` in the current schema — but a
+    // published version snapshotted BEFORE that change still holds them. The
+    // orphan sweep collects refs by `media_id` key suffix from every retained
+    // `page_versions.document`, so the asset must NOT be swept as long as any
+    // retained version still references it. This is what keeps older versions'
+    // timeline images alive past the schema tightening — deletion is the orphan
+    // GC's job, not the schema-migration task's.
+    const OLD = daysAgo(40);
+    const legacyTimelineMediaId = await insertAsset({
+      s3_key: "media/legacy-timeline/f.webp",
+      created_at: OLD,
+    });
+
+    // A retained published version whose document snapshotted the OLD timeline
+    // item shape ({date_range, title, description, media_id}). This is the only
+    // reference to the asset in the whole database.
+    await getDb()("page_versions").insert({
+      version: 1,
+      document: {
+        version: 1,
+        pages: [
+          {
+            slug: "home",
+            title: "Home",
+            nav_label: "Home",
+            nav_position: 0,
+            sections: [
+              {
+                type: "timeline",
+                data: {},
+                items: [
+                  {
+                    data: {
+                      date_range: "2020",
+                      title: "Old role",
+                      description: "with an image",
+                      media_id: legacyTimelineMediaId,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        media: {},
+      },
+      published_by: "seed",
+    });
+
+    const res = await request(app).post("/api/admin/media/sweep").set(...AUTH).send({});
+    expect(res.status).toBe(200);
+    // The legacy asset is kept — the version-history ref is honored.
+    expect(res.body.data.orphaned).toEqual([]);
+    expect(res.body.data.deleted).toEqual([]);
+    expect(mockPutTags).not.toHaveBeenCalled();
+
+    const row = await getDb()("media_assets").where({ id: legacyTimelineMediaId }).first();
+    expect(row.unreferenced_at).toBeNull();
+  });
+});
+
 // ---- GC runs after publish (§6.9, acceptance 1404) -------------------------
 
 describe("GC runs after a successful page publish (§6.9)", () => {
