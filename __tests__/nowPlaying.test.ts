@@ -2,10 +2,13 @@ import request from "supertest";
 import app from "../src/app";
 import {
   getNowPlaying,
+  isSpotifyRateLimited,
   mapCurrentlyPlaying,
   mapRecentlyPlayed,
   _resetSpotifyStateForTests,
   NOW_PLAYING_CACHE_TTL_MS,
+  SPOTIFY_BACKOFF_CAP_MS,
+  SPOTIFY_BACKOFF_INITIAL_MS,
   SPOTIFY_TOKEN_URL,
   SPOTIFY_NOW_PLAYING_URL,
   SPOTIFY_RECENTLY_PLAYED_URL,
@@ -67,6 +70,22 @@ function statusResponse(status: number): Response {
   return {
     status,
     ok: status >= 200 && status < 300,
+    json: async () => ({}),
+  } as unknown as Response;
+}
+
+/** A 429 response with an optional `Retry-After` header. */
+function rateLimited429(retryAfterSeconds?: number): Response {
+  const headers = new Map<string, string>();
+  if (retryAfterSeconds != null) {
+    headers.set("retry-after", String(retryAfterSeconds));
+  }
+  return {
+    status: 429,
+    ok: false,
+    headers: {
+      get: (name: string) => headers.get(name.toLowerCase()) ?? null,
+    },
     json: async () => ({}),
   } as unknown as Response;
 }
@@ -490,5 +509,192 @@ describe("GET /api/now-playing (§4.6) — public, never leaks a token, never 5x
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ playing: false });
+  });
+});
+
+describe("Spotify 429 rate-limit backoff (task #90)", () => {
+  it("a 429 with Retry-After stops all Spotify calls until the deadline", async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      routeFetch({ nowPlaying: () => rateLimited429(120) });
+
+      // First call trips the backoff.
+      await getNowPlaying(CONFIG);
+      expect(isSpotifyRateLimited()).toBe(true);
+
+      const npCallsAfterFirst = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_NOW_PLAYING_URL
+      ).length;
+      expect(npCallsAfterFirst).toBe(1);
+
+      // Advance past the now-playing cache but WELL before the Retry-After
+      // deadline — the second call must NOT hit Spotify (skips upstream).
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      await getNowPlaying(CONFIG);
+
+      const npCallsMid = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_NOW_PLAYING_URL
+      ).length;
+      expect(npCallsMid).toBe(1);
+      expect(isSpotifyRateLimited()).toBe(true);
+
+      // Cross the deadline; the very next call is allowed through.
+      jest.advanceTimersByTime(120 * 1000 + 1_000);
+      expect(isSpotifyRateLimited()).toBe(false);
+      // Swap the fetch to return 200 so backoff resets on success.
+      routeFetch({});
+      await getNowPlaying(CONFIG);
+
+      const npCallsAfterDeadline = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_NOW_PLAYING_URL
+      ).length;
+      expect(npCallsAfterDeadline).toBeGreaterThan(1);
+      expect(isSpotifyRateLimited()).toBe(false);
+
+      // Enter + leave = exactly one warn line each.
+      const enterLogs = warn.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].includes("suspending Spotify fetches")
+      );
+      const leaveLogs = warn.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].includes("cleared; resuming")
+      );
+      expect(enterLogs.length).toBe(1);
+      expect(leaveLogs.length).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("a 429 without Retry-After produces exponential backoff, 60s initial, 15m cap", async () => {
+    jest.useFakeTimers();
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Each cache miss returns a header-less 429; the schedule doubles.
+      routeFetch({ nowPlaying: () => rateLimited429() });
+
+      // 1st 429: 60s.
+      await getNowPlaying(CONFIG);
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_INITIAL_MS - 1_000)).toBe(true);
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_INITIAL_MS + 1_000)).toBe(false);
+
+      // Step past the window and hit again — schedule doubles to 120s.
+      jest.advanceTimersByTime(SPOTIFY_BACKOFF_INITIAL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      expect(isSpotifyRateLimited(Date.now() + 2 * SPOTIFY_BACKOFF_INITIAL_MS - 1_000)).toBe(true);
+      expect(isSpotifyRateLimited(Date.now() + 2 * SPOTIFY_BACKOFF_INITIAL_MS + 1_000)).toBe(false);
+
+      // Advance many rounds — schedule must saturate at the 15m cap.
+      for (let i = 0; i < 20; i++) {
+        jest.advanceTimersByTime(SPOTIFY_BACKOFF_CAP_MS + 1_000);
+        await getNowPlaying(CONFIG);
+      }
+      // The last window must be exactly SPOTIFY_BACKOFF_CAP_MS (or less).
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_CAP_MS + 1_000)).toBe(false);
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_CAP_MS - 1_000)).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("a 200 resets the backoff (streak clears on success)", async () => {
+    jest.useFakeTimers();
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let n = 0;
+      mockFetch.mockImplementation((url: string) => {
+        if (url === SPOTIFY_TOKEN_URL) {
+          return Promise.resolve(tokenResponse(ACCESS_TOKEN));
+        }
+        if (url === SPOTIFY_NOW_PLAYING_URL) {
+          n += 1;
+          // First call: header-less 429 (60s). Second: 200.
+          return Promise.resolve(n === 1 ? rateLimited429() : nowPlaying200());
+        }
+        return Promise.reject(new Error(`unexpected url ${url}`));
+      });
+
+      // Trip a header-less 429 (60s).
+      await getNowPlaying(CONFIG);
+      expect(isSpotifyRateLimited()).toBe(true);
+
+      // Advance past the deadline; the retry is a 200 → clears backoff AND streak.
+      jest.advanceTimersByTime(SPOTIFY_BACKOFF_INITIAL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      expect(isSpotifyRateLimited()).toBe(false);
+
+      // Cache miss + next 429 must start over at 60s, NOT keep doubling.
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      mockFetch.mockImplementation((url: string) => {
+        if (url === SPOTIFY_TOKEN_URL) {
+          return Promise.resolve(tokenResponse(ACCESS_TOKEN));
+        }
+        return Promise.resolve(rateLimited429());
+      });
+      await getNowPlaying(CONFIG);
+      // 60s window (fresh streak), not 120s.
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_INITIAL_MS - 1_000)).toBe(true);
+      expect(isSpotifyRateLimited(Date.now() + SPOTIFY_BACKOFF_INITIAL_MS + 1_000)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("recently-played shares the same 429 budget as now-playing", async () => {
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    // Idle response so we reach the recently-played path; recently-played 429s.
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: () => rateLimited429(60),
+    });
+
+    await getNowPlaying(CONFIG);
+    expect(isSpotifyRateLimited()).toBe(true);
+
+    // Now that we're suspended, both endpoints must be skipped on the next call.
+    mockFetch.mockClear();
+    await getNowPlaying(CONFIG);
+    // With the cache still fresh we don't even try — but even after a cache
+    // miss the isSpotifyRateLimited() guard in fetchNowPlaying returns early.
+    _resetSpotifyStateForTests.name; // silence unused-import lint if any
+    expect(
+      mockFetch.mock.calls.filter((c) => c[0] === SPOTIFY_NOW_PLAYING_URL)
+    ).toHaveLength(0);
+    expect(
+      mockFetch.mock.calls.filter((c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL)
+    ).toHaveLength(0);
+  });
+
+  it("entering and leaving backoff each log exactly once (not per tick)", async () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      routeFetch({ nowPlaying: () => rateLimited429(30) });
+
+      // Trip the backoff.
+      await getNowPlaying(CONFIG);
+      // Multiple further ticks while still suspended must not re-log entry.
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+
+      // Cross deadline and succeed → one leave log.
+      jest.advanceTimersByTime(30 * 1000 + 1_000);
+      routeFetch({});
+      await getNowPlaying(CONFIG);
+
+      const enters = warn.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].includes("suspending Spotify fetches")
+      );
+      const leaves = warn.mock.calls.filter(
+        (c) => typeof c[0] === "string" && c[0].includes("cleared; resuming")
+      );
+      expect(enters.length).toBe(1);
+      expect(leaves.length).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
