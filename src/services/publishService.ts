@@ -137,9 +137,11 @@ export const VERSION_RETENTION = 50;
 /**
  * Every media reference in the content model is a UUID stored under a key whose
  * name ends in `media_id` — `background_media_id` on the hero section, `media_id`
- * on timeline/portfolio items. Collecting by key suffix (rather than hard-coding
- * each path) means a new media-bearing field is covered automatically once its
- * schema lands. Non-UUID / empty values are ignored.
+ * on portfolio items. Collecting by key suffix (rather than hard-coding each
+ * path) means a new media-bearing field is covered automatically once its
+ * schema lands (and, symmetrically, a REMOVED field like the old timeline
+ * `media_id` drops out of collection with no code change here). Non-UUID / empty
+ * values are ignored.
  */
 function collectMediaIds(value: unknown, acc: Set<string>): void {
   if (Array.isArray(value)) {

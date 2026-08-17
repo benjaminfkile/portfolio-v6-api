@@ -49,6 +49,24 @@ describe("GET /api/schema (§8.4)", () => {
     ).toHaveProperty("blog");
   });
 
+  it("no longer lists media_id under the timeline item definition (§3.4 v1.17)", async () => {
+    const res = await request(app).get("/api/schema");
+    const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
+    const root = defs["PortfolioV6Content"] as { properties: Record<string, any> };
+
+    const timeline = root.properties.itemData.properties.timeline;
+
+    // The tightened timeline item shape: exactly {date_range, title, description}.
+    expect(Object.keys(timeline.properties).sort()).toEqual([
+      "date_range",
+      "description",
+      "title",
+    ]);
+    // The removed key is gone from the JSON Schema so both frontends' sync:types
+    // stops advertising it.
+    expect(timeline.properties).not.toHaveProperty("media_id");
+  });
+
   it("surfaces the Post Refs v1.14 shapes (portfolio post_refs + resolved posts + PostRef)", async () => {
     const res = await request(app).get("/api/schema");
     const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
