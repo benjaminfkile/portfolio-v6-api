@@ -17,8 +17,22 @@
  * poll loop, snapshot writes, or public HTTP serving.
  */
 
-/** The manifest service name that owns the realtime channels. */
-export const REALTIME_SERVICE_NAME = "portfolio-v6-api";
+/**
+ * Default manifest service name that owns the realtime channels. Used when no
+ * explicit name is configured. The dev deployment runs under
+ * `portfolio-v6-api-dev`, so the deployed dev container MUST override this via
+ * the `realtime_service_name` secret / `REALTIME_SERVICE_NAME` env var — the
+ * gateway's publish token is scoped to the owning service, and a mismatched
+ * channel prefix is rejected with 403.
+ */
+export const DEFAULT_REALTIME_SERVICE_NAME = "portfolio-v6-api";
+
+/**
+ * Back-compat alias for callers/tests that referred to the previous constant.
+ * Points at the same default; the actual channel prefix now comes from
+ * `RealtimePublisherConfig.serviceName`.
+ */
+export const REALTIME_SERVICE_NAME = DEFAULT_REALTIME_SERVICE_NAME;
 
 /** Header the gateway checks on every internal publish. */
 export const REALTIME_TOKEN_HEADER = "X-Gateway-Realtime-Token";
@@ -36,10 +50,17 @@ export function publishUrl(gatewayInternalUrl: string): string {
 /** How long a publish is allowed to hang before we give up. */
 export const PUBLISH_TIMEOUT_MS = 2_000;
 
-/** Configuration the publisher needs. Both env-sourced. */
+/** Configuration the publisher needs. All fields are env-sourced. */
 export interface RealtimePublisherConfig {
   gatewayInternalUrl: string;
   realtimeToken: string;
+  /**
+   * Manifest service name that prefixes every published channel. Must match
+   * the service the gateway's publish token is scoped to (prod:
+   * `portfolio-v6-api`, dev: `portfolio-v6-api-dev`). Falls back to
+   * `DEFAULT_REALTIME_SERVICE_NAME` if unset.
+   */
+  serviceName?: string;
 }
 
 /** One publish request body. `event` is the client-facing event name. */
@@ -64,8 +85,9 @@ export async function publish<T>(
   if (!config.gatewayInternalUrl || !config.realtimeToken) return;
 
   const url = publishUrl(config.gatewayInternalUrl);
+  const serviceName = config.serviceName || DEFAULT_REALTIME_SERVICE_NAME;
   const body = JSON.stringify({
-    channel: `${REALTIME_SERVICE_NAME}:${req.topic}`,
+    channel: `${serviceName}:${req.topic}`,
     event: req.event,
     data: req.data,
   });

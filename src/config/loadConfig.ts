@@ -51,6 +51,8 @@ function loadLocalConfig(): LoadedConfig {
       process.env.GATEWAY_INTERNAL_URL || undefined,
     gateway_realtime_token:
       process.env.GATEWAY_REALTIME_TOKEN || undefined,
+    realtime_service_name:
+      process.env.REALTIME_SERVICE_NAME || undefined,
   };
 
   const dbSecrets: IDBSecrets = {
