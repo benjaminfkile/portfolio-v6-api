@@ -516,6 +516,48 @@ describe("Zod validation on writes (§3.9)", () => {
       .send({ expected_updated_at: section.updated_at, data: { services: "gateway" } });
     expect(res.status).toBe(400);
   });
+
+  it("accepts a contact section PATCH with mailto: and tel: links (§3.4)", async () => {
+    const section = (await createSection({ type: "contact", data: {} })).body.data;
+    const links = [
+      { type: "other", label: "Email", url: "mailto:someone@example.com" },
+      { type: "other", label: "Phone", url: "tel:+14065551234" },
+    ];
+    const res = await request(app)
+      .patch(`/api/admin/sections/${section.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: section.updated_at, data: { links } });
+    expect(res.status).toBe(200);
+    expect(res.body.data.data.links).toEqual(links);
+
+    // Confirm persistence via a follow-up read of the working set.
+    const ws = await request(app)
+      .get(`/api/admin/sections?page_id=${homePageId}`)
+      .set(...AUTH);
+    const persisted = ws.body.data.sections.find(
+      (s: { id: string }) => s.id === section.id
+    );
+    expect(persisted.data.links).toEqual(links);
+  });
+
+  it.each([
+    ["javascript:alert(1)"],
+    ["data:text/html,x"],
+    ["file:///etc/passwd"],
+  ])(
+    "rejects a contact link whose url uses the still-forbidden protocol %s",
+    async (url) => {
+      const section = (await createSection({ type: "contact", data: {} })).body.data;
+      const res = await request(app)
+        .patch(`/api/admin/sections/${section.id}`)
+        .set(...AUTH)
+        .send({
+          expected_updated_at: section.updated_at,
+          data: { links: [{ type: "other", label: "x", url }] },
+        });
+      expect(res.status).toBe(400);
+    }
+  );
 });
 
 // ---- v1.1 page scope (§3.10, §4.2 v1.1) -------------------------------------
