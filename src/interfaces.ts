@@ -49,6 +49,34 @@ export interface IAppSecrets {
    * empty, `/api/ops` serves `{ available: false }` and makes no AWS call.
    */
   cloudwatch_dashboard_name?: string;
+  /**
+   * Optional Redis URL for the single-poller / shared-snapshot subsystem
+   * (task #84). Sourced from the REDIS_URL env var. When unset the app runs
+   * with today's per-instance in-memory caches and never opens a Redis
+   * connection — local dev and CI stay Redis-free. Deployed installs point
+   * this at their per-environment Redis (prod and dev keys never collide —
+   * both are prefixed with `node_env`, see loadConfig).
+   */
+  redis_url?: string;
+  /**
+   * Base tick for the leader poll loop, milliseconds. Prod runs 5000, dev
+   * runs 10000, default 10000. Only the leader ticks — non-leaders serve
+   * from the shared snapshot.
+   */
+  poll_interval_ms?: number;
+  /**
+   * Internal base URL the container uses to reach the gateway's
+   * `POST /internal/publish` endpoint (realtime hub). Defaults to
+   * `http://gateway:8080`. Publish failures never affect HTTP serving.
+   */
+  gateway_internal_url?: string;
+  /**
+   * Shared secret the gateway injects into every service container so the
+   * internal publish endpoint can authenticate us (§ REALTIME.md). Sent as
+   * the `X-Gateway-Realtime-Token` header on every publish. Never returned
+   * to any response and never logged.
+   */
+  gateway_realtime_token?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----

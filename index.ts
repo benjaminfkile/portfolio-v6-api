@@ -7,6 +7,7 @@ import app from "./src/app";
 import { loadConfig } from "./src/config/loadConfig";
 import { buildDbConnection, initDb } from "./src/db/db";
 import { initS3 } from "./src/aws/s3Service";
+import { bootstrapUpstream } from "./src/services/upstream";
 
 process.on("uncaughtException", (err) => {
   console.error("[Fatal] Uncaught exception:", err);
@@ -36,16 +37,24 @@ export async function start(): Promise<http.Server> {
     runMigrations: appSecrets.node_env !== "production",
   });
 
+  // Single-poller / shared-snapshot subsystem (task #84). Inert when
+  // REDIS_URL is unset — the app then runs with its per-instance in-memory
+  // caches exactly as it did before task #84.
+  const upstream = bootstrapUpstream(app);
+  app.set("upstream", upstream);
+
   const server = http.createServer(app);
 
-  process.on("SIGINT", () => {
+  process.on("SIGINT", async () => {
+    await upstream.stop().catch(() => undefined);
     server.close(() => {
       console.log("Server closed (SIGINT)");
       process.exit(0);
     });
   });
 
-  process.on("SIGTERM", () => {
+  process.on("SIGTERM", async () => {
+    await upstream.stop().catch(() => undefined);
     server.close(() => {
       console.log("Server closed (SIGTERM)");
       process.exit(0);

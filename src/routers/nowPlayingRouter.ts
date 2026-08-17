@@ -7,6 +7,11 @@ import {
 } from "../services/spotifyService";
 import { getStoredSpotifyToken } from "../services/spotifyTokenStore";
 import { resolveEncryptionKey } from "../services/serviceTokenStore";
+import {
+  readSnapshot,
+  readLocalSnapshot,
+  type UpstreamHandle,
+} from "../services/upstream";
 
 /**
  * Public now-playing router — TECH_SPEC_V1.md §4.6 (`/api/now-playing`) / #442.
@@ -16,23 +21,21 @@ import { resolveEncryptionKey } from "../services/serviceTokenStore";
  * than errors** (§3.5): nothing playing, or ANY upstream failure, both render as
  * `{ playing: false }`, never a 5xx. No Spotify token is ever in the response —
  * the router only forwards the curated service payload (§4.6).
+ *
+ * Task #84 layered a shared-snapshot path on top: when Redis is configured, the
+ * leader instance polls Spotify and writes the curated payload to a Redis
+ * snapshot; every other instance serves that snapshot here so each Spotify
+ * upstream is polled once per environment, not once per instance. A Redis
+ * outage or a missing snapshot falls back to the per-instance in-memory path so
+ * public reads never 5xx because of the shared store.
  */
 const nowPlayingRouter = express.Router();
 
 const NOT_PLAYING: NowPlaying = { playing: false };
 
-/**
- * Refresh-token resolution order: the admin-connected token stored via the
- * reconnect flow (spotifyTokenStore) wins; the static `spotify_refresh_token`
- * secret is the fallback for installs still on the one-time bootstrap. The
- * store never throws and is cached in memory, so this adds no per-request DB
- * round-trip on the hot path.
- */
 async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
   const secrets = req.app.get("secrets") as IAppSecrets | undefined;
   const clientSecret = secrets?.spotify_client_secret ?? "";
-  // The stored token is encrypted with the resolved key (§4.7): the dedicated
-  // `token_encryption_key` when set, else the client secret (back-compat).
   const stored = await getStoredSpotifyToken(resolveEncryptionKey(secrets));
   return {
     clientId: secrets?.spotify_client_id ?? "",
@@ -42,10 +45,29 @@ async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
 }
 
 nowPlayingRouter.get("/", async (req: Request, res: Response) => {
-  // Never 5xx (§3.5). `getNowPlaying` maps every failure to `{ playing: false }`;
-  // the catch is belt-and-braces for a truly unexpected throw. Public reads
-  // return the resource raw (§4.1) — the envelope is the admin convention (§4.3).
   try {
+    const upstream = req.app.get("upstream") as UpstreamHandle | undefined;
+    const secrets = req.app.get("secrets") as IAppSecrets | undefined;
+
+    // Prefer the shared snapshot when Redis is configured. Falls through to the
+    // per-instance path on absent/parse-fail, and on the leader we can still
+    // use the in-process copy the poll loop just wrote.
+    if (upstream?.enabled && upstream.redis && secrets) {
+      const snap = await readSnapshot<NowPlaying>(
+        upstream.redis,
+        secrets.node_env,
+        "now-playing"
+      );
+      if (snap) {
+        return res.status(200).json(snap.payload);
+      }
+      const local = readLocalSnapshot<NowPlaying>("now-playing");
+      if (local) {
+        return res.status(200).json(local);
+      }
+      // No snapshot yet (leader hasn't populated) — fall through to per-instance.
+    }
+
     const payload = await getNowPlaying(await spotifyConfig(req));
     res.status(200).json(payload);
   } catch (err) {

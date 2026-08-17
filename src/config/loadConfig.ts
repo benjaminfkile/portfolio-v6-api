@@ -10,6 +10,13 @@ export function isLocal(): boolean {
   return process.env.IS_LOCAL === "true";
 }
 
+/** Parse an integer env var, returning undefined when unset/blank/NaN. */
+function parseOptionalInt(raw: string | undefined): number | undefined {
+  if (!raw || raw.trim() === "") return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * Build the full app/db config from environment variables with sane defaults.
  * Used only on the IS_LOCAL path — no AWS SDK module is even imported here.
@@ -36,6 +43,14 @@ function loadLocalConfig(): LoadedConfig {
       process.env.GATEWAY_HEALTH_URL || "http://localhost:3000/api/health",
     cloudwatch_dashboard_name:
       process.env.CLOUDWATCH_DASHBOARD_NAME || undefined,
+    // Optional single-poller / shared-snapshot subsystem (task #84). Every
+    // knob is optional so tests and IS_LOCAL stay Redis-free by default.
+    redis_url: process.env.REDIS_URL || undefined,
+    poll_interval_ms: parseOptionalInt(process.env.POLL_INTERVAL_MS),
+    gateway_internal_url:
+      process.env.GATEWAY_INTERNAL_URL || undefined,
+    gateway_realtime_token:
+      process.env.GATEWAY_REALTIME_TOKEN || undefined,
   };
 
   const dbSecrets: IDBSecrets = {
