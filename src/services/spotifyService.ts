@@ -48,6 +48,22 @@ export const TOKEN_EXPIRY_SAFETY_MS = 60_000;
 /** Upstream fetch timeout — a hung Spotify must not hang the public endpoint. */
 export const SPOTIFY_UPSTREAM_TIMEOUT_MS = 4_000;
 
+/**
+ * Rate-limit backoff seed used when Spotify 429s without a `Retry-After`
+ * header. Doubles each consecutive header-less 429 until it reaches
+ * `SPOTIFY_BACKOFF_CAP_MS`; a successful call resets it. Kept exported so
+ * tests can reason about the schedule without duplicating the numbers.
+ */
+export const SPOTIFY_BACKOFF_INITIAL_MS = 60_000;
+/** Cap for the exponential backoff schedule — 15 minutes. */
+export const SPOTIFY_BACKOFF_CAP_MS = 15 * 60 * 1000;
+/**
+ * Small jitter added to a `Retry-After` deadline so N leaders — should there
+ * ever be more than one — don't all wake at the exact same millisecond.
+ * Deliberately short: honouring the header exactly is the important bit.
+ */
+export const SPOTIFY_BACKOFF_JITTER_MS = 500;
+
 /** Credentials the service needs, sourced from secrets/env (§9.3, §4.6). */
 export interface SpotifyConfig {
   clientId: string;
@@ -102,7 +118,86 @@ let inFlight: Promise<NowPlaying> | null = null;
 // logged once per process rather than on every idle cache miss.
 let recentlyPlayedScopeWarned = false;
 
+/**
+ * 429 backoff state — SHARED between now-playing and recently-played (one
+ * Spotify budget). `backoffUntilMs` is the wall-clock the next Spotify call is
+ * allowed at; `backoffStreak` counts consecutive header-less 429s so the
+ * exponential schedule doubles; `inBackoff` gates the enter/leave logs so we
+ * emit exactly one line per suspension window (task #90).
+ *
+ * The state lives in-process on the leader per the task spec: a new leader
+ * starting fresh will re-trip once and re-enter, which is acceptable.
+ */
+let backoffUntilMs = 0;
+let backoffStreak = 0;
+let inBackoff = false;
+
 const NOT_PLAYING: NowPlaying = { playing: false };
+
+/**
+ * True iff Spotify calls are currently paused because of a prior 429. The poll
+ * loop's fetcher wrapper checks this to skip the tick without recording a
+ * failure (last-good snapshot is preserved). `fetchNowPlaying` /
+ * `fetchLastPlayed` also short-circuit on this so the router-side fallback
+ * doesn't hammer Spotify during a suspension either.
+ */
+export function isSpotifyRateLimited(now: number = Date.now()): boolean {
+  return now < backoffUntilMs;
+}
+
+function parseRetryAfterSeconds(res: unknown): number | null {
+  const headers = (res as { headers?: { get?: (name: string) => string | null } })
+    ?.headers;
+  const raw = headers?.get?.("retry-after") ?? null;
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Record a 429 from Spotify — extend the suspension window (Retry-After when
+ * present, otherwise exponential backoff seeded at `SPOTIFY_BACKOFF_INITIAL_MS`
+ * and capped at `SPOTIFY_BACKOFF_CAP_MS`). Logs a single line the FIRST time we
+ * enter suspension; subsequent 429s within the same window are silent.
+ */
+function noteSpotifyRateLimited(res: unknown): void {
+  const retryAfterSec = parseRetryAfterSeconds(res);
+  let delayMs: number;
+  if (retryAfterSec != null) {
+    delayMs = retryAfterSec * 1000 + Math.floor(Math.random() * SPOTIFY_BACKOFF_JITTER_MS);
+  } else {
+    delayMs = Math.min(
+      SPOTIFY_BACKOFF_CAP_MS,
+      SPOTIFY_BACKOFF_INITIAL_MS * 2 ** backoffStreak
+    );
+    backoffStreak += 1;
+  }
+  const until = Date.now() + delayMs;
+  if (until > backoffUntilMs) backoffUntilMs = until;
+  if (!inBackoff) {
+    inBackoff = true;
+    const source = retryAfterSec != null ? `Retry-After ${retryAfterSec}s` : "no Retry-After";
+    console.warn(
+      `[spotifyService] Spotify 429 (${source}); suspending Spotify fetches for ` +
+        `${Math.round(delayMs / 1000)}s (until ${new Date(backoffUntilMs).toISOString()})`
+    );
+  }
+}
+
+/**
+ * Any non-429 response from Spotify means it is answering us — clear the
+ * backoff window. Logs a single line the FIRST time we leave a suspension.
+ */
+function noteSpotifyResponsive(): void {
+  if (!inBackoff && backoffUntilMs === 0 && backoffStreak === 0) return;
+  const wasInBackoff = inBackoff;
+  backoffUntilMs = 0;
+  backoffStreak = 0;
+  inBackoff = false;
+  if (wasInBackoff) {
+    console.warn("[spotifyService] Spotify 429 cleared; resuming fetches");
+  }
+}
 
 function timeoutSignal(): { signal: AbortSignal; clear: () => void } {
   const controller = new AbortController();
@@ -275,10 +370,20 @@ export function mapRecentlyPlayed(body: unknown): LastPlayed | null {
  * the 403 a pre-scope-change token gets — just means no `last_played` field.
  */
 async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
+  // Share the same 429 budget as now-playing — skip while suspended so idle
+  // enrichment doesn't extend the penalty window.
+  if (isSpotifyRateLimited()) return null;
   try {
     const res = await callRecentlyPlayed(token);
 
+    if (res.status === 429) {
+      noteSpotifyRateLimited(res);
+      return null;
+    }
+
     if (res.status === 403) {
+      // Spotify answered — clear any prior 429 window.
+      noteSpotifyResponsive();
       if (!recentlyPlayedScopeWarned) {
         recentlyPlayedScopeWarned = true;
         console.warn(
@@ -295,6 +400,7 @@ async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
       throw new Error(`Spotify recently-played returned status ${res.status}`);
     }
 
+    noteSpotifyResponsive();
     let body: unknown = null;
     try {
       body = await res.json();
@@ -324,6 +430,10 @@ async function idleWithLastPlayed(token: string): Promise<NowPlaying> {
  * endpoint is consulted (same token) so the payload can carry `last_played`.
  */
 async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
+  // Short-circuit while under Spotify's 429 backoff — never hit the upstream at
+  // all so we don't extend the penalty window. The poll-loop fetcher wrapper
+  // also short-circuits at the same gate so the shared snapshot is preserved.
+  if (isSpotifyRateLimited()) return NOT_PLAYING;
   try {
     let token = await getAccessToken(config);
     let res = await callCurrentlyPlaying(token);
@@ -334,10 +444,20 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
       res = await callCurrentlyPlaying(token);
     }
 
+    // 429 → suspend all Spotify fetches (Retry-After or exponential backoff).
+    if (res.status === 429) {
+      noteSpotifyRateLimited(res);
+      return NOT_PLAYING;
+    }
+
     // 204 = nothing playing: a normal response, not an error (§4.6).
-    if (res.status === 204) return idleWithLastPlayed(token);
+    if (res.status === 204) {
+      noteSpotifyResponsive();
+      return idleWithLastPlayed(token);
+    }
 
     if (res.status === 200) {
+      noteSpotifyResponsive();
       let body: unknown = null;
       try {
         body = await res.json();
@@ -349,7 +469,8 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
       return mapped.playing ? mapped : idleWithLastPlayed(token);
     }
 
-    // Any other status (still 401 after retry, 5xx, 429, …) → degrade.
+    // Any other status (still 401 after retry, 5xx, …) → degrade. Do NOT
+    // clear the backoff window here: we don't know that Spotify is healthy.
     throw new Error(`Spotify currently-playing returned status ${res.status}`);
   } catch (err) {
     console.error(
@@ -400,6 +521,12 @@ export function clearSpotifyRuntimeState(): void {
   inFlight = null;
   // A fresh authorization may carry the recently-played scope — warn anew if not.
   recentlyPlayedScopeWarned = false;
+  // Fresh authorization does NOT lift a rate limit (the 429 is tied to the
+  // client, not the refresh token), but resetting the streak is fine: the next
+  // call will re-enter backoff if Spotify still returns 429.
+  backoffUntilMs = 0;
+  backoffStreak = 0;
+  inBackoff = false;
 }
 
 /** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */
