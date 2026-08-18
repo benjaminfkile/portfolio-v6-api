@@ -554,11 +554,79 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     );
   });
 
-  it("hero — valid and rejects missing title", () => {
+  it("hero — title is optional (task #106): absent validates, present-but-empty is still rejected", () => {
+    // Present and non-empty — the classic case still works.
     expect(heroData.safeParse({ title: "Ben", tagline: "builder" }).success).toBe(
       true
     );
-    expect(heroData.safeParse({ tagline: "no title" }).success).toBe(false);
+
+    // NO section requires a heading (product rule, task #106). A hero with no
+    // title validates on the CANONICAL (publish) schema and simply renders
+    // without one — including a hero with only a tagline, and a fully empty hero.
+    const noTitle = heroData.safeParse({ tagline: "no title" });
+    expect(noTitle.success).toBe(true);
+    if (noTitle.success) {
+      expect("title" in noTitle.data).toBe(false);
+    }
+    expect(heroData.safeParse({}).success).toBe(true);
+
+    // "Absent is how you omit" — an explicit empty string is still rejected by
+    // the retained `.min(1)`. The admin write path strips `""` before
+    // validation (draftData.stripEmptyStrings), so the empty-string case never
+    // reaches the canonical schema in practice.
+    expect(heroData.safeParse({ title: "" }).success).toBe(false);
+    expect(heroData.safeParse({ title: "", tagline: "x" }).success).toBe(false);
+
+    // Draft-lenient path: partial() also accepts absent, and stripping still
+    // means the admin create-empty-then-edit flow works.
+    expect(DRAFT_SECTION_DATA_SCHEMAS.hero.safeParse({}).success).toBe(true);
+    expect(
+      DRAFT_SECTION_DATA_SCHEMAS.hero.safeParse({ tagline: "just a tagline" }).success
+    ).toBe(true);
+  });
+
+  it("no section type has a required heading/title/eyebrow (task #106)", () => {
+    // NOTHING should require a heading. Every section type's CANONICAL
+    // (publish) schema must accept a payload with NO heading/title/eyebrow key,
+    // even though structural/config fields (services, idle, sphere_detail,
+    // etc.) may still be required. This is what unblocks publishing a page
+    // where the admin has intentionally left the header copy blank.
+    const HEADER_COPY_KEYS = ["heading", "title", "eyebrow"] as const;
+
+    // A minimal, structurally-complete payload for each section type — the
+    // config/structural fields their schema requires, and NOTHING else. If a
+    // header-copy field is anywhere in here, that's a bug in the fixture.
+    const structuralOnly: Record<string, Record<string, unknown>> = {
+      hero: {},
+      about: {},
+      timeline: {},
+      skills: {},
+      portfolio: {},
+      status: { services: ["gateway"] },
+      blog: {},
+      now_playing: { idle: "hide" },
+      duolingo: {},
+      github: {},
+      ops: {},
+      resume: {},
+      contact: {},
+    };
+
+    for (const type of SECTION_TYPES) {
+      const schema = SECTION_DATA_SCHEMAS[type];
+      const payload = structuralOnly[type];
+      // Payload sanity: no header-copy key smuggled in.
+      for (const key of HEADER_COPY_KEYS) {
+        expect(payload).not.toHaveProperty(key);
+      }
+      const parsed = schema.safeParse(payload);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        for (const key of HEADER_COPY_KEYS) {
+          expect(key in parsed.data).toBe(false);
+        }
+      }
+    }
   });
 
   it("status — services list, optional response times", () => {
