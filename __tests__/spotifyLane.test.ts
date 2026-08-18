@@ -31,6 +31,7 @@ function buildDeps(overrides: Partial<SpotifyLaneDeps> = {}): SpotifyLaneDeps {
     getBackoffUntilMs: () => 0,
     applyAuthSuspension: () => undefined,
     applyBackoffUntil: () => undefined,
+    clearBackoff: () => undefined,
     resumeAuth: () => undefined,
     getStoredTokenUpdatedAt: async () => null,
     getPresenceCount: async () => 0,
@@ -383,5 +384,44 @@ describe("spotifyLane — reconcileAfterFetch", () => {
 
     await lane.reconcileAfterFetch(0);
     expect(clearShared).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("spotifyLane — Redis is authoritative (task #97)", () => {
+  it("clears local backoff mirror when the shared record is absent", async () => {
+    // Local mirror says still-suspended, but the shared record is gone
+    // (operator DEL). The lane MUST call clearBackoff so the fetcher wrapper
+    // doesn't short-circuit on stale in-memory backoff.
+    const clearBackoff = jest.fn();
+    const deps = buildDeps({
+      getBackoffUntilMs: () => 999_999,
+      clearBackoff,
+      readSharedSuspension: async () => null,
+      getPresenceCount: async () => 1,
+    });
+    const lane = createSpotifyLane(deps, buildConfig());
+
+    expect(await lane.planTick(0)).toBe("fetch");
+    expect(clearBackoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT clear local backoff on the shared-present skip-suspended path", async () => {
+    // Shared record IS present — local mirror should stay as-is; only the
+    // shared-absent branch clears the local backoff.
+    const clearBackoff = jest.fn();
+    const record = {
+      suspended_until: new Date(500_000).toISOString(),
+      reason: "429" as const,
+      detail: "Spotify 429 backoff",
+    };
+    const deps = buildDeps({
+      getBackoffUntilMs: () => 500_000,
+      clearBackoff,
+      readSharedSuspension: async () => record,
+    });
+    const lane = createSpotifyLane(deps, buildConfig());
+
+    expect(await lane.planTick(0)).toBe("skip-suspended");
+    expect(clearBackoff).not.toHaveBeenCalled();
   });
 });

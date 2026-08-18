@@ -64,6 +64,7 @@ import {
   suspendSpotifyAuth,
   getSpotifyBackoffUntilMs,
   applySpotifyBackoffUntil,
+  clearSpotifyBackoff,
   type SpotifyConfig,
 } from "../spotifyService";
 import { getStatus } from "../statusService";
@@ -279,6 +280,7 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
       applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
       applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
+      clearBackoff: () => clearSpotifyBackoff(),
       resumeAuth: () => resumeSpotifyAuth(),
       async getStoredTokenUpdatedAt() {
         return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);

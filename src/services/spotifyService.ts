@@ -125,8 +125,11 @@ let recentlyPlayedScopeWarned = false;
  * exponential schedule doubles; `inBackoff` gates the enter/leave logs so we
  * emit exactly one line per suspension window (task #90).
  *
- * The state lives in-process on the leader per the task spec: a new leader
- * starting fresh will re-trip once and re-enter, which is acceptable.
+ * Under task #97 this in-process state is a MIRROR of the shared Redis
+ * suspension record, not an authoritative source. The lane clears it via
+ * `clearSpotifyBackoff()` whenever the shared record is absent so a deleted
+ * key stays deleted, and only re-writes the shared record from local state
+ * when a fresh trip happens post-fetch — never from memory on every tick.
  */
 let backoffUntilMs = 0;
 let backoffStreak = 0;
@@ -181,6 +184,21 @@ export function applySpotifyBackoffUntil(untilMs: number): void {
     backoffUntilMs = untilMs;
     inBackoff = true;
   }
+}
+
+/**
+ * Clear the in-process 429 backoff mirror (task #97). Called by the lane when
+ * it observes that the SHARED suspension record is absent — Redis is the
+ * source of truth, so a deleted key means the local mirror must also clear or
+ * the fetcher wrapper would short-circuit on stale in-memory state and the
+ * lane would keep re-persisting the same deadline. Also resets the exponential
+ * streak so a subsequent trip starts at the base seed rather than continuing
+ * from wherever the last window left off.
+ */
+export function clearSpotifyBackoff(): void {
+  backoffUntilMs = 0;
+  backoffStreak = 0;
+  inBackoff = false;
 }
 
 /**
