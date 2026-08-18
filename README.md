@@ -171,13 +171,16 @@ back to the per-instance path with the existing in-memory caches.
 
 ## Deploy (§11)
 
-`.github/workflows/deploy.yaml` on pushes to `main` (→ service `portfolio-v6-api`, tag
-`latest`) and `dev` (→ `portfolio-v6-api-dev`, tag `dev`): buildx a multi-arch image,
-push to ECR, then one authenticated call to the gateway's management API
-(`POST /mgmt/services/<service>/deploy` with the git SHA tag). The gateway resolves the
-tag to a digest, updates its service manifest, and blue-greens the container in place —
-no instance refresh, other services unaffected. Container-internal port is 8000 (from the
-app secret); host ports are Docker-assigned by the gateway's reconciler.
+`.github/workflows/deploy.yaml` on pushes to `main` (→ service `portfolio-v6-api`, moving
+tag `latest`) and `dev` (→ `portfolio-v6-api-dev`, moving tag `dev`): buildx a multi-arch
+image, push to ECR under the moving tag AND an immutable per-build tag
+`<short-sha>-<env>` (`<sha>-prod` for main, `<sha>-dev` for dev — branch-suffixed so the
+two pipelines can never overwrite each other's :<sha> if the same commit is pushed to
+both), then one authenticated call to the gateway's management API
+(`POST /mgmt/services/<service>/deploy` with that same immutable tag). The gateway
+resolves the tag to a digest, updates its service manifest, and blue-greens the container
+in place — no instance refresh, other services unaffected. Container-internal port is
+8000 (from the app secret); host ports are Docker-assigned by the gateway's reconciler.
 
 ## Local development
 
