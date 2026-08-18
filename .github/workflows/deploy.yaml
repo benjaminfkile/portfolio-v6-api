@@ -8,6 +8,10 @@ on:
 
 env:
   IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+  # Branch-unique suffix for the immutable per-build tag so that a dev
+  # build of the same commit can never overwrite the :<sha> tag a prod
+  # deploy just pinned (and vice versa).
+  IMMUTABLE_TAG_SUFFIX: ${{ github.ref_name == 'main' && '-prod' || '-dev' }}
 
 jobs:
   deploy:
@@ -32,6 +36,7 @@ jobs:
         run: |
           IMAGE_URI=${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}
           GIT_SHA=$(git rev-parse --short HEAD)
+          IMMUTABLE_TAG=${GIT_SHA}${{ env.IMMUTABLE_TAG_SUFFIX }}
 
           echo "Initializing Buildx for multi-architecture build..."
           docker buildx create --use || true
@@ -44,7 +49,7 @@ jobs:
             --build-arg AWS_SECRET_ARN=${{ secrets.AWS_SECRET_ARN }} \
             --build-arg AWS_DB_SECRET_ARN=${{ secrets.AWS_DB_SECRET_ARN }} \
             --build-arg NODE_ENV=production \
-            -t $IMAGE_URI:$GIT_SHA \
+            -t $IMAGE_URI:$IMMUTABLE_TAG \
             -t $IMAGE_URI:${{ env.IMAGE_TAG }} \
             --push .
 
@@ -55,6 +60,7 @@ jobs:
       - name: Deploy via gateway
         run: |
           GIT_SHA=$(git rev-parse --short HEAD)
+          IMMUTABLE_TAG=${GIT_SHA}${{ env.IMMUTABLE_TAG_SUFFIX }}
           SERVICE=${{ github.ref_name == 'main' && 'portfolio-v6-api' || 'portfolio-v6-api-dev' }}
 
           TOKEN=$(curl -sf -X POST "${{ secrets.MGMT_TOKEN_URL }}" \
@@ -62,8 +68,8 @@ jobs:
             -u "${{ secrets.MGMT_CLIENT_ID }}:${{ secrets.MGMT_CLIENT_SECRET }}" \
             -d "grant_type=client_credentials&scope=mgmt/deploy" | jq -r .access_token)
 
-          echo "Deploying ${SERVICE} @ ${GIT_SHA} via gateway..."
+          echo "Deploying ${SERVICE} @ ${IMMUTABLE_TAG} via gateway..."
           curl -sf -X POST "https://api.benkile.com/mgmt/services/${SERVICE}/deploy" \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"tag\":\"${GIT_SHA}\"}"
+            -d "{\"tag\":\"${IMMUTABLE_TAG}\"}"
