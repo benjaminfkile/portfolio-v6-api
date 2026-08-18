@@ -19,8 +19,8 @@ const adminAuthRouter = express.Router();
 adminAuthRouter.post(
   "/preview-token",
   requireAdminOrMachine(),
-  (_req: Request, res: Response) => {
-    const minted = mintPreviewToken();
+  async (_req: Request, res: Response) => {
+    const minted = await mintPreviewToken();
     res.status(201).json(
       success({
         token: minted.token,

@@ -166,7 +166,7 @@ export function requireAdminOrPreviewToken(): RequestHandler {
 
       // Preview-token path: read-only, opaque, 15-minute token (§7).
       const previewToken = extractPreviewToken(req);
-      if (previewToken && isValidPreviewToken(previewToken)) {
+      if (previewToken && (await isValidPreviewToken(previewToken))) {
         return next();
       }
 

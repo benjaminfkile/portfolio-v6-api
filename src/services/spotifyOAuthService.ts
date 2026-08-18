@@ -12,10 +12,10 @@ import { IAppSecrets } from "../interfaces";
  * deployed API instead of a local throwaway server, so the admin never handles
  * the token by hand.
  *
- * State tokens follow the previewTokenService pattern: opaque 256-bit values in
- * an in-memory map. Only a verified admin can mint one, the callback consumes it
- * (single-use), and it expires after 10 minutes — so an unauthenticated hit on
- * the public callback URL can never cause a token to be stored.
+ * State tokens are opaque 256-bit values in an in-memory map. Only a verified
+ * admin can mint one, the callback consumes it (single-use), and it expires
+ * after 10 minutes — so an unauthenticated hit on the public callback URL can
+ * never cause a token to be stored.
  */
 
 export const SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize";

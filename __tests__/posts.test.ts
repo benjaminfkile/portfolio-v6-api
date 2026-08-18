@@ -162,7 +162,7 @@ afterAll(async () => {
 beforeEach(async () => {
   mockVerify.mockReset();
   mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
-  clearPreviewTokens();
+  await clearPreviewTokens();
   await getDb()("posts").del();
   await getDb()("media_assets").del();
 });
@@ -539,7 +539,7 @@ describe("GET /api/admin/preview/posts/:id — draft serialization (§4.2 / §7)
     });
 
     // Preview-token path (no admin bearer).
-    const token = mintPreviewToken().token;
+    const token = (await mintPreviewToken()).token;
     const asPreview = await request(app).get(
       `/api/admin/preview/posts/${id}?preview=${token}`
     );
