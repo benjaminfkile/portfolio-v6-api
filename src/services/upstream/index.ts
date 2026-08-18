@@ -38,12 +38,32 @@ import {
   DEFAULT_REALTIME_SERVICE_NAME,
   type RealtimePublisherConfig,
 } from "./realtimePublisher";
+import {
+  createSpotifyLane,
+  DEFAULT_SPOTIFY_IDLE_INTERVAL_MS,
+  SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
+  SPOTIFY_AUTH_RESUME_CHECK_MS,
+  SPOTIFY_PRESENCE_CACHE_MS,
+  type SpotifyLane,
+} from "./spotifyLane";
+import { fetchPresenceCount } from "./presenceQuery";
+import {
+  readNowPlayingLastRequest,
+  readSpotifySuspension,
+  writeSpotifySuspension,
+  deleteSpotifySuspension,
+} from "./snapshotStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
 import {
   getNowPlaying,
   isSpotifyRateLimited,
+  isSpotifyAuthSuspended,
+  resumeSpotifyAuth,
+  suspendSpotifyAuth,
+  getSpotifyBackoffUntilMs,
+  applySpotifyBackoffUntil,
   type SpotifyConfig,
 } from "../spotifyService";
 import { getStatus } from "../statusService";
@@ -58,9 +78,13 @@ import {
 } from "../githubService";
 import {
   getStoredServiceToken,
+  getServiceTokenUpdatedAt,
   resolveEncryptionKey,
 } from "../serviceTokenStore";
-import { getStoredSpotifyToken } from "../spotifyTokenStore";
+import {
+  getStoredSpotifyToken,
+  SPOTIFY_SERVICE_KEY,
+} from "../spotifyTokenStore";
 
 /** Handle returned from bootstrap — kept small for shutdown. */
 export interface UpstreamHandle {
@@ -86,11 +110,23 @@ export function envKeyPrefix(secrets: IAppSecrets): string {
 }
 
 /**
+ * Options for `buildFetchers`. `spotifyLane` is opt-in so the existing tests
+ * (which construct fetchers to assert individual behavior) don't accidentally
+ * pick up viewer-aware cadence they don't want.
+ */
+export interface BuildFetchersOptions {
+  spotifyLane?: SpotifyLane;
+}
+
+/**
  * Wire the curated fetchers to the existing service modules. Each fetcher
  * catches every error and returns `null` on failure so the poll loop treats
  * the tick as a skip (no snapshot write, no publish, no crash).
  */
-export function buildFetchers(app: Express): PollFetchers {
+export function buildFetchers(
+  app: Express,
+  options: BuildFetchersOptions = {}
+): PollFetchers {
   const secrets = () => app.get("secrets") as IAppSecrets | undefined;
 
   async function spotifyConfig(): Promise<SpotifyConfig> {
@@ -127,6 +163,11 @@ export function buildFetchers(app: Express): PollFetchers {
       // returning null tells the poll loop to preserve the last-good snapshot
       // and NOT record a failure. Non-Spotify lanes are unaffected.
       if (isSpotifyRateLimited()) return null;
+      // Auth-suspended (task #95): the poll loop's spotifyLane also gates on
+      // this, but a defense-in-depth check here means a direct call to the
+      // fetcher (tests, non-lane paths) also short-circuits without touching
+      // Spotify.
+      if (isSpotifyAuthSuspended()) return null;
       try {
         return await getNowPlaying(await spotifyConfig());
       } catch (err) {
@@ -137,6 +178,7 @@ export function buildFetchers(app: Express): PollFetchers {
         return null;
       }
     },
+    spotifyLane: options.spotifyLane,
     async status() {
       try {
         const s = secrets();
@@ -224,14 +266,64 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 
   const pollIntervalMs =
     secrets.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
+  const spotifyIdleIntervalMs =
+    secrets.spotify_idle_interval_ms ?? DEFAULT_SPOTIFY_IDLE_INTERVAL_MS;
 
-  const loop = startPollLoop(client, lease, buildFetchers(app), {
-    env,
-    pollIntervalMs,
-    slowLaneRefreshMs: SLOW_LANE_REFRESH_MS,
-    heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
-    publisher,
-  });
+  // Viewer-aware + auth-aware Spotify lane (task #95 + shared-suspension #96).
+  // Everything the lane needs from the outside world is injected here so the
+  // lane module has no dependency on Express / Redis / DB — the tests can
+  // build a pure fake.
+  const spotifyLane = createSpotifyLane(
+    {
+      isAuthSuspended: () => isSpotifyAuthSuspended(),
+      getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
+      applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
+      applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
+      resumeAuth: () => resumeSpotifyAuth(),
+      async getStoredTokenUpdatedAt() {
+        return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);
+      },
+      async getPresenceCount() {
+        return fetchPresenceCount({
+          gatewayInternalUrl: publisher.gatewayInternalUrl,
+          realtimeToken: publisher.realtimeToken,
+          serviceName: publisher.serviceName ?? DEFAULT_REALTIME_SERVICE_NAME,
+          topic: "now-playing",
+        });
+      },
+      async getLastPublicRequestAt() {
+        return readNowPlayingLastRequest(client, env);
+      },
+      async readSharedSuspension() {
+        return readSpotifySuspension(client, env);
+      },
+      async writeSharedSuspension(record) {
+        return writeSpotifySuspension(client, env, record);
+      },
+      async clearSharedSuspension() {
+        return deleteSpotifySuspension(client, env);
+      },
+    },
+    {
+      publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
+      presenceCacheMs: SPOTIFY_PRESENCE_CACHE_MS,
+      authResumeCheckMs: SPOTIFY_AUTH_RESUME_CHECK_MS,
+      idleIntervalMs: spotifyIdleIntervalMs,
+    }
+  );
+
+  const loop = startPollLoop(
+    client,
+    lease,
+    buildFetchers(app, { spotifyLane }),
+    {
+      env,
+      pollIntervalMs,
+      slowLaneRefreshMs: SLOW_LANE_REFRESH_MS,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      publisher,
+    }
+  );
 
   // First-boot acquisition attempt, then the renewal loop takes over. We DO NOT
   // await this — the poll loop is inert until the lease flips leader anyway.
@@ -268,5 +360,14 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 }
 
 // Convenience re-exports for the routers/tests.
-export { readSnapshot, snapshotKey } from "./snapshotStore";
+export {
+  readSnapshot,
+  readSnapshotRaw,
+  snapshotKey,
+  readSpotifySuspension,
+  writeSpotifySuspension,
+  deleteSpotifySuspension,
+  spotifySuspensionKey,
+  type SpotifySuspensionRecord,
+} from "./snapshotStore";
 export { readLocalSnapshot } from "./pollLoop";

@@ -31,6 +31,45 @@ import {
   publish,
   RealtimePublisherConfig,
 } from "./realtimePublisher";
+import {
+  DEFAULT_SPOTIFY_IDLE_INTERVAL_MS,
+  type SpotifyLane,
+} from "./spotifyLane";
+
+/**
+ * Degraded now-playing payload written when the Spotify lane skips (429
+ * backoff, auth-suspended, or idle-cadence). Task #96 invariant: the shared
+ * snapshot key must ALWAYS exist and be fresh so no instance ever falls
+ * through to the direct-Spotify HTTP fallback. `last_played` is preserved
+ * from the previous local snapshot when it was known — a still-playing track
+ * from before the skip becomes the last-played anchor, and a previous
+ * idle-with-last-played payload keeps its context.
+ */
+type NowPlayingLike =
+  | { playing: false; last_played?: unknown }
+  | { playing: true; track: unknown };
+type StatusLike = { degraded: boolean; services: unknown[] };
+
+function degradedNowPlaying(
+  previous: NowPlayingLike | null,
+  nowIso: string
+): NowPlayingLike {
+  if (previous && previous.playing === false && previous.last_played) {
+    return { playing: false, last_played: previous.last_played };
+  }
+  if (previous && previous.playing === true && previous.track) {
+    // Convert the previously-playing track into a last_played anchor so the
+    // UI has continuity ("we were playing this until the poll paused"),
+    // rather than jumping to a bare-idle payload with no context.
+    return {
+      playing: false,
+      last_played: { track: previous.track, played_at: nowIso },
+    };
+  }
+  return { playing: false };
+}
+
+const DEGRADED_STATUS: StatusLike = { degraded: true, services: [] };
 
 /** Base cadence defaults — used when POLL_INTERVAL_MS is unset. */
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
@@ -58,12 +97,19 @@ export type Fetcher<T> = () => Promise<T | null>;
  * The set of curated fetchers the loop drives. Kept generic so tests inject
  * fakes; the real bindings are assembled in the bootstrap module (`index.ts`
  * next to this file) so this module stays free of app-specific imports.
+ *
+ * `spotifyLane` is optional: when present (task #95) it decides on each tick
+ * whether the Spotify lane fetches (viewer-aware cadence + auth suspension);
+ * when absent the loop polls `nowPlaying` every tick as it did before. The
+ * status/duolingo/github lanes are UNAFFECTED by the Spotify lane in either
+ * case.
  */
 export interface PollFetchers {
   nowPlaying: Fetcher<unknown>;
   status: Fetcher<unknown>;
   duolingo: Fetcher<unknown>;
   github: Fetcher<unknown>;
+  spotifyLane?: SpotifyLane;
 }
 
 /** Runtime knobs. Every field is required so the loop has no implicit config. */
@@ -82,6 +128,9 @@ export interface PollLoopConfig {
   /** Realtime publish config; unset fields disable publishing (no-op). */
   publisher: RealtimePublisherConfig;
 }
+
+// Re-export so bootstrap and tests share one default without a duplicate import.
+export { DEFAULT_SPOTIFY_IDLE_INTERVAL_MS };
 
 /**
  * Handle returned by `startPollLoop`. `stop()` clears every timer and is
@@ -166,23 +215,11 @@ export function startPollLoop(
   let githubDueAt = 0;
   let heartbeatDueAt = 0;
 
-  async function refreshOne<T>(
+  async function writeAndMaybePublish<T>(
     service: SnapshotService,
-    fetcher: Fetcher<T>,
+    payload: T,
     publishTopic?: string
   ): Promise<void> {
-    let payload: T | null = null;
-    try {
-      payload = await fetcher();
-    } catch (err) {
-      console.error(
-        `[pollLoop] fetch failed for ${service}:`,
-        err instanceof Error ? err.message : err
-      );
-      return;
-    }
-    if (payload == null) return;
-
     localSnapshots.set(service, payload);
     await writeSnapshot(client!, config.env, service, payload);
 
@@ -199,14 +236,95 @@ export function startPollLoop(
     }
   }
 
+  /**
+   * Fetch a payload and, if the fetcher returned data, write / publish it.
+   * Returns whether a real payload was written so callers can fall back to a
+   * degraded payload when the fetcher skipped (429 backoff, auth-suspended,
+   * upstream error). Task #96 invariant: EVERY tick writes SOME snapshot for
+   * the fast lanes.
+   */
+  async function refreshOne<T>(
+    service: SnapshotService,
+    fetcher: Fetcher<T>,
+    publishTopic?: string
+  ): Promise<boolean> {
+    let payload: T | null = null;
+    try {
+      payload = await fetcher();
+    } catch (err) {
+      console.error(
+        `[pollLoop] fetch failed for ${service}:`,
+        err instanceof Error ? err.message : err
+      );
+      return false;
+    }
+    if (payload == null) return false;
+
+    await writeAndMaybePublish(service, payload, publishTopic);
+    return true;
+  }
+
   async function runTick(): Promise<void> {
     if (!lease!.isLeader()) return;
 
     const now = Date.now();
+    const nowIso = new Date(now).toISOString();
 
-    // Fast lane — every tick.
-    await refreshOne("now-playing", fetchers.nowPlaying, "now-playing");
-    await refreshOne("status", fetchers.status, "status");
+    // Spotify lane (task #95, #96) — the lane decides suspend vs. active vs.
+    // idle. When no lane is wired we keep the pre-#95 behavior: poll every
+    // tick. Task #96 invariant: EVERY processed tick writes SOME snapshot
+    // for now-playing, so no instance ever finds the shared key missing and
+    // falls through to a direct Spotify fetch.
+    if (fetchers.spotifyLane) {
+      const decision = await fetchers.spotifyLane.planTick(now);
+      let wrote = false;
+      if (decision === "fetch") {
+        wrote = await refreshOne(
+          "now-playing",
+          fetchers.nowPlaying,
+          "now-playing"
+        );
+      }
+      if (!wrote) {
+        // Either the lane skipped (suspended / idle) OR the fetcher itself
+        // short-circuited (rate-limited / auth-suspended / upstream error).
+        // Write a degraded payload — same shape non-leaders will read via
+        // Redis — preserving `last_played` when the last local snapshot
+        // carried one.
+        const prev = readLocalSnapshot<NowPlayingLike>("now-playing");
+        const degraded = degradedNowPlaying(prev, nowIso);
+        await writeAndMaybePublish("now-playing", degraded, "now-playing");
+      }
+      // After the fetch attempt, reconcile local Spotify state to Redis so
+      // all instances see the same suspension record.
+      await fetchers.spotifyLane
+        .reconcileAfterFetch(now)
+        .catch((err) =>
+          console.error(
+            "[pollLoop] Spotify suspension reconcile failed:",
+            err instanceof Error ? err.message : err
+          )
+        );
+    } else {
+      const wrote = await refreshOne(
+        "now-playing",
+        fetchers.nowPlaying,
+        "now-playing"
+      );
+      if (!wrote) {
+        const prev = readLocalSnapshot<NowPlayingLike>("now-playing");
+        const degraded = degradedNowPlaying(prev, nowIso);
+        await writeAndMaybePublish("now-playing", degraded, "now-playing");
+      }
+    }
+
+    // Status stays on the base fast cadence — unaffected by the Spotify lane.
+    // Same always-write invariant: a fetcher failure / null payload writes
+    // the degraded shape so non-leaders never find the key missing.
+    const wroteStatus = await refreshOne("status", fetchers.status, "status");
+    if (!wroteStatus) {
+      await writeAndMaybePublish("status", DEGRADED_STATUS, "status");
+    }
 
     // Slow lane — only when the local deadline elapses.
     if (now >= duolingoDueAt) {
