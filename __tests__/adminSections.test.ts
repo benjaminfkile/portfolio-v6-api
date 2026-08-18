@@ -422,8 +422,11 @@ describe("cascade delete (§3.2)", () => {
 
 describe("Zod validation on writes (§3.9)", () => {
   it("accepts an INCOMPLETE draft (missing required fields) — drafts are lenient (§3.9)", async () => {
-    // hero's canonical schema requires `title`, but draft writes only require
-    // provided fields to be well-typed; completeness is enforced at publish.
+    // Draft writes only require provided fields to be well-typed; completeness
+    // is enforced at publish. Note that as of task #106 no section type
+    // requires a heading/title/eyebrow at all — a hero without a title is now
+    // valid at publish too — so this test exercises draft leniency using the
+    // absence of the tagline/title combo rather than title-as-required.
     const res = await createSection({ type: "hero", data: { tagline: "no title yet" } });
     expect(res.status).toBe(201);
 

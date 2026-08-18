@@ -30,10 +30,18 @@ export type SectionType = (typeof SECTION_TYPES)[number];
 
 // Static content sections -------------------------------------------------
 
-/** §3.8 — retained as a static section: title, tagline, optional background. */
+/**
+ * §3.8 — retained as a static section: title, tagline, optional background.
+ *
+ * Product rule (task #106): NO section requires a heading. `title` here is the
+ * hero's header-copy field, so it is `.optional()` — a hero with no title is a
+ * valid section and simply renders without one. `min(1)` is retained so a
+ * PRESENT-but-empty string is still rejected; absent is how the field is
+ * omitted (the draft path strips `""` before validation for the same reason).
+ */
 export const heroData = z
   .object({
-    title: z.string().min(1),
+    title: z.string().min(1).optional(),
     tagline: z.string().optional(),
     background_media_id: z.string().uuid().optional(),
   })

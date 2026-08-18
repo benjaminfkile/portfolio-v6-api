@@ -442,9 +442,14 @@ describe("publish media-ref collection — timeline items", () => {
 describe("publish validation refusal (§3.9)", () => {
   it("refuses to publish when any section in the working set is invalid (400)", async () => {
     // Create a valid hero, then corrupt its data directly in the DB so the row
-    // is invalid at publish time (the write path would have rejected it).
+    // is invalid at publish time (the write path would have rejected it). Task
+    // #106 made heading/title/eyebrow optional on every section type, so a
+    // missing title is NOT a validity failure any more — we corrupt with a
+    // wrong-typed field (title as a number, which the canonical strict schema
+    // still rejects on the retained `.min(1)` string constraint) to keep this
+    // testing publish-time content validation rather than the header rule.
     const hero = (await createSection({ type: "hero", data: { title: "ok" } })).body.data;
-    await getDb()("sections").where({ id: hero.id }).update({ data: { tagline: "no title" } });
+    await getDb()("sections").where({ id: hero.id }).update({ data: { title: 123 } });
 
     const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
     expect(pub.status).toBe(400);
@@ -455,6 +460,41 @@ describe("publish validation refusal (§3.9)", () => {
     expect(content.body.version).toBe(0);
     const count = await getDb()("page_versions").count<{ count: string }[]>("* as count");
     expect(Number(count[0].count)).toBe(0);
+  });
+
+  it("publishes a hero with no title AND an about with no heading — NO section requires a heading (task #106)", async () => {
+    // Product rule: NOTHING should require a heading. A hero with no title and
+    // an about with no heading are both valid content and must publish through
+    // to the served document, where they simply render without a header. The
+    // web app stops substituting fallback copy like "About" in parallel; this
+    // is the API side of that guarantee (§3.9 publish path).
+    const heroNoTitle = (
+      await createSection({ type: "hero", data: { tagline: "just a tagline" } })
+    ).body.data;
+    const aboutNoHeading = (
+      await createSection({ type: "about", data: { body: "some prose" } })
+    ).body.data;
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+    expect(pub.body.data.version).toBe(1);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      id: string;
+      type: string;
+      data: Record<string, unknown>;
+    }>;
+    const hero = sections.find((s) => s.id === heroNoTitle.id);
+    const about = sections.find((s) => s.id === aboutNoHeading.id);
+    expect(hero).toBeDefined();
+    expect(about).toBeDefined();
+    // The header-copy keys are ABSENT (not defaulted to a string) — round-trips
+    // as absent through the whole publish → snapshot → read pipeline.
+    expect(hero!.data).not.toHaveProperty("title");
+    expect(hero!.data.tagline).toBe("just a tagline");
+    expect(about!.data).not.toHaveProperty("heading");
+    expect(about!.data.body).toBe("some prose");
   });
 });
 
