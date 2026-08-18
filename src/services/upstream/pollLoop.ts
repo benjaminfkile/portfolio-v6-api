@@ -295,16 +295,20 @@ export function startPollLoop(
         const degraded = degradedNowPlaying(prev, nowIso);
         await writeAndMaybePublish("now-playing", degraded, "now-playing");
       }
-      // After the fetch attempt, reconcile local Spotify state to Redis so
-      // all instances see the same suspension record.
-      await fetchers.spotifyLane
-        .reconcileAfterFetch(now)
-        .catch((err) =>
-          console.error(
-            "[pollLoop] Spotify suspension reconcile failed:",
-            err instanceof Error ? err.message : err
-          )
-        );
+      // Task #97: reconcile ONLY after an actual fetch attempt. On skip
+      // ticks the shared record is the source of truth and MUST NOT be
+      // re-written from local memory — otherwise an operator DEL race would
+      // resurrect the deleted deadline from the leader's mirror.
+      if (decision === "fetch") {
+        await fetchers.spotifyLane
+          .reconcileAfterFetch(now)
+          .catch((err) =>
+            console.error(
+              "[pollLoop] Spotify suspension reconcile failed:",
+              err instanceof Error ? err.message : err
+            )
+          );
+      }
     } else {
       const wrote = await refreshOne(
         "now-playing",

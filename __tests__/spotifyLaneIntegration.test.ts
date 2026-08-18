@@ -37,6 +37,7 @@ import {
   resumeSpotifyAuth,
   getSpotifyBackoffUntilMs,
   applySpotifyBackoffUntil,
+  clearSpotifyBackoff,
   SPOTIFY_NOW_PLAYING_URL,
   SPOTIFY_RECENTLY_PLAYED_URL,
   SPOTIFY_TOKEN_URL,
@@ -137,6 +138,7 @@ function buildFetchersWithLane(
       getBackoffUntilMs: getSpotifyBackoffUntilMs,
       applyAuthSuspension: (reason: string) => suspendSpotifyAuth(reason),
       applyBackoffUntil: applySpotifyBackoffUntil,
+      clearBackoff: clearSpotifyBackoff,
       resumeAuth: laneDeps.resumeAuth ?? resumeSpotifyAuth,
       getStoredTokenUpdatedAt:
         laneDeps.getStoredTokenUpdatedAt ?? (async () => null),
