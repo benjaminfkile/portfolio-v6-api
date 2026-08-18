@@ -1,4 +1,5 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
+import { getDb } from "../db/db";
 
 /**
  * Preview tokens — TECH_SPEC_V1.md §7.
@@ -9,16 +10,22 @@ import { randomBytes } from "crypto";
  * token instead. This token grants read-only access to draft content and nothing
  * else, so it is safe to place in a URL (`?preview=<token>`).
  *
- * The store is intentionally in-memory: tokens live 15 minutes and are cheap to
- * re-mint, so surviving a container restart is not worth a DB round-trip. A
- * container has a single admin class and low request volume, so a Map is ample.
+ * The store is a shared Postgres table (`preview_tokens`) because the API runs
+ * as multiple instances behind a load balancer: a preview iframe's fetches
+ * round-robin across nodes, so the mint on one instance must be validatable on
+ * any other. Same shared-record-is-authoritative philosophy as the Spotify
+ * suspension work (task #97). Only the sha256 hash of each token is persisted;
+ * the raw token is returned to the caller once and never lives in the database.
  */
 
 /** Token lifetime: 15 minutes (§7). */
 export const PREVIEW_TOKEN_TTL_MS = 15 * 60 * 1000;
 
-// token -> absolute expiry (epoch ms).
-const store = new Map<string, number>();
+const PREVIEW_TOKENS_TABLE = "preview_tokens";
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 export interface MintedPreviewToken {
   token: string;
@@ -29,14 +36,23 @@ export interface MintedPreviewToken {
 }
 
 /**
- * Mint a cryptographically random opaque token with a 15-minute expiry and hold
- * it in the in-memory store. 32 random bytes (256 bits) hex-encoded — not a JWT,
- * carries no claims, and is only ever a lookup key into this store.
+ * Mint a cryptographically random opaque token with a 15-minute expiry, storing
+ * only its sha256 hash in the shared `preview_tokens` table so any instance can
+ * validate it. 32 random bytes (256 bits) hex-encoded — not a JWT, carries no
+ * claims, and is only ever a lookup key. Expired rows are dropped
+ * opportunistically here so the table self-cleans as tokens are minted.
  */
-export function mintPreviewToken(now: number = Date.now()): MintedPreviewToken {
+export async function mintPreviewToken(
+  now: number = Date.now()
+): Promise<MintedPreviewToken> {
   const token = randomBytes(32).toString("hex");
   const expiry = now + PREVIEW_TOKEN_TTL_MS;
-  store.set(token, expiry);
+  const db = getDb();
+  await db(PREVIEW_TOKENS_TABLE).where("expires_at", "<=", new Date(now)).del();
+  await db(PREVIEW_TOKENS_TABLE).insert({
+    token_hash: hashToken(token),
+    expires_at: new Date(expiry),
+  });
   return {
     token,
     expiresAt: new Date(expiry).toISOString(),
@@ -45,30 +61,35 @@ export function mintPreviewToken(now: number = Date.now()): MintedPreviewToken {
 }
 
 /**
- * True iff the token is known and not expired. An expired token is evicted on
- * access so the store self-cleans as tokens are checked. Unknown and expired
- * tokens are indistinguishable to the caller (both false) — callers return 401
- * for either (§7).
+ * True iff the presented token hashes to a stored, unexpired row. An expired
+ * row hit during lookup is deleted so the table self-cleans on validation too.
+ * Unknown and expired tokens are indistinguishable to the caller (both false) —
+ * callers return 401 for either (§7).
  */
-export function isValidPreviewToken(
+export async function isValidPreviewToken(
   token: string | undefined | null,
   now: number = Date.now()
-): boolean {
+): Promise<boolean> {
   if (!token) {
     return false;
   }
-  const expiry = store.get(token);
-  if (expiry === undefined) {
+  const db = getDb();
+  const tokenHash = hashToken(token);
+  const row = (await db(PREVIEW_TOKENS_TABLE)
+    .where({ token_hash: tokenHash })
+    .select("expires_at")
+    .first()) as { expires_at: Date } | undefined;
+  if (!row) {
     return false;
   }
-  if (expiry <= now) {
-    store.delete(token);
+  if (new Date(row.expires_at).getTime() <= now) {
+    await db(PREVIEW_TOKENS_TABLE).where({ token_hash: tokenHash }).del();
     return false;
   }
   return true;
 }
 
 /** Drop every token. Test-only helper so suites start from a clean store. */
-export function clearPreviewTokens(): void {
-  store.clear();
+export async function clearPreviewTokens(): Promise<void> {
+  await getDb()(PREVIEW_TOKENS_TABLE).del();
 }

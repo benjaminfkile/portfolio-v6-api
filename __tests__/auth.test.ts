@@ -1,3 +1,7 @@
+import { execFileSync } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import express, { Express, NextFunction, Request, Response } from "express";
 import request from "supertest";
 
@@ -9,6 +13,7 @@ jest.mock("../src/aws/cognitoAuth", () => ({
 }));
 
 import { verifyAdminIdToken } from "../src/aws/cognitoAuth";
+import { initDb, closeDb } from "../src/db/db";
 import {
   requireAdmin,
   requireAdminOrPreviewToken,
@@ -27,6 +32,61 @@ const TEST_SECRETS = {
   cognito_user_pool_id: "us-east-1_testpool",
   cognito_client_id: "test-client-id",
 };
+
+const PG_BIN = "/usr/lib/postgresql/15/bin";
+const PG_PORT = "55443"; // distinct from other tasks' throwaway clusters
+const PG_SOCKET_DIR = "/tmp";
+const PG_USER = "node";
+const TEST_DB = "portfolio_v6_auth_test";
+const DATA_DIR = path.join(os.tmpdir(), "pgtest_task105_auth");
+
+function pgBin(name: string): string {
+  return path.join(PG_BIN, name);
+}
+
+function startCluster(): void {
+  if (fs.existsSync(DATA_DIR)) {
+    try {
+      execFileSync(pgBin("pg_ctl"), ["-D", DATA_DIR, "stop", "-m", "immediate"], {
+        stdio: "ignore",
+      });
+    } catch {
+      /* not running */
+    }
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  }
+  execFileSync(pgBin("initdb"), ["-D", DATA_DIR, "-U", PG_USER], {
+    stdio: "ignore",
+  });
+  execFileSync(
+    pgBin("pg_ctl"),
+    [
+      "-D",
+      DATA_DIR,
+      "-o",
+      `-k ${PG_SOCKET_DIR} -p ${PG_PORT} -c listen_addresses=''`,
+      "-w",
+      "start",
+    ],
+    { stdio: "ignore" }
+  );
+  execFileSync(
+    pgBin("createdb"),
+    ["-h", PG_SOCKET_DIR, "-p", PG_PORT, "-U", PG_USER, TEST_DB],
+    { stdio: "ignore" }
+  );
+}
+
+function stopCluster(): void {
+  try {
+    execFileSync(pgBin("pg_ctl"), ["-D", DATA_DIR, "stop", "-m", "immediate"], {
+      stdio: "ignore",
+    });
+  } catch {
+    /* already stopped */
+  }
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+}
 
 function buildTestApp(): Express {
   const app = express();
@@ -65,9 +125,29 @@ function buildTestApp(): Express {
 
 const ADMIN_PAYLOAD = { sub: "admin-sub-123", "cognito:groups": ["admins"] };
 
-beforeEach(() => {
+beforeAll(async () => {
+  startCluster();
+  await initDb(
+    {
+      host: PG_SOCKET_DIR,
+      port: parseInt(PG_PORT, 10),
+      user: PG_USER,
+      password: "",
+      database: TEST_DB,
+      ssl: false,
+    },
+    { runMigrations: true }
+  );
+}, 60000);
+
+afterAll(async () => {
+  await closeDb();
+  stopCluster();
+}, 30000);
+
+beforeEach(async () => {
   mockVerify.mockReset();
-  clearPreviewTokens();
+  await clearPreviewTokens();
 });
 
 describe("requireAdmin() — §5.3", () => {
@@ -293,23 +373,29 @@ describe("requireAdminOrPreviewToken() — §4.2 / §7", () => {
 });
 
 describe("previewTokenService — expiry unit checks (§7)", () => {
-  it("mints a 256-bit hex token valid for 15 minutes and self-evicts on expiry", () => {
+  it("mints a 256-bit hex token valid for 15 minutes and self-evicts on expiry", async () => {
     const t0 = 1_000_000_000_000;
-    const { token, expiresInMs } = mintPreviewToken(t0);
+    const { token, expiresInMs } = await mintPreviewToken(t0);
 
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(expiresInMs).toBe(PREVIEW_TOKEN_TTL_MS);
 
-    expect(isValidPreviewToken(token, t0)).toBe(true);
-    expect(isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS - 1)).toBe(true);
+    await expect(isValidPreviewToken(token, t0)).resolves.toBe(true);
+    await expect(
+      isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS - 1)
+    ).resolves.toBe(true);
     // Exactly at expiry is no longer valid (expiry <= now).
-    expect(isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS)).toBe(false);
-    expect(isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS + 1)).toBe(false);
+    await expect(
+      isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS)
+    ).resolves.toBe(false);
+    await expect(
+      isValidPreviewToken(token, t0 + PREVIEW_TOKEN_TTL_MS + 1)
+    ).resolves.toBe(false);
   });
 
-  it("treats unknown and empty tokens as invalid", () => {
-    expect(isValidPreviewToken(undefined)).toBe(false);
-    expect(isValidPreviewToken("")).toBe(false);
-    expect(isValidPreviewToken("nope")).toBe(false);
+  it("treats unknown and empty tokens as invalid", async () => {
+    await expect(isValidPreviewToken(undefined)).resolves.toBe(false);
+    await expect(isValidPreviewToken("")).resolves.toBe(false);
+    await expect(isValidPreviewToken("nope")).resolves.toBe(false);
   });
 });
