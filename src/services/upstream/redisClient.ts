@@ -45,6 +45,12 @@ export interface RedisClient {
     value: string,
     pxMs: number
   ): Promise<number>;
+  /**
+   * Unconditional DEL. Returns the number of keys removed (0 or 1). Used by the
+   * shared-Spotify-suspension path so a leader that transitions out of a
+   * suspension can positively clear the record (rather than waiting for TTL).
+   */
+  del(key: string): Promise<number>;
   /** Close any underlying connections. Safe to call on a client already shut. */
   quit(): Promise<void>;
 }
@@ -86,6 +92,7 @@ function buildIoredisClient(url: string): RedisClient {
       v: string,
       ...args: unknown[]
     ) => Promise<string | null>;
+    del: (k: string) => Promise<number>;
     eval: (
       script: string,
       numKeys: number,
@@ -137,6 +144,10 @@ function buildIoredisClient(url: string): RedisClient {
         value,
         String(pxMs)
       );
+      return typeof res === "number" ? res : Number(res) || 0;
+    },
+    async del(key) {
+      const res = await client.del(key);
       return typeof res === "number" ? res : Number(res) || 0;
     },
     async quit() {

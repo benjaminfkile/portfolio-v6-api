@@ -1,21 +1,37 @@
 /**
- * Viewer-aware + auth-aware Spotify lane for the leader poll loop (task #95).
+ * Viewer-aware + auth-aware Spotify lane for the leader poll loop.
  *
- * Two behaviors, orthogonal to the base tick + the 429 backoff (task #90):
+ * Task #95 introduced this lane. Task #96 promoted the suspension state from
+ * per-process memory to a shared Redis record so ALL instances see the same
+ * "Spotify is currently suspended" fact and a newly-elected / restarted leader
+ * never re-trips Spotify to rediscover a known suspension.
  *
- * 1) AUTH SUSPENSION — when the token refresh returns invalid_grant, or the
- *    service has no stored Spotify credentials, `spotifyService` sets an
- *    in-process suspension flag and stops making Spotify calls. The lane keeps
- *    the leader from re-invoking the fetcher (and, transitively, the token
- *    endpoint) at all until the stored `service_tokens.updated_at` changes.
- *    Resume is polled locally at most once per `SPOTIFY_AUTH_RESUME_CHECK_MS`
- *    (default 60s) — a cheap DB read, never a Spotify call. On change the
- *    lane clears the suspension AND polls immediately so the first viewer
- *    after reconnect gets fresh data within a tick.
+ * Behaviors, orthogonal to the base tick + 429 backoff (task #90):
  *
- * 2) VIEWER-AWARE CADENCE — a portfolio has near-zero viewers most of the day,
- *    so polling Spotify every 5s around the clock is almost pure waste. The
- *    lane considers the site "active" if either:
+ * 1) SHARED SUSPENSION — before any local logic, the lane reads the
+ *    `now-playing:suspension` Redis record. Any leader observing an active
+ *    record (its `suspended_until` in the future) mirrors it into local state
+ *    (so the HTTP request-path fallback also honors it under a Redis outage)
+ *    and skips the tick. Deleting the key is the operator override; the lane
+ *    then clears local state and attempts the next fetch. All suspension
+ *    entries carry their deadline so recovery is automatic even when nobody
+ *    intervenes.
+ *
+ * 2) AUTH SUSPENSION — when the token refresh returns invalid_grant (or the
+ *    service has no stored Spotify credentials), `spotifyService` sets its own
+ *    in-process suspension flag and the leader's reconciler writes an "auth"
+ *    entry into the shared record. Resume detection is unchanged: the lane
+ *    reads `service_tokens.updated_at` at most once per
+ *    `authResumeCheckMs` (default 60s) — a cheap DB read, never a Spotify
+ *    call. On a change the lane clears the shared record, resumes locally,
+ *    AND forces an immediate poll so the first viewer after reconnect gets
+ *    fresh data within a tick. The `captured_token_updated_at` field lives in
+ *    the shared record so a fresh leader compares its DB read against the
+ *    value at trip-time, not against its own first observation.
+ *
+ * 3) VIEWER-AWARE CADENCE — a portfolio has near-zero viewers most of the
+ *    day, so polling Spotify every 5s around the clock is almost pure waste.
+ *    The lane considers the site "active" if either:
  *      - the gateway presence owner API reports count > 0 on the
  *        `{service}:now-playing` channel (cached ≤ 30s; presence-API failure
  *        is treated as ACTIVE — a gateway hiccup must never disable the
@@ -28,10 +44,13 @@
  *    idle → active transition the lane forces an immediate poll so a new
  *    viewer never sees stale data waiting for the idle deadline to elapse.
  *
- * Everything OTHER than the Spotify lane (status/duolingo/github) is unchanged
- * — the lane returns a single decision (`fetch` / `skip`) for the now-playing
- * fetcher only, and the poll loop routes the other lanes on their own cadence.
+ * Everything OTHER than the Spotify lane (status/duolingo/github) is
+ * unchanged — the lane returns a single decision (`fetch` / `skip`) for the
+ * now-playing fetcher only, and the poll loop routes the other lanes on
+ * their own cadence.
  */
+
+import type { SpotifySuspensionRecord } from "./snapshotStore";
 
 /** How often the lane rechecks `service_tokens.updated_at` while suspended. */
 export const SPOTIFY_AUTH_RESUME_CHECK_MS = 60 * 1000;
@@ -50,6 +69,16 @@ export const SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS = 5 * 60 * 1000;
 export const DEFAULT_SPOTIFY_IDLE_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
+ * Deadline placeholder for auth suspensions. Auth doesn't have a natural
+ * time-based deadline — recovery is either the admin-reconnect updated_at
+ * check or the operator deleting the key. We still stamp a far-future
+ * deadline so the record has a well-defined TTL and the "all suspensions
+ * carry a deadline" invariant holds; the leader rewrites the record each
+ * tick to keep it fresh.
+ */
+export const SPOTIFY_AUTH_SUSPENSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Dependencies the lane needs from the outside world. Every one is optional
  * (falsy is treated as "signal absent"), so a test can inject only what it
  * cares about and the production wiring never has to build stubs for the rest.
@@ -59,6 +88,23 @@ export interface SpotifyLaneDeps {
    * Is Spotify currently auth-suspended in-process? (spotifyService.isSpotifyAuthSuspended)
    */
   isAuthSuspended(): boolean;
+  /**
+   * The wall-clock (ms since epoch) the current in-process 429 backoff clears
+   * at, or 0 if not in backoff. (spotifyService.getSpotifyBackoffUntilMs)
+   */
+  getBackoffUntilMs(): number;
+  /**
+   * Mirror an inherited auth suspension into the process (no-op if already
+   * suspended). Called on a fresh leader that observes an "auth" record in
+   * the shared store. (spotifyService.suspendSpotifyAuth)
+   */
+  applyAuthSuspension(reason: string): void;
+  /**
+   * Mirror an inherited 429 backoff into the process without incrementing
+   * the exponential streak. Called on a fresh leader that observes a "429"
+   * record in the shared store. (spotifyService.applySpotifyBackoffUntil)
+   */
+  applyBackoffUntil(untilMs: number): void;
   /**
    * Cheap DB read for the current `service_tokens.updated_at` value for
    * spotify. Called at most once per `SPOTIFY_AUTH_RESUME_CHECK_MS`; return
@@ -82,6 +128,16 @@ export interface SpotifyLaneDeps {
    * recent activity" — the presence check is what keeps the feature alive).
    */
   getLastPublicRequestAt(): Promise<Date | null>;
+  /**
+   * Read the shared Spotify suspension record from Redis. `null` when the key
+   * is absent or Redis errored (treated as "no suspension" — the whole point
+   * is fail open, and the local backoff still gates the fetcher).
+   */
+  readSharedSuspension(): Promise<SpotifySuspensionRecord | null>;
+  /** Persist / overwrite the shared Spotify suspension record. */
+  writeSharedSuspension(record: SpotifySuspensionRecord): Promise<void>;
+  /** Delete the shared Spotify suspension record (natural recovery / override). */
+  clearSharedSuspension(): Promise<void>;
 }
 
 /** Runtime knobs — kept small so tests can override any subset. */
@@ -110,6 +166,12 @@ export interface SpotifyLane {
   planTick(now: number): Promise<SpotifyLaneDecision>;
   /** True iff the site is currently considered active. Exposed for tests. */
   isActive(now: number): Promise<boolean>;
+  /**
+   * Reconcile the local suspension state (spotifyService's in-process flags)
+   * with the shared Redis record AFTER a fetch attempt. Called by the poll
+   * loop with `now = Date.now()`; a no-op when the local state matches Redis.
+   */
+  reconcileAfterFetch(now: number): Promise<void>;
 }
 
 /**
@@ -125,8 +187,11 @@ export function createSpotifyLane(
   let cachedPresence: { active: boolean; expiresAt: number } | null = null;
 
   // Resume detection state — the snapshot of `updated_at` at the moment we
-  // FIRST observed suspension, plus a throttle on the DB read itself.
-  let suspendedSnapshot: Date | null | undefined = undefined; // undefined = "not yet captured"
+  // FIRST observed suspension, plus a throttle on the DB read itself. When
+  // the shared record carries `captured_token_updated_at`, it becomes the
+  // canonical snapshot on first observation — that lets a fresh leader
+  // detect an admin reconnect that happened before it took over.
+  let suspendedSnapshot: Date | null | undefined = undefined;
   let lastResumeCheckAt = 0;
 
   // Cadence state: when the next Spotify poll is due (0 = fetch this tick),
@@ -165,46 +230,94 @@ export function createSpotifyLane(
     return active;
   }
 
+  function suspensionActive(
+    record: SpotifySuspensionRecord | null,
+    now: number
+  ): boolean {
+    if (!record) return false;
+    const deadline = Date.parse(record.suspended_until);
+    return Number.isFinite(deadline) && deadline > now;
+  }
+
   async function planTick(now: number): Promise<SpotifyLaneDecision> {
-    if (deps.isAuthSuspended()) {
-      // Only recheck the stored token at most once per `authResumeCheckMs`.
-      // Failed-auth traffic still costs against Spotify's daily quota under
-      // one client id, so we must NOT let the resume-check timer become a
-      // spinner that hammers anything.
-      if (suspendedSnapshot === undefined) {
-        // First tick we observe suspension — take the reference snapshot and
-        // arm the throttle so the next real recheck happens after the delay.
-        suspendedSnapshot = await deps.getStoredTokenUpdatedAt();
+    // 1) SHARED SUSPENSION — Redis is the source of truth for whether the
+    //    leader should fetch. This subsumes both 429 and auth suspensions and
+    //    guarantees that a freshly-elected leader honors a known suspension
+    //    without ever calling Spotify.
+    const shared = await deps.readSharedSuspension();
+    const sharedActive = suspensionActive(shared, now);
+
+    if (sharedActive && shared) {
+      // Mirror the record into local state so the HTTP request-path fallback
+      // (Redis outage) also honors it. Idempotent — the underlying setters
+      // no-op when already suspended / when the deadline is already covered.
+      if (shared.reason === "auth" && !deps.isAuthSuspended()) {
+        deps.applyAuthSuspension(shared.detail ?? "shared suspension");
+      }
+      if (shared.reason === "429") {
+        const untilMs = Date.parse(shared.suspended_until);
+        if (Number.isFinite(untilMs)) {
+          deps.applyBackoffUntil(untilMs);
+        }
+      }
+
+      // Auth suspensions get the resume-check treatment — the admin's
+      // reconnect is what shortens the window. `captured_token_updated_at`
+      // in the shared record is the canonical trip-time snapshot, so a fresh
+      // leader that missed the trip can still detect a reconnect.
+      if (shared.reason === "auth") {
+        if (suspendedSnapshot === undefined) {
+          if (shared.captured_token_updated_at !== undefined) {
+            suspendedSnapshot = shared.captured_token_updated_at
+              ? new Date(shared.captured_token_updated_at)
+              : null;
+          } else {
+            suspendedSnapshot = await deps.getStoredTokenUpdatedAt();
+          }
+          lastResumeCheckAt = now;
+          return "skip-suspended";
+        }
+        if (now - lastResumeCheckAt < config.authResumeCheckMs) {
+          return "skip-suspended";
+        }
         lastResumeCheckAt = now;
-        return "skip-suspended";
+        const current = await deps.getStoredTokenUpdatedAt();
+        const changed =
+          (current === null) !== (suspendedSnapshot === null) ||
+          (current !== null &&
+            suspendedSnapshot !== null &&
+            current.getTime() !== suspendedSnapshot.getTime());
+        if (!changed) {
+          return "skip-suspended";
+        }
+        // Row updated — the admin reconnected. Clear shared + local state
+        // AND force an immediate poll so the first viewer after reconnect
+        // gets fresh data within one tick, not one idle interval.
+        deps.resumeAuth();
+        await deps.clearSharedSuspension();
+        suspendedSnapshot = undefined;
+        wasActive = false;
+        nextDueAt = 0;
+        return "fetch";
       }
-      if (now - lastResumeCheckAt < config.authResumeCheckMs) {
-        return "skip-suspended";
-      }
-      lastResumeCheckAt = now;
-      const current = await deps.getStoredTokenUpdatedAt();
-      const changed =
-        (current === null) !== (suspendedSnapshot === null) ||
-        (current !== null &&
-          suspendedSnapshot !== null &&
-          current.getTime() !== suspendedSnapshot.getTime());
-      if (!changed) {
-        return "skip-suspended";
-      }
-      // Row updated — the admin reconnected (or replaced the token). Clear the
-      // suspension AND poll immediately so the first viewer after reconnect
-      // gets fresh data within one tick, not one idle interval.
-      deps.resumeAuth();
-      suspendedSnapshot = undefined;
-      wasActive = false;
-      nextDueAt = 0;
-      return "fetch";
+
+      // Non-auth (429 backoff): just wait for the deadline to elapse.
+      return "skip-suspended";
     }
 
-    // Not suspended — clear the resume snapshot so a fresh suspension later
-    // captures a new reference.
+    // 2) Not suspended per Redis. If local state was suspended, reconcile.
+    //    This covers BOTH the natural-expiry case (Redis TTL dropped the key)
+    //    and the operator-override case (someone ran DEL on the key).
+    if (deps.isAuthSuspended()) {
+      deps.resumeAuth();
+      wasActive = false;
+      nextDueAt = 0;
+    }
+    // Drop the resume snapshot so a NEW suspension later captures a fresh
+    // reference.
     suspendedSnapshot = undefined;
 
+    // 3) Viewer-aware cadence.
     const active = await checkActive(now);
     const idleToActive = active && !wasActive;
     wasActive = active;
@@ -229,8 +342,49 @@ export function createSpotifyLane(
     return "skip-idle";
   }
 
+  async function reconcileAfterFetch(now: number): Promise<void> {
+    // After the fetcher runs, mirror the resulting local state to Redis so
+    // every instance sees the same suspension fact on the next tick.
+    const localAuth = deps.isAuthSuspended();
+    const backoffUntil = deps.getBackoffUntilMs();
+    const localBackoff = backoffUntil > now;
+
+    if (localAuth) {
+      const capturedAt = await deps.getStoredTokenUpdatedAt().catch(() => null);
+      await deps.writeSharedSuspension({
+        suspended_until: new Date(
+          now + SPOTIFY_AUTH_SUSPENSION_TTL_MS
+        ).toISOString(),
+        reason: "auth",
+        detail: "invalid_grant on token refresh",
+        captured_token_updated_at: capturedAt
+          ? capturedAt.toISOString()
+          : null,
+      });
+      return;
+    }
+
+    if (localBackoff) {
+      await deps.writeSharedSuspension({
+        suspended_until: new Date(backoffUntil).toISOString(),
+        reason: "429",
+        detail: "Spotify 429 backoff",
+      });
+      return;
+    }
+
+    // Neither local flag is set — the fetcher either succeeded or was
+    // short-circuited by an already-cleared state. Ensure Redis matches:
+    // if a stale suspension record still lingers, drop it.
+    const shared = await deps.readSharedSuspension();
+    if (shared) {
+      await deps.clearSharedSuspension();
+    }
+  }
+
   return {
     planTick,
     isActive: checkActive,
+    reconcileAfterFetch,
   };
 }

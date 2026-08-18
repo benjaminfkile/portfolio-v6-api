@@ -8,11 +8,13 @@ import {
 import { getStoredSpotifyToken } from "../services/spotifyTokenStore";
 import { resolveEncryptionKey } from "../services/serviceTokenStore";
 import {
-  readSnapshot,
   readLocalSnapshot,
   type UpstreamHandle,
 } from "../services/upstream";
-import { stampNowPlayingLastRequest } from "../services/upstream/snapshotStore";
+import {
+  stampNowPlayingLastRequest,
+  readSnapshotRaw,
+} from "../services/upstream/snapshotStore";
 
 /**
  * Public now-playing router — TECH_SPEC_V1.md §4.6 (`/api/now-playing`) / #442.
@@ -58,23 +60,35 @@ nowPlayingRouter.get("/", async (req: Request, res: Response) => {
       void stampNowPlayingLastRequest(upstream.redis, secrets.node_env);
     }
 
-    // Prefer the shared snapshot when Redis is configured. Falls through to the
-    // per-instance path on absent/parse-fail, and on the leader we can still
-    // use the in-process copy the poll loop just wrote.
+    // TASK #96 INVARIANT — when Redis is configured, the HTTP request path
+    // NEVER fetches Spotify itself. The leader is the only process that ever
+    // calls Spotify; every other instance (and the leader too) serves the
+    // shared snapshot, or the in-process copy the poll loop just wrote, or
+    // the degraded idle payload if neither is available. The direct-Spotify
+    // fallback is preserved ONLY for the Redis-unconfigured and Redis-error
+    // cases (never-5xx guarantee).
     if (upstream?.enabled && upstream.redis && secrets) {
-      const snap = await readSnapshot<NowPlaying>(
+      const read = await readSnapshotRaw<NowPlaying>(
         upstream.redis,
         secrets.node_env,
         "now-playing"
       );
-      if (snap) {
-        return res.status(200).json(snap.payload);
+      if (read.status === "ok") {
+        return res.status(200).json(read.snapshot.payload);
       }
-      const local = readLocalSnapshot<NowPlaying>("now-playing");
-      if (local) {
-        return res.status(200).json(local);
+      if (read.status === "missing") {
+        // Redis is healthy but the key is absent (leader hasn't run its first
+        // tick yet, or briefly between leaders). Try the in-process leader
+        // copy first; otherwise serve degraded idle. NEVER touch Spotify.
+        const local = readLocalSnapshot<NowPlaying>("now-playing");
+        if (local) {
+          return res.status(200).json(local);
+        }
+        return res.status(200).json(NOT_PLAYING);
       }
-      // No snapshot yet (leader hasn't populated) — fall through to per-instance.
+      // read.status === "error" → Redis is unreachable. Fall through to the
+      // legacy per-instance direct fetch so the endpoint stays 200 even
+      // under a Redis outage.
     }
 
     const payload = await getNowPlaying(await spotifyConfig(req));

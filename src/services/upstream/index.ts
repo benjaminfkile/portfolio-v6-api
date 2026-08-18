@@ -47,7 +47,12 @@ import {
   type SpotifyLane,
 } from "./spotifyLane";
 import { fetchPresenceCount } from "./presenceQuery";
-import { readNowPlayingLastRequest } from "./snapshotStore";
+import {
+  readNowPlayingLastRequest,
+  readSpotifySuspension,
+  writeSpotifySuspension,
+  deleteSpotifySuspension,
+} from "./snapshotStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
@@ -56,6 +61,9 @@ import {
   isSpotifyRateLimited,
   isSpotifyAuthSuspended,
   resumeSpotifyAuth,
+  suspendSpotifyAuth,
+  getSpotifyBackoffUntilMs,
+  applySpotifyBackoffUntil,
   type SpotifyConfig,
 } from "../spotifyService";
 import { getStatus } from "../statusService";
@@ -261,12 +269,16 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
   const spotifyIdleIntervalMs =
     secrets.spotify_idle_interval_ms ?? DEFAULT_SPOTIFY_IDLE_INTERVAL_MS;
 
-  // Viewer-aware + auth-aware Spotify lane (task #95). Everything the lane
-  // needs from the outside world is injected here so the lane module has no
-  // dependency on Express / Redis / DB — the tests can build a pure fake.
+  // Viewer-aware + auth-aware Spotify lane (task #95 + shared-suspension #96).
+  // Everything the lane needs from the outside world is injected here so the
+  // lane module has no dependency on Express / Redis / DB — the tests can
+  // build a pure fake.
   const spotifyLane = createSpotifyLane(
     {
       isAuthSuspended: () => isSpotifyAuthSuspended(),
+      getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
+      applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
+      applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
       resumeAuth: () => resumeSpotifyAuth(),
       async getStoredTokenUpdatedAt() {
         return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);
@@ -281,6 +293,15 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       },
       async getLastPublicRequestAt() {
         return readNowPlayingLastRequest(client, env);
+      },
+      async readSharedSuspension() {
+        return readSpotifySuspension(client, env);
+      },
+      async writeSharedSuspension(record) {
+        return writeSpotifySuspension(client, env, record);
+      },
+      async clearSharedSuspension() {
+        return deleteSpotifySuspension(client, env);
       },
     },
     {
@@ -339,5 +360,14 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 }
 
 // Convenience re-exports for the routers/tests.
-export { readSnapshot, snapshotKey } from "./snapshotStore";
+export {
+  readSnapshot,
+  readSnapshotRaw,
+  snapshotKey,
+  readSpotifySuspension,
+  writeSpotifySuspension,
+  deleteSpotifySuspension,
+  spotifySuspensionKey,
+  type SpotifySuspensionRecord,
+} from "./snapshotStore";
 export { readLocalSnapshot } from "./pollLoop";

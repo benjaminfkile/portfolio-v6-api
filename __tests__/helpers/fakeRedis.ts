@@ -93,6 +93,13 @@ export function createFakeRedis(): FakeRedis {
       e.expiresAt = now() + pxMs;
       return 1;
     },
+    async del(key) {
+      cmdHistory.push(`DEL ${key}`);
+      maybeThrow();
+      const existed = alive(key) !== null;
+      map.delete(key);
+      return existed ? 1 : 0;
+    },
     async quit() {
       cmdHistory.push("QUIT");
       map.clear();

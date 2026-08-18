@@ -161,6 +161,29 @@ export function isSpotifyRateLimited(now: number = Date.now()): boolean {
 }
 
 /**
+ * The wall-clock (ms since epoch) the current 429 backoff clears at, or 0 if
+ * not in backoff. Exposed for the shared-suspension reconciler (task #96) —
+ * the leader mirrors this value into the Redis suspension record so any other
+ * instance / freshly-elected leader honors the same deadline.
+ */
+export function getSpotifyBackoffUntilMs(): number {
+  return backoffUntilMs;
+}
+
+/**
+ * Prime the 429 backoff window from an external source (Redis-persisted
+ * suspension, task #96) without incrementing the exponential streak. Called
+ * on a fresh leader that inherits an existing 429 suspension so the local
+ * fetcher wrapper honors it without needing to trip a fresh 429.
+ */
+export function applySpotifyBackoffUntil(untilMs: number): void {
+  if (untilMs > backoffUntilMs) {
+    backoffUntilMs = untilMs;
+    inBackoff = true;
+  }
+}
+
+/**
  * True iff Spotify is currently auth-suspended (task #95): the last token
  * refresh returned invalid_grant, or the service has no stored credentials.
  * Every Spotify code path — API calls AND the token endpoint — short-circuits

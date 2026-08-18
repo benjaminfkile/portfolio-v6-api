@@ -35,11 +35,18 @@ import {
   isSpotifyRateLimited,
   suspendSpotifyAuth,
   resumeSpotifyAuth,
+  getSpotifyBackoffUntilMs,
+  applySpotifyBackoffUntil,
   SPOTIFY_NOW_PLAYING_URL,
   SPOTIFY_RECENTLY_PLAYED_URL,
   SPOTIFY_TOKEN_URL,
 } from "../src/services/spotifyService";
 import { createFakeRedis, type FakeRedis } from "./helpers/fakeRedis";
+import {
+  readSpotifySuspension,
+  writeSpotifySuspension,
+  deleteSpotifySuspension,
+} from "../src/services/upstream/snapshotStore";
 import { REALTIME_SERVICE_NAME } from "../src/services/upstream/realtimePublisher";
 
 const ENV = "development";
@@ -120,17 +127,26 @@ function buildFetchersWithLane(
     getLastPublicRequestAt?: () => Promise<Date | null>;
   },
   spotifyCallCounter: { calls: number },
+  redis: FakeRedis,
+  env: string = ENV,
   idleIntervalMs = DEFAULT_SPOTIFY_IDLE_INTERVAL_MS
 ): PollFetchers {
   const lane = createSpotifyLane(
     {
       isAuthSuspended: laneDeps.isAuthSuspended ?? isSpotifyAuthSuspended,
+      getBackoffUntilMs: getSpotifyBackoffUntilMs,
+      applyAuthSuspension: (reason: string) => suspendSpotifyAuth(reason),
+      applyBackoffUntil: applySpotifyBackoffUntil,
       resumeAuth: laneDeps.resumeAuth ?? resumeSpotifyAuth,
       getStoredTokenUpdatedAt:
         laneDeps.getStoredTokenUpdatedAt ?? (async () => null),
       getPresenceCount: laneDeps.getPresenceCount ?? (async () => 0),
       getLastPublicRequestAt:
         laneDeps.getLastPublicRequestAt ?? (async () => null),
+      readSharedSuspension: async () => readSpotifySuspension(redis, env),
+      writeSharedSuspension: async (record) =>
+        writeSpotifySuspension(redis, env, record),
+      clearSharedSuspension: async () => deleteSpotifySuspension(redis, env),
     },
     {
       publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
@@ -238,7 +254,8 @@ describe("integration — auth suspension", () => {
     // suspension gate short-circuits the viewer-aware cadence too.
     const fetchers = buildFetchersWithLane(
       { getPresenceCount: async () => 5 },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle: PollLoopHandle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -309,7 +326,8 @@ describe("integration — auth suspension", () => {
         getPresenceCount: async () => 3, // active
         getStoredTokenUpdatedAt: async () => storedUpdatedAt,
       },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -378,7 +396,8 @@ describe("integration — viewer-aware cadence", () => {
         getPresenceCount: async () => 0, // idle
         getLastPublicRequestAt: async () => null,
       },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -434,7 +453,8 @@ describe("integration — viewer-aware cadence", () => {
     const lease = await acquireLease(redis);
     const fetchers = buildFetchersWithLane(
       { getPresenceCount: async () => presence },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -487,7 +507,8 @@ describe("integration — viewer-aware cadence", () => {
         getPresenceCount: async () => 0,
         getLastPublicRequestAt: async () => lastRequest,
       },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -534,7 +555,8 @@ describe("integration — viewer-aware cadence", () => {
           throw new Error("gateway 500");
         },
       },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -575,12 +597,14 @@ describe("integration — 429 backoff preserved in both cadences", () => {
     const lease = await acquireLease(redis);
     const fetchers = buildFetchersWithLane(
       { getPresenceCount: async () => 5 }, // active
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
 
-    // Tick 1: Spotify 429 trips the backoff.
+    // Tick 1: Spotify 429 trips the backoff — fetcher runs, hits 429,
+    // reconcileAfterFetch writes the shared 429 suspension record.
     await handle.runTick();
     expect(isSpotifyRateLimited()).toBe(true);
     expect(spotifyCalls.calls).toBe(1);
@@ -588,8 +612,9 @@ describe("integration — 429 backoff preserved in both cadences", () => {
       (c) => c[0] === SPOTIFY_NOW_PLAYING_URL
     ).length;
 
-    // Subsequent ticks: lane says fetch (site is active), but the fetcher
-    // wrapper short-circuits on isSpotifyRateLimited so no network call fires.
+    // Subsequent ticks: the lane reads the shared suspension record and
+    // skip-suspends. The fetcher wrapper is NOT invoked at all — task #96
+    // has the lane gate on the shared record before touching the fetcher.
     jest.setSystemTime(5_000);
     await handle.runTick();
     jest.setSystemTime(10_000);
@@ -600,7 +625,7 @@ describe("integration — 429 backoff preserved in both cadences", () => {
     expect(
       mockFetch.mock.calls.filter((c) => c[0] === SPOTIFY_NOW_PLAYING_URL).length
     ).toBe(npCalls); // no new network calls to Spotify
-    expect(spotifyCalls.calls).toBe(4); // but the fetcher WAS called each tick
+    expect(spotifyCalls.calls).toBe(1); // fetcher NOT re-invoked once suspension is shared
 
     handle.stop();
   });
@@ -632,7 +657,8 @@ describe("integration — 429 backoff preserved in both cadences", () => {
     const lease = await acquireLease(redis);
     const fetchers = buildFetchersWithLane(
       { getPresenceCount: async () => 0 }, // idle
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
@@ -662,7 +688,9 @@ describe("integration — other lanes unaffected", () => {
     jest.spyOn(console, "warn").mockImplementation(() => {});
     jest.spyOn(console, "error").mockImplementation(() => {});
 
-    // Pre-suspend Spotify so we don't need to trip via the network.
+    // Pre-suspend Spotify so we don't need to trip via the network. Under
+    // task #96 the SHARED Redis record is the source of truth for the lane;
+    // seed it below in addition to the in-process flag.
     suspendSpotifyAuth("test-injection");
 
     let statusHits = 0;
@@ -699,6 +727,13 @@ describe("integration — other lanes unaffected", () => {
 
     const spotifyCalls = { calls: 0 };
     const redis = createFakeRedis();
+    // Seed the shared suspension record so the lane skip-suspends from tick 1.
+    await writeSpotifySuspension(redis, ENV, {
+      suspended_until: new Date(24 * 60 * 60 * 1000).toISOString(),
+      reason: "auth",
+      detail: "test-injection",
+      captured_token_updated_at: new Date(0).toISOString(),
+    });
     const lease = await acquireLease(redis);
     const fetchers = buildFetchersWithLane(
       {
@@ -707,7 +742,8 @@ describe("integration — other lanes unaffected", () => {
         // No updated_at change — stays suspended.
         getStoredTokenUpdatedAt: async () => new Date(0),
       },
-      spotifyCalls
+      spotifyCalls,
+      redis
     );
 
     const handle = startPollLoop(redis, lease, fetchers, {
