@@ -49,6 +49,21 @@ describe("GET /api/schema (§8.4)", () => {
     ).toHaveProperty("blog");
   });
 
+  it("surfaces the blog section's `mode` and `page_size` (task #101 — Blog-as-a-page)", async () => {
+    const res = await request(app).get("/api/schema");
+    const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;
+    const root = defs["PortfolioV6Content"] as { properties: Record<string, any> };
+
+    const blogSection = root.properties.sectionData.properties.blog;
+    expect(blogSection.properties).toHaveProperty("mode");
+    // The enum is exactly {teaser, index}, and 'teaser' is the default.
+    expect(blogSection.properties.mode.enum).toEqual(["teaser", "index"]);
+    expect(blogSection.properties.mode.default).toBe("teaser");
+
+    // The index-only pagination knob is exposed for `sync:types`.
+    expect(blogSection.properties).toHaveProperty("page_size");
+  });
+
   it("no longer lists media_id under the timeline item definition (§3.4 v1.17)", async () => {
     const res = await request(app).get("/api/schema");
     const defs = (res.body.definitions ?? res.body["$defs"]) as Record<string, any>;

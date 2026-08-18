@@ -21,8 +21,10 @@ import {
  * discriminated union mapped to HTTP by the router).
  *
  * Slug rules (§3.10): lowercase `[a-z0-9-]+`, unique, and never a reserved slug
- * (`blog`/`api`/`admin`). `home` is NOT reserved — it is the slug that renders at
- * `/`. Validation reuses the canonical `pageSlugSchema`/`pageSchema` (§3.9) so the
+ * (`api`/`admin`). `home` is NOT reserved — it is the slug that renders at `/`.
+ * `blog` is NOT reserved either (Blog-as-a-page, task #101): a normal page at
+ * slug `blog` hosts the blog index via a `blog` section in `mode: 'index'`.
+ * Validation reuses the canonical `pageSlugSchema`/`pageSchema` (§3.9) so the
  * same rules apply on write here as at publish.
  */
 
