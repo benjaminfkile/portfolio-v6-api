@@ -132,6 +132,21 @@ let backoffUntilMs = 0;
 let backoffStreak = 0;
 let inBackoff = false;
 
+/**
+ * Auth-suspension state (task #95). When the token endpoint returns
+ * invalid_grant (dead refresh token) — OR the service has no stored Spotify
+ * credentials at all — Spotify traffic is halted entirely: no API call, and
+ * critically no token-endpoint retry either. Failed-auth traffic still costs
+ * against Spotify's daily quota under one client id, so a dev deployment with
+ * a stale token was hammering `accounts.spotify.com` 77 times per 30 minutes.
+ *
+ * Resume happens out-of-band: the poll loop checks the stored
+ * `service_tokens.updated_at` at most once per minute (cheap local DB read, no
+ * Spotify call), and calls `resumeSpotifyAuth()` when it changes. A single log
+ * line fires on both entry and exit.
+ */
+let authSuspended = false;
+
 const NOT_PLAYING: NowPlaying = { playing: false };
 
 /**
@@ -143,6 +158,49 @@ const NOT_PLAYING: NowPlaying = { playing: false };
  */
 export function isSpotifyRateLimited(now: number = Date.now()): boolean {
   return now < backoffUntilMs;
+}
+
+/**
+ * True iff Spotify is currently auth-suspended (task #95): the last token
+ * refresh returned invalid_grant, or the service has no stored credentials.
+ * Every Spotify code path — API calls AND the token endpoint — short-circuits
+ * on this until `resumeSpotifyAuth()` fires (poll loop detects a changed
+ * `service_tokens.updated_at`).
+ */
+export function isSpotifyAuthSuspended(): boolean {
+  return authSuspended;
+}
+
+/**
+ * Enter auth suspension. Idempotent. Logs a single line with the reconnect
+ * hint the first time — subsequent calls are silent.
+ */
+export function suspendSpotifyAuth(reason: string): void {
+  if (authSuspended) return;
+  authSuspended = true;
+  console.warn(
+    `[spotifyService] Spotify auth suspended (${reason}); ` +
+      "no Spotify calls (API or token endpoint) will fire until the stored " +
+      "service_tokens row updates. Reconnect Spotify from the admin " +
+      "Integrations page."
+  );
+}
+
+/**
+ * Leave auth suspension. Idempotent. Logs a single line the first time.
+ * Called by the poll loop when it detects a changed `service_tokens.updated_at`.
+ */
+export function resumeSpotifyAuth(): void {
+  if (!authSuspended) return;
+  authSuspended = false;
+  // Any cached access token was minted against the OLD refresh token — drop it
+  // so the very next call re-exchanges against the fresh credentials.
+  accessToken = null;
+  cache = null;
+  inFlight = null;
+  console.warn(
+    "[spotifyService] Spotify auth resumed; token refresh will be retried on the next tick"
+  );
 }
 
 function parseRetryAfterSeconds(res: unknown): number | null {
@@ -215,6 +273,9 @@ function timeoutSignal(): { signal: AbortSignal; clear: () => void } {
  */
 async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
   if (!config.clientId || !config.clientSecret || !config.refreshToken) {
+    // Missing credentials is a stable state until an admin reconnects —
+    // suspend so the poll loop stops hammering `refreshAccessToken` every tick.
+    suspendSpotifyAuth("no stored Spotify credentials");
     throw new Error("Spotify credentials are not configured");
   }
 
@@ -244,6 +305,11 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
       // after authorization, so this is now a routine state, not just sabotage.
       // We do not echo the body — keeping the log to the status code guarantees
       // no credential ever leaks into logs.
+      if (res.status === 400) {
+        // Suspend now: subsequent token retries would spend against the same
+        // daily quota and would keep failing until the admin reconnects.
+        suspendSpotifyAuth("invalid_grant on token refresh");
+      }
       const hint =
         res.status === 400
           ? " (invalid_grant: the refresh token is likely expired or revoked —" +
@@ -275,6 +341,11 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
 
 /** Return a valid in-memory access token, refreshing on absence/expiry (§4.6). */
 async function getAccessToken(config: SpotifyConfig): Promise<string> {
+  if (authSuspended) {
+    // Never hit the token endpoint while suspended (task #95): failed refresh
+    // traffic still burns daily quota under one client id.
+    throw new Error("Spotify auth suspended; skipping token refresh");
+  }
   if (accessToken && accessToken.expiresAt > Date.now()) {
     return accessToken.token;
   }
@@ -373,6 +444,8 @@ async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
   // Share the same 429 budget as now-playing — skip while suspended so idle
   // enrichment doesn't extend the penalty window.
   if (isSpotifyRateLimited()) return null;
+  // Auth-suspended (task #95): never touch Spotify at all.
+  if (authSuspended) return null;
   try {
     const res = await callRecentlyPlayed(token);
 
@@ -434,6 +507,9 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
   // all so we don't extend the penalty window. The poll-loop fetcher wrapper
   // also short-circuits at the same gate so the shared snapshot is preserved.
   if (isSpotifyRateLimited()) return NOT_PLAYING;
+  // Auth-suspended (task #95): the token refresh is dead; degrade to idle
+  // without ever touching accounts.spotify.com or api.spotify.com.
+  if (authSuspended) return NOT_PLAYING;
   try {
     let token = await getAccessToken(config);
     let res = await callCurrentlyPlaying(token);
@@ -527,6 +603,9 @@ export function clearSpotifyRuntimeState(): void {
   backoffUntilMs = 0;
   backoffStreak = 0;
   inBackoff = false;
+  // A fresh authorization always lifts auth suspension: the whole point of the
+  // admin reconnect flow is to install a working refresh token.
+  authSuspended = false;
 }
 
 /** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */

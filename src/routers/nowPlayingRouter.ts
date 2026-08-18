@@ -12,6 +12,7 @@ import {
   readLocalSnapshot,
   type UpstreamHandle,
 } from "../services/upstream";
+import { stampNowPlayingLastRequest } from "../services/upstream/snapshotStore";
 
 /**
  * Public now-playing router — TECH_SPEC_V1.md §4.6 (`/api/now-playing`) / #442.
@@ -48,6 +49,14 @@ nowPlayingRouter.get("/", async (req: Request, res: Response) => {
   try {
     const upstream = req.app.get("upstream") as UpstreamHandle | undefined;
     const secrets = req.app.get("secrets") as IAppSecrets | undefined;
+
+    // Stamp the request timestamp into the shared snapshot store so the
+    // leader's viewer-aware Spotify lane (task #95) knows a polling-fallback
+    // viewer is around even when the realtime presence count is 0. Fire and
+    // forget — a Redis blip must never fail this endpoint.
+    if (upstream?.enabled && upstream.redis && secrets) {
+      void stampNowPlayingLastRequest(upstream.redis, secrets.node_env);
+    }
 
     // Prefer the shared snapshot when Redis is configured. Falls through to the
     // per-instance path on absent/parse-fail, and on the leader we can still
