@@ -186,6 +186,31 @@ export async function getStoredServiceToken(
   return stored;
 }
 
+/**
+ * Read only the `updated_at` column for `service` — used by the poll loop's
+ * auth-suspension resume check (task #95): while Spotify is suspended, the
+ * leader compares this timestamp at most once per minute to a snapshot taken
+ * at suspend-time and resumes on change. Never throws (a DB blip is logged
+ * and reported as `null`, which the caller treats as "no change").
+ */
+export async function getServiceTokenUpdatedAt(
+  service: string
+): Promise<Date | null> {
+  try {
+    const row = (await getDb()("service_tokens")
+      .where({ service })
+      .select("updated_at")
+      .first()) as { updated_at: Date } | undefined;
+    return row ? new Date(row.updated_at) : null;
+  } catch (err) {
+    console.error(
+      `[serviceTokenStore] could not read updated_at for '${service}':`,
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
 /** Remove the stored credential for `service`. True iff a row was deleted. */
 export async function deleteStoredServiceToken(
   service: string

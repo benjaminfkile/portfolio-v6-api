@@ -47,6 +47,9 @@ function loadLocalConfig(): LoadedConfig {
     // knob is optional so tests and IS_LOCAL stay Redis-free by default.
     redis_url: process.env.REDIS_URL || undefined,
     poll_interval_ms: parseOptionalInt(process.env.POLL_INTERVAL_MS),
+    spotify_idle_interval_ms: parseOptionalInt(
+      process.env.SPOTIFY_IDLE_INTERVAL_MS
+    ),
     gateway_internal_url:
       process.env.GATEWAY_INTERNAL_URL || undefined,
     gateway_realtime_token:

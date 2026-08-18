@@ -65,6 +65,14 @@ export interface IAppSecrets {
    */
   poll_interval_ms?: number;
   /**
+   * Idle cadence for the Spotify lane (task #95) — how often the leader polls
+   * Spotify when the site has NO viewers (realtime presence 0 AND no public
+   * `/api/now-playing` request in the last 5 minutes). Default 300000ms (5m).
+   * Only the Spotify lane responds to this knob; status/duolingo/github stay
+   * on their own cadence.
+   */
+  spotify_idle_interval_ms?: number;
+  /**
    * Internal base URL the container uses to reach the gateway's
    * `POST /internal/publish` endpoint (realtime hub). Defaults to
    * `http://gateway:8080`. Publish failures never affect HTTP serving.

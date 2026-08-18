@@ -31,6 +31,10 @@ import {
   publish,
   RealtimePublisherConfig,
 } from "./realtimePublisher";
+import {
+  DEFAULT_SPOTIFY_IDLE_INTERVAL_MS,
+  type SpotifyLane,
+} from "./spotifyLane";
 
 /** Base cadence defaults — used when POLL_INTERVAL_MS is unset. */
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
@@ -58,12 +62,19 @@ export type Fetcher<T> = () => Promise<T | null>;
  * The set of curated fetchers the loop drives. Kept generic so tests inject
  * fakes; the real bindings are assembled in the bootstrap module (`index.ts`
  * next to this file) so this module stays free of app-specific imports.
+ *
+ * `spotifyLane` is optional: when present (task #95) it decides on each tick
+ * whether the Spotify lane fetches (viewer-aware cadence + auth suspension);
+ * when absent the loop polls `nowPlaying` every tick as it did before. The
+ * status/duolingo/github lanes are UNAFFECTED by the Spotify lane in either
+ * case.
  */
 export interface PollFetchers {
   nowPlaying: Fetcher<unknown>;
   status: Fetcher<unknown>;
   duolingo: Fetcher<unknown>;
   github: Fetcher<unknown>;
+  spotifyLane?: SpotifyLane;
 }
 
 /** Runtime knobs. Every field is required so the loop has no implicit config. */
@@ -82,6 +93,9 @@ export interface PollLoopConfig {
   /** Realtime publish config; unset fields disable publishing (no-op). */
   publisher: RealtimePublisherConfig;
 }
+
+// Re-export so bootstrap and tests share one default without a duplicate import.
+export { DEFAULT_SPOTIFY_IDLE_INTERVAL_MS };
 
 /**
  * Handle returned by `startPollLoop`. `stop()` clears every timer and is
@@ -204,8 +218,21 @@ export function startPollLoop(
 
     const now = Date.now();
 
-    // Fast lane — every tick.
-    await refreshOne("now-playing", fetchers.nowPlaying, "now-playing");
+    // Spotify lane (task #95) — the lane decides suspend vs. active vs. idle
+    // and returns whether to fetch this tick. When no lane is wired we keep
+    // the pre-#95 behavior: poll every tick.
+    if (fetchers.spotifyLane) {
+      const decision = await fetchers.spotifyLane.planTick(now);
+      if (decision === "fetch") {
+        await refreshOne("now-playing", fetchers.nowPlaying, "now-playing");
+      }
+      // "skip-idle" / "skip-suspended" — no fetcher call, no snapshot write,
+      // no publish. The shared snapshot preserves the last-good payload.
+    } else {
+      await refreshOne("now-playing", fetchers.nowPlaying, "now-playing");
+    }
+
+    // Status stays on the base fast cadence — unaffected by the Spotify lane.
     await refreshOne("status", fetchers.status, "status");
 
     // Slow lane — only when the local deadline elapses.
