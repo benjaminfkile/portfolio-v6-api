@@ -99,38 +99,33 @@ describe("/api/now-playing — shared snapshot serving", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("falls back to the per-instance path when no snapshot exists", async () => {
+  it("serves degraded idle (never fetches Spotify) when Redis is healthy but no snapshot exists (task #96)", async () => {
     const redis = createFakeRedis();
     installUpstream(redis);
-    // spotifyService lives on the per-instance path — mock its upstream calls.
+    // Mock Spotify to prove it is never called.
     mockFetch.mockImplementation((url: string) => {
-      if (url.includes("accounts.spotify.com")) {
-        return Promise.resolve({
-          status: 200,
-          ok: true,
-          json: async () => ({ access_token: "t", expires_in: 3600 }),
-        } as unknown as Response);
+      if (url.includes("accounts.spotify.com") || url.includes("api.spotify.com")) {
+        throw new Error(
+          "the request path must NOT fetch Spotify when Redis is configured"
+        );
       }
-      if (url.includes("currently-playing")) {
-        return Promise.resolve({
-          status: 204,
-          ok: false,
-          json: async () => ({}),
-        } as unknown as Response);
-      }
-      // Recently-played: empty history so idle has no last_played.
       return Promise.resolve({
         status: 200,
         ok: true,
-        json: async () => ({ items: [] }),
+        json: async () => ({}),
       } as unknown as Response);
     });
 
     const res = await request(app).get("/api/now-playing");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ playing: false });
-    // Fell back to real upstream fetch.
-    expect(mockFetch).toHaveBeenCalled();
+    // Spotify was NEVER called — the shared-snapshot design forbids it.
+    const spotifyCalls = mockFetch.mock.calls.filter(
+      ([url]) =>
+        typeof url === "string" &&
+        (url.includes("accounts.spotify.com") || url.includes("api.spotify.com"))
+    );
+    expect(spotifyCalls).toHaveLength(0);
   });
 
   it("falls back to the per-instance path when Redis errors on read", async () => {
