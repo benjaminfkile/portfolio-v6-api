@@ -98,17 +98,31 @@ export const statusData = z
   .strict();
 
 /**
- * §3.5 — how many posts, optional tag filter, and (Blogs v1.13) an optional
- * `blog` slug scoping the section to one named blog's posts. `blog` is a plain
- * string here: draft-lenient (§3.9) accepts ANY string; publish-time validation
+ * §3.5 — the blog section, in two modes (Blog-as-a-page, task #101):
+ *
+ * - `mode: 'teaser'` (DEFAULT) is the recent-posts card — pick the newest N
+ *   posts (optionally scoped by `tag` and/or `blog`) and render them inline.
+ *   `limit` is the teaser's N.
+ * - `mode: 'index'` renders the full paginated blog index (same blog/tag
+ *   filtering) inline, so the blog listing can live inside a normal admin-
+ *   composed page and inherit its `nav_position` — no hardcoded /blog nav
+ *   link. `page_size` is the index's per-page count.
+ *
+ * `mode` defaults to `'teaser'` so every section stored before this task (which
+ * has no `mode` key) is untouched on both the draft and publish paths (§3.9).
+ *
+ * `blog` scopes to one named blog (Blogs v1.13); it is a plain string here.
+ * Draft-lenient accepts ANY string; publish-time validation
  * (`publishService.validateWorkingSet`) is what refuses a slug that matches no
  * existing blog, as a `ref_validation` → 422 naming the section.
  */
 export const blogData = z
   .object({
-    limit: z.number().int().positive(),
+    mode: z.enum(["teaser", "index"]).default("teaser"),
+    limit: z.number().int().positive().optional(),
     tag: z.string().min(1).optional(),
     blog: z.string().min(1).optional(),
+    page_size: z.number().int().positive().optional(),
   })
   .strict();
 

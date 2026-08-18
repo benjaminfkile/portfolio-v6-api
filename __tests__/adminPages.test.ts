@@ -240,7 +240,7 @@ describe("slug validation (§3.10)", () => {
   });
 
   it("rejects EVERY reserved slug (400)", async () => {
-    expect(RESERVED_PAGE_SLUGS).toEqual(["blog", "api", "admin"]);
+    expect(RESERVED_PAGE_SLUGS).toEqual(["api", "admin"]);
     for (const slug of RESERVED_PAGE_SLUGS) {
       const res = await createPage({ slug, title: "T" });
       expect(res.status).toBe(400);
@@ -250,6 +250,23 @@ describe("slug validation (§3.10)", () => {
   it("accepts `home` — it is NOT reserved (renders at /)", async () => {
     const res = await createPage({ slug: "home", title: "Home" });
     expect(res.status).toBe(201);
+  });
+
+  it("accepts `blog` — no longer reserved as of task #101 (Blog-as-a-page)", async () => {
+    // Create at slug `blog`: the blog index now lives inside a normal page
+    // whose slug is `blog`, so the site keeps its /blog URL.
+    const created = await createPage({ slug: "blog", title: "Blog" });
+    expect(created.status).toBe(201);
+
+    // Renaming another page onto `blog` also passes the reserved-slug check —
+    // any refusal must come from the unique constraint, not the reservation.
+    const other = (await createPage({ slug: "projects", title: "Projects" })).body.data;
+    const patch = await request(app)
+      .patch(`/api/admin/pages/${other.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: other.updated_at, slug: "blog" });
+    // Duplicate slug → 400 (409-style validation failure), not "reserved".
+    expect(patch.status).toBe(400);
   });
 
   it("rejects a duplicate slug with a 400 validation failure", async () => {

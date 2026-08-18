@@ -586,6 +586,45 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(blogData.safeParse({ limit: 5, blog: 42 }).success).toBe(false);
   });
 
+  it("blog — mode accepts 'teaser'/'index', rejects other values, defaults to 'teaser' (task #101)", () => {
+    // Both modes validate.
+    expect(blogData.safeParse({ mode: "teaser", limit: 5 }).success).toBe(true);
+    expect(blogData.safeParse({ mode: "index" }).success).toBe(true);
+    expect(blogData.safeParse({ mode: "index", page_size: 10 }).success).toBe(true);
+
+    // Unknown values rejected.
+    expect(blogData.safeParse({ mode: "other", limit: 5 }).success).toBe(false);
+    expect(blogData.safeParse({ mode: "", limit: 5 }).success).toBe(false);
+    expect(blogData.safeParse({ mode: 1, limit: 5 }).success).toBe(false);
+
+    // Omitting mode validates and, on the canonical (publish) schema, reads as
+    // 'teaser' — every section stored before this task (no `mode` key) is
+    // untouched.
+    const noMode = blogData.safeParse({ limit: 5 });
+    expect(noMode.success).toBe(true);
+    if (noMode.success) expect(noMode.data.mode).toBe("teaser");
+
+    // Existing sections (no `mode`) validate on the draft-lenient path too.
+    expect(
+      DRAFT_SECTION_DATA_SCHEMAS.blog.safeParse({ limit: 5, tag: "eng" }).success
+    ).toBe(true);
+    expect(
+      DRAFT_SECTION_DATA_SCHEMAS.blog.safeParse({ mode: "index" }).success
+    ).toBe(true);
+    expect(
+      DRAFT_SECTION_DATA_SCHEMAS.blog.safeParse({ mode: "bogus" }).success
+    ).toBe(false);
+  });
+
+  it("blog — optional `page_size` is a positive int; unknown keys rejected (task #101)", () => {
+    expect(blogData.safeParse({ mode: "index", page_size: 10 }).success).toBe(true);
+    expect(blogData.safeParse({ mode: "index", page_size: 0 }).success).toBe(false);
+    expect(blogData.safeParse({ mode: "index", page_size: -1 }).success).toBe(false);
+    expect(blogData.safeParse({ mode: "index", page_size: 1.5 }).success).toBe(false);
+    // .strict() still rejects unknown keys.
+    expect(blogData.safeParse({ mode: "index", nope: true }).success).toBe(false);
+  });
+
   it("now_playing — idle enum only hide|message", () => {
     expect(nowPlayingData.safeParse({ idle: "hide" }).success).toBe(true);
     expect(
@@ -772,13 +811,16 @@ describe("page schema (§3.10)", () => {
     expect(pageSlugSchema.safeParse("").success).toBe(false);
   });
 
-  it("rejects the reserved slugs blog/api/admin", () => {
-    expect([...RESERVED_PAGE_SLUGS]).toEqual(["blog", "api", "admin"]);
+  it("rejects the reserved slugs api/admin", () => {
+    expect([...RESERVED_PAGE_SLUGS]).toEqual(["api", "admin"]);
     for (const reserved of RESERVED_PAGE_SLUGS) {
       expect(pageSlugSchema.safeParse(reserved).success).toBe(false);
     }
     // `home` is special, NOT reserved.
     expect(pageSlugSchema.safeParse("home").success).toBe(true);
+    // `blog` is NOT reserved as of task #101 — the blog index now lives inside
+    // a normal admin-composed page whose slug is `blog`.
+    expect(pageSlugSchema.safeParse("blog").success).toBe(true);
   });
 
   it("accepts a full page and a null nav_label (served but hidden from nav)", () => {

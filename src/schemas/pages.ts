@@ -14,12 +14,16 @@ import { z } from "zod";
  */
 
 /**
- * Slugs reserved from create/rename (§3.10): `blog` because `/blog` and
- * `/blog/:slug` are real routes owned by the blog (§3.6); `api` and `admin`
- * defensively. `home` is NOT reserved — it is the special slug that renders at
- * `/`.
+ * Slugs reserved from create/rename (§3.10): `api` and `admin`, defensively.
+ * `home` is NOT reserved — it is the special slug that renders at `/`.
+ *
+ * `blog` is NOT reserved as of task #101 (Blog-as-a-page): the blog index now
+ * lives inside a normal admin-composed page whose slug is `blog` (a `blog`
+ * section in `mode: 'index'`), so the site keeps its `/blog` URL and post URLs
+ * `/blog/:slug` unchanged while the blog inherits its nav placement from the
+ * regular pages ordering.
  */
-export const RESERVED_PAGE_SLUGS = ["blog", "api", "admin"] as const;
+export const RESERVED_PAGE_SLUGS = ["api", "admin"] as const;
 
 export type ReservedPageSlug = (typeof RESERVED_PAGE_SLUGS)[number];
 
