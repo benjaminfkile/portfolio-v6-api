@@ -4,7 +4,19 @@
  * Task #95 introduced this lane. Task #96 promoted the suspension state from
  * per-process memory to a shared Redis record so ALL instances see the same
  * "Spotify is currently suspended" fact and a newly-elected / restarted leader
- * never re-trips Spotify to rediscover a known suspension.
+ * never re-trips Spotify to rediscover a known suspension. Task #97 inverted
+ * authority so the shared record is the SINGLE source of truth: process-local
+ * backoff / auth flags are only a mirror of it. Two consequences that fix the
+ * bug the operator override could not defeat:
+ *   - When the shared record is absent, the lane clears its local mirror
+ *     (both auth suspension AND the task #90 429 backoff window). Otherwise
+ *     the fetcher wrapper short-circuits on stale in-memory backoff and no
+ *     genuine Spotify call ever happens to re-verify the suspension.
+ *   - The lane only writes the shared record after a genuine fetch attempt
+ *     tripped locally — never on skip-suspended ticks (`reconcileAfterFetch`
+ *     is invoked by the poll loop ONLY on `"fetch"` decisions). Deleting the
+ *     key stays deleted until a real new trip occurs; a fresh trip records
+ *     a NEW deadline.
  *
  * Behaviors, orthogonal to the base tick + 429 backoff (task #90):
  *
@@ -106,6 +118,12 @@ export interface SpotifyLaneDeps {
    */
   applyBackoffUntil(untilMs: number): void;
   /**
+   * Clear the in-process 429 backoff mirror (task #97). Called when the
+   * shared record is absent — Redis is authoritative, so a deleted key
+   * clears local memory too. (spotifyService.clearSpotifyBackoff)
+   */
+  clearBackoff(): void;
+  /**
    * Cheap DB read for the current `service_tokens.updated_at` value for
    * spotify. Called at most once per `SPOTIFY_AUTH_RESUME_CHECK_MS`; return
    * `null` on absence or error (treated as "no change").
@@ -169,7 +187,11 @@ export interface SpotifyLane {
   /**
    * Reconcile the local suspension state (spotifyService's in-process flags)
    * with the shared Redis record AFTER a fetch attempt. Called by the poll
-   * loop with `now = Date.now()`; a no-op when the local state matches Redis.
+   * loop with `now = Date.now()` ONLY when `planTick` returned `"fetch"`
+   * (task #97) — that guarantees any local suspension observed here is a
+   * genuine fresh trip from THIS tick's fetch, not stale in-memory state
+   * carried over from an earlier tick, so the shared record's `suspended_until`
+   * carries a real deadline and a deleted key can never resurrect from memory.
    */
   reconcileAfterFetch(now: number): Promise<void>;
 }
@@ -307,11 +329,17 @@ export function createSpotifyLane(
 
     // 2) Not suspended per Redis. If local state was suspended, reconcile.
     //    This covers BOTH the natural-expiry case (Redis TTL dropped the key)
-    //    and the operator-override case (someone ran DEL on the key).
+    //    and the operator-override case (someone ran DEL on the key). Task
+    //    #97: the local 429 backoff is ALSO a mirror of the shared record —
+    //    clear it too so the fetcher wrapper doesn't short-circuit on stale
+    //    in-memory state and prevent a real Spotify call from happening.
     if (deps.isAuthSuspended()) {
       deps.resumeAuth();
       wasActive = false;
       nextDueAt = 0;
+    }
+    if (deps.getBackoffUntilMs() > 0) {
+      deps.clearBackoff();
     }
     // Drop the resume snapshot so a NEW suspension later captures a fresh
     // reference.

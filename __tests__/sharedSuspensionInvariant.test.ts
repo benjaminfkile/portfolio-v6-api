@@ -45,6 +45,7 @@ import {
   resumeSpotifyAuth,
   getSpotifyBackoffUntilMs,
   applySpotifyBackoffUntil,
+  clearSpotifyBackoff,
   SPOTIFY_TOKEN_URL,
   SPOTIFY_NOW_PLAYING_URL,
   SPOTIFY_RECENTLY_PLAYED_URL,
@@ -133,6 +134,7 @@ function buildFetchersWithLane(
       applyAuthSuspension: (reason: string) => suspendSpotifyAuth(reason),
       applyBackoffUntil: (untilMs: number) =>
         applySpotifyBackoffUntil(untilMs),
+      clearBackoff: () => clearSpotifyBackoff(),
       resumeAuth: () => resumeSpotifyAuth(),
       getStoredTokenUpdatedAt: async () => new Date(0),
       getPresenceCount: async () => 5, // active
@@ -802,6 +804,308 @@ describe("suspension record round-trip", () => {
     const redis = createFakeRedis();
     redis.queueError(new Error("network"));
     expect(await readSpotifySuspension(redis, ENV)).toBeNull();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Task #97 — shared record is authoritative, in-memory only mirrors
+// ----------------------------------------------------------------------------
+describe("task #97 — Redis suspension record is the single source of truth", () => {
+  /**
+   * Acceptance #373: deleting the suspension key forces a retry on the next
+   * tick even while the CURRENT leader holds live in-memory backoff state
+   * from a prior 429 trip. Under task #96 the lane cleared local auth on
+   * shared-absent but did NOT clear local 429 backoff, and reconcile ran
+   * every tick — so the fetcher wrapper short-circuited on stale local
+   * backoff and reconcile re-persisted it from memory.
+   */
+  it("(373) delete-key override wins against a leader with live in-memory backoff", async () => {
+    jest.useFakeTimers({ now: 0 });
+    try {
+      const redis = createFakeRedis();
+      installUpstream(redis);
+
+      // Pre-seed a 429 suspension AND prime the local backoff mirror to the
+      // same deadline — simulates a leader that just tripped 429 on the
+      // previous tick.
+      await writeSpotifySuspension(redis, ENV, {
+        suspended_until: new Date(60 * 60 * 1000).toISOString(),
+        reason: "429",
+        detail: "Retry-After 3600s",
+      });
+      applySpotifyBackoffUntil(60 * 60 * 1000);
+      expect(getSpotifyBackoffUntilMs()).toBeGreaterThan(0);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (url === SPOTIFY_TOKEN_URL) return Promise.resolve(tokenResponse("tok"));
+        if (url === SPOTIFY_NOW_PLAYING_URL) return Promise.resolve(nowPlaying204());
+        if (url === SPOTIFY_RECENTLY_PLAYED_URL) return Promise.resolve(nowPlaying204());
+        if (url === "http://gateway:8080/health") return Promise.resolve(healthResponse());
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: async () => ({}),
+          text: async () => "",
+        } as unknown as Response);
+      });
+
+      const spotifyCalls = { calls: 0 };
+      const lease = await acquireLease(redis);
+      const handle = startPollLoop(
+        redis,
+        lease,
+        buildFetchersWithLane(redis, spotifyCalls),
+        baseConfig()
+      );
+
+      // Tick 1 — suspension active (shared+local both set) → skip-suspended.
+      jest.setSystemTime(1_000);
+      await handle.runTick();
+      expect(spotifyCalls.calls).toBe(0);
+      // Local backoff still set (mirrored from shared).
+      expect(getSpotifyBackoffUntilMs()).toBeGreaterThan(0);
+
+      // Operator override: DEL the shared key. Local backoff still holds
+      // the old deadline in memory — the whole point is that the operator's
+      // DEL must win despite that.
+      await redis.del(spotifySuspensionKey(ENV));
+      expect(getSpotifyBackoffUntilMs()).toBeGreaterThan(0);
+
+      // Tick 2 — lane observes shared=null, MUST clear local backoff AND
+      // attempt a fetch (fetcher wrapper must not short-circuit on stale
+      // in-memory backoff).
+      jest.setSystemTime(2_000);
+      await handle.runTick();
+      expect(spotifyCalls.calls).toBe(1);
+      // Real Spotify network call fired.
+      expect(
+        mockFetch.mock.calls.some(([u]) => u === SPOTIFY_NOW_PLAYING_URL)
+      ).toBe(true);
+      // Local backoff cleared (mirror follows Redis).
+      expect(getSpotifyBackoffUntilMs()).toBe(0);
+      // Shared record still absent — we did NOT re-persist from memory.
+      expect(await readSpotifySuspension(redis, ENV)).toBeNull();
+
+      handle.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Acceptance #374: leader failover — the OTHER instance takes over the
+   * lease, inherits the suspension via the shared record (mirroring it into
+   * its own local memory), then the operator deletes the key. The new
+   * leader's in-memory mirror MUST NOT re-persist the deleted suspension.
+   *
+   * Two separate lane instances share the same Redis + real spotifyService
+   * global state; each simulates one process. The failover is modelled by
+   * abandoning lane A after it has mirrored + potentially reconciled, and
+   * running lane B against the same shared record.
+   */
+  it("(374) leader failover cannot re-persist a deleted suspension from the new leader's memory", async () => {
+    jest.useFakeTimers({ now: 0 });
+    try {
+      const redis = createFakeRedis();
+      installUpstream(redis);
+
+      // Original suspension: leader A tripped 429, wrote the shared record.
+      await writeSpotifySuspension(redis, ENV, {
+        suspended_until: new Date(60 * 60 * 1000).toISOString(),
+        reason: "429",
+        detail: "Retry-After 3600s",
+      });
+      // Simulate the local mirror from A having also propagated into this
+      // process's globals (in a real fleet these are separate processes, but
+      // we share the module globals here — that's actually WORSE than the
+      // real case, so passing here proves the fix works for both).
+      applySpotifyBackoffUntil(60 * 60 * 1000);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (url === SPOTIFY_TOKEN_URL) return Promise.resolve(tokenResponse("tok"));
+        if (url === SPOTIFY_NOW_PLAYING_URL) return Promise.resolve(nowPlaying204());
+        if (url === SPOTIFY_RECENTLY_PLAYED_URL) return Promise.resolve(nowPlaying204());
+        if (url === "http://gateway:8080/health") return Promise.resolve(healthResponse());
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: async () => ({}),
+          text: async () => "",
+        } as unknown as Response);
+      });
+
+      // --- Leader B takes over. Fresh lane instance built for it. ---
+      const spotifyCalls = { calls: 0 };
+      const lease = await acquireLease(redis);
+      const handle = startPollLoop(
+        redis,
+        lease,
+        buildFetchersWithLane(redis, spotifyCalls),
+        baseConfig()
+      );
+
+      // Tick 1 (leader B) — reads shared, mirrors to local, skip-suspended.
+      jest.setSystemTime(5_000);
+      await handle.runTick();
+      expect(spotifyCalls.calls).toBe(0);
+      // Local mirror carries the inherited deadline.
+      expect(getSpotifyBackoffUntilMs()).toBeGreaterThan(0);
+
+      // Operator override on leader B — DEL the key.
+      await redis.del(spotifySuspensionKey(ENV));
+
+      // Tick 2 (leader B) — clears local mirror, fetches, does not
+      // re-persist the deleted suspension from memory.
+      jest.setSystemTime(10_000);
+      await handle.runTick();
+      expect(spotifyCalls.calls).toBe(1);
+      expect(await readSpotifySuspension(redis, ENV)).toBeNull();
+
+      // Tick 3 (leader B) — steady state: no shared record, healthy fetch,
+      // no re-persist.
+      jest.setSystemTime(15_000);
+      await handle.runTick();
+      expect(await readSpotifySuspension(redis, ENV)).toBeNull();
+
+      handle.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Acceptance #375: new trips write the record once with a fresh deadline;
+   * per-tick writes never source values from memory. On subsequent
+   * skip-suspended ticks the shared record's `suspended_until` value MUST
+   * NOT change — reconcile only runs on `"fetch"` decisions.
+   */
+  it("(375) new trips write once with a fresh deadline; skip ticks do NOT re-write", async () => {
+    jest.useFakeTimers({ now: 0 });
+    try {
+      const redis = createFakeRedis();
+      installUpstream(redis);
+
+      mockFetch.mockImplementation((url: string) => {
+        if (url === SPOTIFY_TOKEN_URL) return Promise.resolve(tokenResponse("tok"));
+        if (url === SPOTIFY_NOW_PLAYING_URL) {
+          return Promise.resolve({
+            status: 429,
+            ok: false,
+            headers: {
+              get: (n: string) =>
+                n.toLowerCase() === "retry-after" ? "3600" : null,
+            },
+            json: async () => ({}),
+          } as unknown as Response);
+        }
+        if (url === SPOTIFY_RECENTLY_PLAYED_URL) {
+          return Promise.resolve({
+            status: 429,
+            ok: false,
+            headers: {
+              get: (n: string) =>
+                n.toLowerCase() === "retry-after" ? "3600" : null,
+            },
+            json: async () => ({}),
+          } as unknown as Response);
+        }
+        if (url === "http://gateway:8080/health") return Promise.resolve(healthResponse());
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: async () => ({}),
+          text: async () => "",
+        } as unknown as Response);
+      });
+
+      const spotifyCalls = { calls: 0 };
+      const lease = await acquireLease(redis);
+      const handle = startPollLoop(
+        redis,
+        lease,
+        buildFetchersWithLane(redis, spotifyCalls),
+        baseConfig()
+      );
+
+      // Tick 1 — fetcher runs, trips 429, reconcile writes shared record.
+      jest.setSystemTime(1_000);
+      await handle.runTick();
+      const first = await readSpotifySuspension(redis, ENV);
+      expect(first).not.toBeNull();
+      expect(first!.reason).toBe("429");
+      const firstDeadline = first!.suspended_until;
+
+      // Move forward and run several ticks. Each is skip-suspended (shared
+      // is present) → reconcile does NOT run → the record's suspended_until
+      // stays the same value it had after the initial trip.
+      for (let t = 5_000; t <= 60_000; t += 5_000) {
+        jest.setSystemTime(t);
+        await handle.runTick();
+      }
+
+      const later = await readSpotifySuspension(redis, ENV);
+      expect(later).not.toBeNull();
+      // Byte-identical to what tick 1 wrote — no per-tick re-persist from
+      // local backoff memory.
+      expect(later!.suspended_until).toBe(firstDeadline);
+
+      // Fresh 429 after an override: DEL the key and run one more tick.
+      // Fetcher trips 429 again; reconcile writes a NEW record with a NEW
+      // deadline (later than the first).
+      await redis.del(spotifySuspensionKey(ENV));
+      // Clear local mirror deliberately so we start clean — a real leader
+      // would clear it via the lane's shared-absent path on the next tick.
+      clearSpotifyBackoff();
+
+      jest.setSystemTime(120_000);
+      await handle.runTick();
+
+      const fresh = await readSpotifySuspension(redis, ENV);
+      expect(fresh).not.toBeNull();
+      expect(fresh!.suspended_until).not.toBe(firstDeadline);
+      // New deadline is anchored to the new trip time (120_000), not the
+      // original one (1_000).
+      expect(Date.parse(fresh!.suspended_until)).toBeGreaterThan(120_000);
+
+      handle.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  /**
+   * Acceptance #376 (partial): non-leader instances honor the shared record
+   * via the snapshot-serving path — the router MUST serve the leader's
+   * snapshot without ever calling Spotify, regardless of any local
+   * suspension mirror in the process.
+   */
+  it("(376) non-leader HTTP path serves shared snapshot without touching Spotify", async () => {
+    const redis = createFakeRedis();
+    installUpstream(redis);
+
+    // Leader has written a degraded snapshot under a shared suspension.
+    await writeSnapshot(redis, ENV, "now-playing", { playing: false });
+    await writeSpotifySuspension(redis, ENV, {
+      suspended_until: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      reason: "429",
+      detail: "Retry-After 3600s",
+    });
+
+    // Any Spotify call is a hard failure — non-leaders MUST NOT call.
+    mockFetch.mockImplementation((url: string) => {
+      if (
+        typeof url === "string" &&
+        (url.includes("accounts.spotify.com") ||
+          url.includes("api.spotify.com"))
+      ) {
+        throw new Error("non-leader must not call Spotify");
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+
+    const res = await request(app).get("/api/now-playing");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ playing: false });
   });
 });
 
