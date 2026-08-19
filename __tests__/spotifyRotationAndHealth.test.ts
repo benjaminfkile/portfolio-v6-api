@@ -406,6 +406,7 @@ describe("shared health record (task #112) — writes on success and failure", (
   ): ReturnType<typeof createSpotifyLane> {
     return createSpotifyLane(
       {
+        isDisabled: async () => false,
         isAuthSuspended: () => isSpotifyAuthSuspended(),
         getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
         applyAuthSuspension: (reason: string) => suspendSpotifyAuth(reason),

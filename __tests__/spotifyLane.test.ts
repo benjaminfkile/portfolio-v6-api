@@ -27,6 +27,7 @@ function buildConfig() {
 
 function buildDeps(overrides: Partial<SpotifyLaneDeps> = {}): SpotifyLaneDeps {
   return {
+    isDisabled: async () => false,
     isAuthSuspended: () => false,
     getBackoffUntilMs: () => 0,
     applyAuthSuspension: () => undefined,

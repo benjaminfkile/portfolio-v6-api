@@ -1,21 +1,32 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
+import { getDb } from "../db/db";
 import { IAppSecrets } from "../interfaces";
 
 /**
- * Spotify OAuth for the admin reconnect flow (§4.6).
+ * Spotify OAuth for the admin reconnect flow (§4.6 / task #113).
  *
  * Since Spotify's June 2026 policy change expires refresh tokens 180 days after
  * authorization, re-authorization is a twice-a-year routine. This service holds
- * the pieces the adminSpotifyRouter composes: single-use `state` tokens, the
- * authorize-URL builder, and the code→token exchange. Task #112 made the admin
- * reconnect flow the ONLY bootstrap (no more static `spotify_refresh_token`
- * secret, no more one-time script) — everything else in the app reads the
- * token this flow writes.
+ * the pieces the adminIntegrationsRouter composes: single-use `state` tokens
+ * (DB-backed, task #113), the authorize-URL builder, and the code→token
+ * exchange. Task #112 made the admin reconnect flow the ONLY bootstrap
+ * (no more static `spotify_refresh_token` secret, no more one-time script) —
+ * everything else in the app reads the token this flow writes.
  *
- * State tokens are opaque 256-bit values in an in-memory map. Only a verified
- * admin can mint one, the callback consumes it (single-use), and it expires
- * after 10 minutes — so an unauthenticated hit on the public callback URL can
- * never cause a token to be stored.
+ * State tokens are opaque 256-bit values persisted (sha256-hashed) to the
+ * shared `spotify_oauth_states` table. Only a verified admin can mint one,
+ * and the callback validates + marks it consumed in a single atomic UPDATE so
+ * a second callback with the same state fails, even across instances. The
+ * table row expires 10 minutes after mint — expired/unknown/consumed tokens
+ * are indistinguishable to the caller (§7 pattern), which is what the failure
+ * UX depends on.
+ *
+ * Why DB and not in-memory: the API runs as multiple instances behind a load
+ * balancer. A state minted on instance A must be validatable on B when the
+ * Spotify callback round-robins to a different node — otherwise every
+ * reconnect surfaces the "invalid or expired" failure UX and no grant is
+ * ever stored. Same shared-record-is-authoritative philosophy as the preview
+ * tokens migration (task #105) and the Spotify suspension record (task #97).
  */
 
 export const SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
@@ -32,15 +43,11 @@ export const SPOTIFY_OAUTH_SCOPE =
 /** Authorize flows are human-paced; 10 minutes is generous but still bounded. */
 export const SPOTIFY_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
-interface PendingAuthorization {
-  /** Admin URL to send the browser back to after the callback, if provided. */
-  returnTo: string | null;
-  expiresAt: number;
-}
+const OAUTH_STATES_TABLE = "spotify_oauth_states";
 
-// state -> pending authorization. In-memory on purpose (single container,
-// single admin class); a lost state just means clicking Connect again.
-const pending = new Map<string, PendingAuthorization>();
+function hashState(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
 
 /**
  * The exact redirect URI Spotify sends the browser back to. Must match a
@@ -58,41 +65,59 @@ export function resolveRedirectUri(secrets: IAppSecrets): string {
 
 /**
  * Mint a single-use state token binding this authorization attempt to the
- * admin's `return_to` URL. Only http(s) return URLs are kept — anything else
- * (or none) falls back to the callback's own confirmation page.
+ * admin's `return_to` URL, persisting the sha256 hash to the shared table so
+ * ANY instance can validate the eventual callback. Only http(s) return URLs
+ * are kept — anything else (or none) falls back to the callback's own
+ * confirmation page. Expired rows are dropped opportunistically here so the
+ * table self-cleans as states are minted.
  */
-export function mintOAuthState(
+export async function mintOAuthState(
   returnTo: string | null | undefined,
   now: number = Date.now()
-): string {
+): Promise<string> {
   const state = randomBytes(32).toString("hex");
-  pending.set(state, {
-    returnTo: isHttpUrl(returnTo) ? (returnTo as string) : null,
-    expiresAt: now + SPOTIFY_OAUTH_STATE_TTL_MS,
+  const expiry = now + SPOTIFY_OAUTH_STATE_TTL_MS;
+  const db = getDb();
+  await db(OAUTH_STATES_TABLE).where("expires_at", "<=", new Date(now)).del();
+  await db(OAUTH_STATES_TABLE).insert({
+    state_hash: hashState(state),
+    return_to: isHttpUrl(returnTo) ? (returnTo as string) : null,
+    expires_at: new Date(expiry),
   });
   return state;
 }
 
 /**
- * Consume a state token: valid at most once, and only before expiry. Unknown,
- * reused, and expired states are indistinguishable to the caller (§7 pattern).
+ * Consume a state token: valid at most once, and only before expiry. The
+ * validate + mark-consumed happens as a single conditional UPDATE, so a second
+ * callback with the same state (even from a different instance) sees a zero
+ * row count and fails. Unknown, reused, and expired states are
+ * indistinguishable to the caller (§7 pattern).
  */
-export function consumeOAuthState(
+export async function consumeOAuthState(
   state: string | undefined | null,
   now: number = Date.now()
-): { valid: boolean; returnTo: string | null } {
+): Promise<{ valid: boolean; returnTo: string | null }> {
   if (!state) {
     return { valid: false, returnTo: null };
   }
-  const entry = pending.get(state);
-  if (!entry) {
+  const db = getDb();
+  const stateHash = hashState(state);
+  // Atomic single-use: return the row iff we successfully flipped it from
+  // "unconsumed and unexpired" to "consumed now". A concurrent second consume
+  // sees consumed_at != null and the UPDATE finds zero rows.
+  const nowDate = new Date(now);
+  const rows = (await db(OAUTH_STATES_TABLE)
+    .where({ state_hash: stateHash })
+    .whereNull("consumed_at")
+    .andWhere("expires_at", ">", nowDate)
+    .update({ consumed_at: nowDate }, ["return_to"])) as Array<{
+    return_to: string | null;
+  }>;
+  if (rows.length === 0) {
     return { valid: false, returnTo: null };
   }
-  pending.delete(state); // single-use, even when expired
-  if (entry.expiresAt <= now) {
-    return { valid: false, returnTo: null };
-  }
-  return { valid: true, returnTo: entry.returnTo };
+  return { valid: true, returnTo: rows[0].return_to ?? null };
 }
 
 /** The Spotify authorize URL the admin's browser is sent to. */
@@ -165,7 +190,7 @@ function isHttpUrl(value: string | null | undefined): boolean {
   }
 }
 
-/** Test-only: drop every pending authorization. */
-export function _clearSpotifyOAuthStateForTests(): void {
-  pending.clear();
+/** Test-only: drop every pending authorization row. */
+export async function clearOAuthStates(): Promise<void> {
+  await getDb()(OAUTH_STATES_TABLE).del();
 }

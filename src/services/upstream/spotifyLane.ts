@@ -100,6 +100,16 @@ export const SPOTIFY_AUTH_SUSPENSION_TTL_MS = 24 * 60 * 60 * 1000;
  */
 export interface SpotifyLaneDeps {
   /**
+   * Is Spotify explicitly disabled by the admin? (task #113 —
+   * serviceSettingsStore.isSpotifyDisabled). When true the lane makes ZERO
+   * Spotify calls regardless of every other signal (grant present or not,
+   * viewer count, backoff state). Checked FIRST on every tick so a disable
+   * flip takes effect within one tick and no post-disable Spotify traffic
+   * can leak. Read is DB-cheap; a read failure is treated as "not disabled"
+   * (fail open — a DB blip must never disable a working integration).
+   */
+  isDisabled(): Promise<boolean>;
+  /**
    * Is Spotify currently auth-suspended in-process? (spotifyService.isSpotifyAuthSuspended)
    */
   isAuthSuspended(): boolean;
@@ -291,6 +301,17 @@ export function createSpotifyLane(
   }
 
   async function planTick(now: number): Promise<SpotifyLaneDecision> {
+    // Task #113 — the admin disable flag is checked FIRST, before health
+    // inheritance, before shared suspension, before anything else. A disabled
+    // Spotify integration must make ZERO calls anywhere (no token endpoint,
+    // no health inherit which is Redis-only anyway, no presence). A read
+    // failure is treated as "not disabled" (fail open — a DB blip must never
+    // disable a working integration).
+    const disabled = await deps.isDisabled().catch(() => false);
+    if (disabled) {
+      return "skip-suspended";
+    }
+
     // Task #112 — one-time inherit of the shared health record into the
     // local mirror so a freshly-elected leader answers "unknown" for exactly
     // one tick, not indefinitely. Failure to read is treated as "nothing to

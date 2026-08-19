@@ -134,6 +134,7 @@ function buildFetchersWithLane(
 ): PollFetchers {
   const lane = createSpotifyLane(
     {
+      isDisabled: async () => false,
       isAuthSuspended: laneDeps.isAuthSuspended ?? isSpotifyAuthSuspended,
       getBackoffUntilMs: getSpotifyBackoffUntilMs,
       applyAuthSuspension: (reason: string) => suspendSpotifyAuth(reason),

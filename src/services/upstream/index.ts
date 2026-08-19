@@ -93,6 +93,7 @@ import {
   rotateSpotifyRefreshToken,
   SPOTIFY_SERVICE_KEY,
 } from "../spotifyTokenStore";
+import { isSpotifyDisabled } from "../serviceSettingsStore";
 
 /** Handle returned from bootstrap — kept small for shutdown. */
 export interface UpstreamHandle {
@@ -178,6 +179,14 @@ export function buildFetchers(
 
   return {
     async nowPlaying() {
+      // Task #113 — the admin disable flag makes zero Spotify calls
+      // regardless of grant state. Checked FIRST so a disable flip takes
+      // effect within one tick even on a code path that bypasses the lane
+      // (tests, non-lane callers). A DB read failure fails open (treated
+      // as enabled) so a Postgres blip cannot silently disable a working
+      // integration.
+      const disabled = await isSpotifyDisabled().catch(() => false);
+      if (disabled) return null;
       // While under Spotify's 429 backoff (task #90) skip the tick entirely —
       // returning null tells the poll loop to preserve the last-good snapshot
       // and NOT record a failure. Non-Spotify lanes are unaffected.
@@ -294,6 +303,9 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
   // build a pure fake.
   const spotifyLane = createSpotifyLane(
     {
+      async isDisabled() {
+        return isSpotifyDisabled();
+      },
       isAuthSuspended: () => isSpotifyAuthSuspended(),
       getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
       applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),

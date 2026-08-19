@@ -31,7 +31,7 @@ import {
 import {
   mintOAuthState,
   SPOTIFY_OAUTH_TOKEN_URL,
-  _clearSpotifyOAuthStateForTests,
+  clearOAuthStates,
 } from "../src/services/spotifyOAuthService";
 import {
   SPOTIFY_NOW_PLAYING_URL,
@@ -137,10 +137,11 @@ beforeEach(async () => {
   mockFetch.mockReset();
   mockVerify.mockReset();
   mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
-  _clearSpotifyOAuthStateForTests();
+  await clearOAuthStates();
   _resetSpotifyTokenStoreForTests();
   _resetSpotifyStateForTests();
   await getDb()("service_tokens").del();
+  await getDb()("service_settings").del();
 });
 
 describe("spotifyTokenStore persistence", () => {
@@ -390,7 +391,7 @@ describe("reconnect flow end-to-end (callback → store → now-playing)", () =>
       return Promise.reject(new Error(`unexpected url ${url}`));
     });
 
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     const res = await request(app).get(
       `/api/admin/spotify/callback?state=${state}&code=auth-code-1`
     );
@@ -405,7 +406,7 @@ describe("reconnect flow end-to-end (callback → store → now-playing)", () =>
     expect(stored?.refreshToken).toBe("minted-by-callback");
   });
 
-  it("status reports the admin source with the 180-day expiry", async () => {
+  it("status reports authorized_at + 180-day expiry with the new truthful contract", async () => {
     await saveSpotifyRefreshToken(CLIENT_SECRET, "stored-refresh-token");
 
     const res = await request(app)
@@ -413,8 +414,10 @@ describe("reconnect flow end-to-end (callback → store → now-playing)", () =>
       .set(...AUTH);
 
     expect(res.status).toBe(200);
-    expect(res.body.data.connected).toBe(true);
-    expect(res.body.data.source).toBe("admin");
+    // Task #113: the new truthful contract. With a stored grant and no
+    // observed error/backoff/disable, the state is `connected` and the
+    // 180-day expiry hangs off the grant's authorized_at.
+    expect(res.body.data.state).toBe("connected");
     const authorizedAt = new Date(res.body.data.authorized_at).getTime();
     const expiresAt = new Date(res.body.data.expires_at).getTime();
     expect(expiresAt - authorizedAt).toBe(SPOTIFY_REFRESH_TOKEN_LIFETIME_MS);
