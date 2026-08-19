@@ -44,7 +44,8 @@ const SECRETS: Partial<IAppSecrets> = {
   port: "3002",
   spotify_client_id: "client-id-abc",
   spotify_client_secret: "client-secret-xyz",
-  spotify_refresh_token: "secrets-refresh-token",
+  // Task #112 removed the static spotify_refresh_token fallback entirely —
+  // client id/secret remain because they are app config, not a grant.
 };
 
 const mockFetch = jest.fn();
@@ -187,16 +188,18 @@ describe("admin routes (§5.3 guard + status/connect)", () => {
     ).toBe(401);
   });
 
-  it("status falls back to the secrets token when no DB row exists", async () => {
-    // No DB is initialized in this suite, so the store degrades to null and the
-    // static secret is what reports connected.
+  it("task #112 — status reports DISCONNECTED with no DB row (no static fallback)", async () => {
+    // No DB is initialized in this suite, so the store degrades to null.
+    // The static spotify_refresh_token fallback was removed in task #112, so
+    // the endpoint must NOT surface `source: "secrets"` — the integration is
+    // simply DISCONNECTED until the admin reconnects.
     const res = await request(app)
       .get("/api/admin/spotify/status")
       .set(...AUTH);
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({
-      connected: true,
-      source: "secrets",
+      connected: false,
+      source: null,
       authorized_at: null,
       expires_at: null,
     });

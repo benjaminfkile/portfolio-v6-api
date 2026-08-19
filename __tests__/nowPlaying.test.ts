@@ -1,4 +1,22 @@
 import request from "supertest";
+
+// Task #112 killed the static `spotify_refresh_token` secret fallback — the
+// grant now comes exclusively from the encrypted service_tokens table. This
+// suite has no database, so we stub the store's read to inject a working
+// refresh token; the HTTP router then behaves exactly as it does in
+// production against a real reconnected admin.
+jest.mock("../src/services/spotifyTokenStore", () => {
+  const actual = jest.requireActual("../src/services/spotifyTokenStore");
+  return {
+    ...actual,
+    getStoredSpotifyToken: jest.fn().mockResolvedValue({
+      refreshToken: "refresh-token-123",
+      authorizedAt: new Date(0),
+    }),
+    rotateSpotifyRefreshToken: jest.fn().mockResolvedValue(true),
+  };
+});
+
 import app from "../src/app";
 import {
   getNowPlaying,
@@ -163,7 +181,6 @@ beforeAll(() => {
     node_env: "development",
     spotify_client_id: CONFIG.clientId,
     spotify_client_secret: CONFIG.clientSecret,
-    spotify_refresh_token: CONFIG.refreshToken,
   });
 });
 

@@ -1,6 +1,7 @@
 import {
   deleteStoredServiceToken,
   getStoredServiceToken,
+  rotateServiceTokenCiphertext,
   saveServiceToken,
   _resetServiceTokenStoreForTests,
 } from "./serviceTokenStore";
@@ -13,9 +14,9 @@ import {
  *
  * Since Spotify's June 2026 policy change, refresh tokens expire 180 days after
  * the user's original authorization. The admin reconnect flow mints a new one in
- * the browser and stores it here; `/api/now-playing` prefers this stored token
- * and falls back to the `spotify_refresh_token` secret for installs still on the
- * one-time `scripts/spotify-auth.ts` bootstrap.
+ * the browser and stores it here; this store is the ONLY grant source
+ * (task #112 killed the static `spotify_refresh_token` secret fallback, and
+ * with it the one-time bootstrap script).
  *
  * The `encryptionKey` argument these helpers take used to be the Spotify client
  * secret verbatim; callers now pass the resolved encryption key
@@ -48,6 +49,31 @@ export async function saveSpotifyRefreshToken(
     throw new Error("An encryption key and refresh token are both required");
   }
   await saveServiceToken(SPOTIFY_SERVICE_KEY, encryptionKey, refreshToken);
+}
+
+/**
+ * Persist a rotated refresh token from a Spotify refresh response (task #112).
+ * Under Spotify's June 2026 rotation/reuse behavior, every successful refresh
+ * MAY return a new `refresh_token` — failing to persist it kills the stored
+ * grant within days (the old token becomes unusable on the next refresh).
+ * `authorized_at` is PRESERVED because rotation does not extend the 180-day
+ * validity window (§4.6). Idempotent / last-write-wins; only the polling
+ * leader refreshes (single-poller invariant, task #84). Returns true when
+ * a row was rotated, false when no stored row exists (defensive: this should
+ * only happen if the admin disconnected mid-refresh).
+ */
+export async function rotateSpotifyRefreshToken(
+  encryptionKey: string,
+  refreshToken: string
+): Promise<boolean> {
+  if (!encryptionKey || !refreshToken) {
+    throw new Error("An encryption key and refresh token are both required");
+  }
+  return rotateServiceTokenCiphertext(
+    SPOTIFY_SERVICE_KEY,
+    encryptionKey,
+    refreshToken
+  );
 }
 
 /** The stored (admin-connected) token, or null when absent/undecryptable. */

@@ -5,7 +5,10 @@ import {
   NowPlaying,
   SpotifyConfig,
 } from "../services/spotifyService";
-import { getStoredSpotifyToken } from "../services/spotifyTokenStore";
+import {
+  getStoredSpotifyToken,
+  rotateSpotifyRefreshToken,
+} from "../services/spotifyTokenStore";
 import { resolveEncryptionKey } from "../services/serviceTokenStore";
 import {
   readLocalSnapshot,
@@ -39,11 +42,22 @@ const NOT_PLAYING: NowPlaying = { playing: false };
 async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
   const secrets = req.app.get("secrets") as IAppSecrets | undefined;
   const clientSecret = secrets?.spotify_client_secret ?? "";
-  const stored = await getStoredSpotifyToken(resolveEncryptionKey(secrets));
+  const encryptionKey = resolveEncryptionKey(secrets);
+  const stored = await getStoredSpotifyToken(encryptionKey);
   return {
     clientId: secrets?.spotify_client_id ?? "",
     clientSecret,
-    refreshToken: stored?.refreshToken ?? secrets?.spotify_refresh_token ?? "",
+    // service_tokens is the ONLY grant source (task #112) — no static
+    // spotify_refresh_token secret fallback. Missing row = DISCONNECTED,
+    // silent, zero Spotify calls (reuse auth-suspension machinery).
+    refreshToken: stored?.refreshToken ?? "",
+    // Persist a rotated refresh token from any Spotify refresh response
+    // (task #112). authorized_at is preserved (rotation does not extend
+    // the 180-day window). Only reached from this router when Redis is
+    // unconfigured / errored — otherwise the leader's fetcher persists.
+    onRefreshTokenRotated: async (newRefreshToken: string) => {
+      await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
+    },
   };
 }
 

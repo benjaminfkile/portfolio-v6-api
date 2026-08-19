@@ -54,7 +54,8 @@ const SECRETS: Partial<IAppSecrets> = {
   port: "3002",
   spotify_client_id: "client-id-abc",
   spotify_client_secret: CLIENT_SECRET,
-  spotify_refresh_token: "", // no static fallback unless a test sets one
+  // Task #112 removed the static spotify_refresh_token fallback entirely.
+  // The admin reconnect flow is the only bootstrap.
 };
 
 const mockFetch = jest.fn();
@@ -181,20 +182,28 @@ describe("GET /api/admin/integrations (§4.7 enumeration)", () => {
     });
   });
 
-  it("reports the spotify secrets fallback when only the static secret is set", async () => {
-    app.set("secrets", { ...SECRETS, spotify_refresh_token: "static-token" });
+  it("task #112 — a static spotify_refresh_token secret is IGNORED (no fallback)", async () => {
+    // Even if an old-style static secret is still present in the environment,
+    // the integrations status must show DISCONNECTED — service_tokens is the
+    // sole grant source and no row exists. The status endpoint MUST NOT
+    // surface `source: "secrets"` any more.
+    app.set("secrets", {
+      ...SECRETS,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      spotify_refresh_token: "static-token-that-must-be-ignored",
+    } as any);
     try {
       const res = await request(app).get("/api/admin/integrations").set(...AUTH);
       const spotify = res.body.data.integrations.find(
         (e: any) => e.key === "spotify"
       );
       expect(spotify).toMatchObject({
-        connected: true,
-        source: "secrets",
+        connected: false,
+        source: null,
         authorized_at: null,
         expires_at: null,
       });
-      expect(JSON.stringify(res.body)).not.toContain("static-token");
+      expect(JSON.stringify(res.body)).not.toContain("static-token-that-must-be-ignored");
     } finally {
       app.set("secrets", SECRETS);
     }

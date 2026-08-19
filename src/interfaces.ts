@@ -16,7 +16,6 @@ export interface IAppSecrets {
   aws_region: string;
   spotify_client_id: string;
   spotify_client_secret: string;
-  spotify_refresh_token: string;
   /**
    * Redirect URI for the admin Spotify reconnect flow (adminSpotifyRouter) —
    * must EXACTLY match a Redirect URI registered on the Spotify app. Optional:

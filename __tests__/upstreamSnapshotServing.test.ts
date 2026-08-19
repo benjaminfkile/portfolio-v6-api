@@ -43,7 +43,6 @@ beforeAll(() => {
     node_env: ENV,
     spotify_client_id: "spid",
     spotify_client_secret: "sec",
-    spotify_refresh_token: "rt",
     gateway_health_url: "http://gateway.test/api/health",
     gateway_realtime_token: REALTIME_TOKEN,
   });

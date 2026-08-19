@@ -62,7 +62,10 @@
  * their own cadence.
  */
 
-import type { SpotifySuspensionRecord } from "./snapshotStore";
+import type {
+  SpotifyHealthRecord,
+  SpotifySuspensionRecord,
+} from "./snapshotStore";
 
 /** How often the lane rechecks `service_tokens.updated_at` while suspended. */
 export const SPOTIFY_AUTH_RESUME_CHECK_MS = 60 * 1000;
@@ -156,6 +159,26 @@ export interface SpotifyLaneDeps {
   writeSharedSuspension(record: SpotifySuspensionRecord): Promise<void>;
   /** Delete the shared Spotify suspension record (natural recovery / override). */
   clearSharedSuspension(): Promise<void>;
+  /**
+   * Snapshot the process-local health mirror (task #112). Used by the
+   * reconciler to flush what the fetcher just observed into the shared
+   * health record so any instance / the truthful status contract
+   * (task 113, 2/2) sees the same truth.
+   */
+  readLocalHealth(): SpotifyHealthRecord;
+  /**
+   * Read the shared health record — used by a freshly-elected leader on
+   * its first tick so it inherits what the previous leader observed instead
+   * of starting blank.
+   */
+  readSharedHealth(): Promise<SpotifyHealthRecord | null>;
+  /** Persist / overwrite the shared health record. */
+  writeSharedHealth(record: SpotifyHealthRecord): Promise<void>;
+  /**
+   * Merge a shared health record into the process-local mirror. Called
+   * exactly once, on the fresh leader's first tick.
+   */
+  applyHealthMirror(record: SpotifyHealthRecord): void;
 }
 
 /** Runtime knobs — kept small so tests can override any subset. */
@@ -222,6 +245,12 @@ export function createSpotifyLane(
   let nextDueAt = 0;
   let wasActive = false;
 
+  // Task #112 — one-time health inheritance: on the very first tick, a fresh
+  // leader loads the shared health record into its in-memory mirror so it
+  // does not surface "unknown" to the status endpoint before observing its
+  // own first fetch. Subsequent ticks only WRITE the mirror out.
+  let inheritedHealth = false;
+
   async function checkActive(now: number): Promise<boolean> {
     // 1) Recent-public-request signal — cheap Redis read; either it landed in
     //    the window or it didn't. A Redis blip returns null → treated as "no
@@ -262,6 +291,18 @@ export function createSpotifyLane(
   }
 
   async function planTick(now: number): Promise<SpotifyLaneDecision> {
+    // Task #112 — one-time inherit of the shared health record into the
+    // local mirror so a freshly-elected leader answers "unknown" for exactly
+    // one tick, not indefinitely. Failure to read is treated as "nothing to
+    // inherit" — the mirror stays at its process defaults.
+    if (!inheritedHealth) {
+      inheritedHealth = true;
+      const priorHealth = await deps.readSharedHealth().catch(() => null);
+      if (priorHealth) {
+        deps.applyHealthMirror(priorHealth);
+      }
+    }
+
     // 1) SHARED SUSPENSION — Redis is the source of truth for whether the
     //    leader should fetch. This subsumes both 429 and auth suspensions and
     //    guarantees that a freshly-elected leader honors a known suspension
@@ -371,6 +412,14 @@ export function createSpotifyLane(
   }
 
   async function reconcileAfterFetch(now: number): Promise<void> {
+    // Task #112 — always flush the health mirror after a fetch. Whatever the
+    // fetcher observed (success / invalid_grant / rate_limited / other) is
+    // now the canonical health for this environment; other instances read
+    // it via the shared record. Failure is logged and swallowed by
+    // writeSharedHealth so a Redis blip cannot fail the poll loop.
+    const health = deps.readLocalHealth();
+    await deps.writeSharedHealth(health);
+
     // After the fetcher runs, mirror the resulting local state to Redis so
     // every instance sees the same suspension fact on the next tick.
     const localAuth = deps.isAuthSuspended();

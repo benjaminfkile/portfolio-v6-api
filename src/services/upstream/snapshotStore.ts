@@ -335,3 +335,137 @@ export async function deleteSpotifySuspension(
     );
   }
 }
+
+// ============================================================================
+// Shared Spotify health record (task #112)
+// ============================================================================
+
+/**
+ * Redis key holding the SHARED Spotify health record — used by the truthful
+ * `/api/admin/spotify/status` contract (task 113, 2/2) so the admin panel
+ * reports what the LEADER actually observed against Spotify, not whatever any
+ * one instance happens to have in memory. The record is written by the poll
+ * loop's Spotify lane after every fetch attempt.
+ */
+export function spotifyHealthKey(env: string): string {
+  return `portfolio-v6-api:${env}:snapshot:now-playing:health`;
+}
+
+/** Categorized error kinds recorded on the health record (task #112). */
+export type SpotifyHealthErrorKind = "invalid_grant" | "rate_limited" | "other";
+
+/** One entry in `SpotifyHealthRecord.last_error`. */
+export interface SpotifyHealthLastError {
+  /** Categorized failure — task 2/2's status endpoint keys off this. */
+  kind: SpotifyHealthErrorKind;
+  /** ISO 8601 wall-clock of the failure. */
+  at: string;
+  /**
+   * ISO 8601 wall-clock the 429 window clears at, when `kind === "rate_limited"`.
+   * Absent for other kinds. Matches the shared suspension record's
+   * `suspended_until` for the same 429.
+   */
+  rate_limited_until?: string;
+}
+
+/**
+ * Shared health snapshot for the Spotify lane (task #112). Written by the
+ * leader on every fetch attempt so any instance / a freshly-elected leader /
+ * the admin status endpoint (task 113, 2/2) sees the same truth about when
+ * Spotify last answered us cleanly and what the last failure was. Absent
+ * fields mean "never observed" (fresh install, or the leader has not run a
+ * tick yet).
+ */
+export interface SpotifyHealthRecord {
+  /** ISO 8601 wall-clock of the last 200 from a Spotify API fetch. */
+  last_success_at: string | null;
+  /** Most recent categorized error, or null if the last observation was a success. */
+  last_error: SpotifyHealthLastError | null;
+}
+
+/**
+ * TTL floor on the health record. Kept modest — health is refreshed on every
+ * tick, so a live leader keeps it fresh; the TTL just bounds staleness after
+ * a leader dies without a replacement (rare). The status endpoint reads this
+ * best-effort and degrades to "unknown" on absence.
+ */
+export const SPOTIFY_HEALTH_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Overwrite the shared health record. Failure is logged and swallowed —
+ * health tracking must never crash the poll loop.
+ */
+export async function writeSpotifyHealth(
+  client: RedisClient,
+  env: string,
+  record: SpotifyHealthRecord
+): Promise<void> {
+  const key = spotifyHealthKey(env);
+  try {
+    await client.set(key, JSON.stringify(record), {
+      pxMs: SPOTIFY_HEALTH_TTL_MS,
+    });
+  } catch (err) {
+    console.error(
+      `[snapshotStore] health write failed for ${key}:`,
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/**
+ * Read the shared health record, or `null` when absent / on Redis error /
+ * when the stored JSON does not parse. The status endpoint treats `null`
+ * as "no health observed yet" and degrades gracefully.
+ */
+export async function readSpotifyHealth(
+  client: RedisClient,
+  env: string
+): Promise<SpotifyHealthRecord | null> {
+  const key = spotifyHealthKey(env);
+  let raw: string | null = null;
+  try {
+    raw = await client.get(key);
+  } catch (err) {
+    console.error(
+      `[snapshotStore] health read failed for ${key}:`,
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(raw) as SpotifyHealthRecord;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      ("last_success_at" in parsed || "last_error" in parsed)
+    ) {
+      return {
+        last_success_at:
+          typeof parsed.last_success_at === "string"
+            ? parsed.last_success_at
+            : null,
+        last_error:
+          parsed.last_error &&
+          typeof parsed.last_error === "object" &&
+          typeof parsed.last_error.kind === "string" &&
+          typeof parsed.last_error.at === "string"
+            ? {
+                kind: parsed.last_error.kind as SpotifyHealthErrorKind,
+                at: parsed.last_error.at,
+                ...(typeof parsed.last_error.rate_limited_until === "string"
+                  ? {
+                      rate_limited_until:
+                        parsed.last_error.rate_limited_until,
+                    }
+                  : {}),
+              }
+            : null,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

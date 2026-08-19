@@ -39,6 +39,12 @@ function buildDeps(overrides: Partial<SpotifyLaneDeps> = {}): SpotifyLaneDeps {
     readSharedSuspension: async () => null,
     writeSharedSuspension: async () => undefined,
     clearSharedSuspension: async () => undefined,
+    // Task #112 health-record deps — defaults are inert (null health, no-op
+    // writes) so existing tests don't have to construct them.
+    readLocalHealth: () => ({ last_success_at: null, last_error: null }),
+    readSharedHealth: async () => null,
+    writeSharedHealth: async () => undefined,
+    applyHealthMirror: () => undefined,
     ...overrides,
   };
 }

@@ -149,6 +149,13 @@ function buildFetchersWithLane(
       writeSharedSuspension: async (record) =>
         writeSpotifySuspension(redis, env, record),
       clearSharedSuspension: async () => deleteSpotifySuspension(redis, env),
+      // Task #112 health-record deps — inert defaults for this integration
+      // test (the suspension/backoff behavior under test is orthogonal to
+      // the health record).
+      readLocalHealth: () => ({ last_success_at: null, last_error: null }),
+      readSharedHealth: async () => null,
+      writeSharedHealth: async () => undefined,
+      applyHealthMirror: () => undefined,
     },
     {
       publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
