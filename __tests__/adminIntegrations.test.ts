@@ -165,8 +165,7 @@ describe("GET /api/admin/integrations (§4.7 enumeration)", () => {
       key: "spotify",
       name: "Spotify",
       auth_kind: "oauth",
-      connected: false,
-      source: null,
+      state: "disconnected",
       authorized_at: null,
       expires_at: null,
     });
@@ -202,8 +201,7 @@ describe("GET /api/admin/integrations (§4.7 enumeration)", () => {
         (e: any) => e.key === "spotify"
       );
       expect(spotify).toMatchObject({
-        connected: false,
-        source: null,
+        state: "disconnected",
         authorized_at: null,
         expires_at: null,
       });
@@ -397,8 +395,7 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
     const spotify = res.body.data.integrations.find(
       (e: any) => e.key === "spotify"
     );
-    expect(spotify.connected).toBe(true);
-    expect(spotify.source).toBe("admin");
+    expect(spotify.state).toBe("connected");
     expect(spotify.expires_at).not.toBeNull();
     expect(JSON.stringify(res.body)).not.toContain("stored-refresh-token");
   });

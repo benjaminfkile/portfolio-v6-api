@@ -125,8 +125,24 @@ adminIntegrationsRouter.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const secrets = getSecrets(req);
+      const upstream = getUpstream(req);
       const integrations = await Promise.all(
-        INTEGRATION_DESCRIPTORS.map((d) => computeStatus(d, secrets))
+        INTEGRATION_DESCRIPTORS.map(async (d) => {
+          // Spotify's entry carries the truthful 5-state contract (task #113)
+          // — the same shape as GET /spotify/status — because the admin card
+          // renders `state` directly; the presence-derived {connected,source}
+          // shape remains for the credential kinds.
+          if (d.key === SPOTIFY_KEY) {
+            const status = await computeSpotifyStatus(secrets, upstream);
+            return {
+              key: d.key,
+              name: d.display_name,
+              auth_kind: d.auth_kind,
+              ...status,
+            };
+          }
+          return computeStatus(d, secrets);
+        })
       );
       res.status(200).json(success({ integrations }));
     } catch (err) {
