@@ -27,9 +27,11 @@ import {
   _resetServiceTokenStoreForTests,
 } from "../src/services/serviceTokenStore";
 import {
+  consumeOAuthState,
   mintOAuthState,
   SPOTIFY_OAUTH_TOKEN_URL,
-  _clearSpotifyOAuthStateForTests,
+  SPOTIFY_OAUTH_STATE_TTL_MS,
+  clearOAuthStates,
 } from "../src/services/spotifyOAuthService";
 import {
   SPOTIFY_REFRESH_TOKEN_LIFETIME_MS,
@@ -134,11 +136,13 @@ beforeEach(async () => {
   mockFetch.mockReset();
   mockVerify.mockReset();
   mockVerify.mockResolvedValue(ADMIN_PAYLOAD);
-  _clearSpotifyOAuthStateForTests();
+  await clearOAuthStates();
   _resetServiceTokenStoreForTests();
   _resetSpotifyStateForTests();
   app.set("secrets", SECRETS);
+  app.set("upstream", null);
   await getDb()("service_tokens").del();
+  await getDb()("service_settings").del();
 });
 
 describe("GET /api/admin/integrations (§4.7 enumeration)", () => {
@@ -332,7 +336,7 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
 
   it("callback (parameterized) exchanges the code and persists the token", async () => {
     mockTokenExchange("minted-via-integrations");
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     const res = await request(app).get(
       `/api/admin/integrations/spotify/callback?state=${state}&code=auth-code-1`
     );
@@ -348,7 +352,7 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
 
   it("callback (legacy /spotify alias) still works identically", async () => {
     mockTokenExchange("minted-via-legacy");
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     const res = await request(app).get(
       `/api/admin/spotify/callback?state=${state}&code=auth-code-2`
     );
@@ -362,10 +366,11 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
     expect(stored?.token).toBe("minted-via-legacy");
   });
 
-  it("legacy /spotify/status reports the admin source with 180-day expiry", async () => {
-    // Seed via the parameterized callback, then read via the legacy alias.
+  it("/spotify/status returns the truthful contract (connected + 180-day expiry) after the oauth flow", async () => {
+    // Seed via the parameterized callback, then read via the truthful status
+    // endpoint (task #113).
     mockTokenExchange("stored-refresh-token");
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     await request(app).get(
       `/api/admin/integrations/spotify/callback?state=${state}&code=c`
     );
@@ -374,8 +379,7 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
       .get("/api/admin/spotify/status")
       .set(...AUTH);
     expect(res.status).toBe(200);
-    expect(res.body.data.connected).toBe(true);
-    expect(res.body.data.source).toBe("admin");
+    expect(res.body.data.state).toBe("connected");
     const authorizedAt = new Date(res.body.data.authorized_at).getTime();
     const expiresAt = new Date(res.body.data.expires_at).getTime();
     expect(expiresAt - authorizedAt).toBe(SPOTIFY_REFRESH_TOKEN_LIFETIME_MS);
@@ -384,7 +388,7 @@ describe("oauth connect/callback (parameterized + legacy alias)", () => {
 
   it("GET /integrations shows spotify connected with an expiry after the oauth flow", async () => {
     mockTokenExchange("stored-refresh-token");
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     await request(app).get(
       `/api/admin/integrations/spotify/callback?state=${state}&code=c`
     );
@@ -434,7 +438,7 @@ describe("DELETE /api/admin/integrations/:key (any kind)", () => {
       }
       return Promise.reject(new Error(`unexpected url ${url}`));
     });
-    const state = mintOAuthState("http://localhost:5174/integrations");
+    const state = await mintOAuthState("http://localhost:5174/integrations");
     await request(app).get(
       `/api/admin/integrations/spotify/callback?state=${state}&code=c`
     );
@@ -454,5 +458,375 @@ describe("DELETE /api/admin/integrations/:key (any kind)", () => {
       .delete("/api/admin/integrations/myspace")
       .set(...AUTH);
     expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================================
+// Task #113 — Spotify overhaul 2/2
+// ============================================================================
+
+describe("task #113 — cross-instance OAuth state (spotify_oauth_states)", () => {
+  it("mint on one instance, consume on another (against the same DB) — single-use across instances", async () => {
+    // Simulate two service instances by minting on "A" and consuming on "B":
+    // both call the exported helpers directly, sharing the SAME DB. A concurrent
+    // second consume from either instance must fail — that is the property the
+    // in-memory implementation could not provide behind the multi-instance ALB.
+    const state = await mintOAuthState("http://localhost:5174/integrations");
+
+    // The row is persisted, hashed at rest (never the raw state).
+    const row = await getDb()("spotify_oauth_states").first();
+    expect(row.state_hash).not.toBe(state);
+    expect(row.state_hash).toHaveLength(64); // sha256 hex
+
+    // Instance B consumes it (same DB reads succeed regardless of which
+    // process originally minted the state).
+    const first = await consumeOAuthState(state);
+    expect(first).toEqual({
+      valid: true,
+      returnTo: "http://localhost:5174/integrations",
+    });
+
+    // A second consume — whether from A or B — fails (row marked consumed).
+    const second = await consumeOAuthState(state);
+    expect(second).toEqual({ valid: false, returnTo: null });
+  });
+
+  it("expired states cannot be consumed", async () => {
+    const now = Date.now();
+    const state = await mintOAuthState(null, now);
+    const past = now + SPOTIFY_OAUTH_STATE_TTL_MS + 1;
+    const res = await consumeOAuthState(state, past);
+    expect(res).toEqual({ valid: false, returnTo: null });
+  });
+
+  it("unknown states are indistinguishable from expired/consumed ones", async () => {
+    const res = await consumeOAuthState("never-minted-state");
+    expect(res).toEqual({ valid: false, returnTo: null });
+  });
+
+  it("keeps only http(s) return URLs", async () => {
+    const bad = await mintOAuthState("javascript:alert(1)");
+    expect(await consumeOAuthState(bad)).toEqual({
+      valid: true,
+      returnTo: null,
+    });
+    const good = await mintOAuthState("http://localhost:5174/integrations");
+    expect((await consumeOAuthState(good)).returnTo).toBe(
+      "http://localhost:5174/integrations"
+    );
+  });
+
+  it("callback works when the state was minted by a different instance's request", async () => {
+    // Instance A mints via /connect; the row lives in the shared DB. Instance
+    // B receives the callback from Spotify's redirect and validates against
+    // the SAME row (same test process, but semantically identical to A/B).
+    const connectRes = await request(app)
+      .post("/api/admin/integrations/spotify/connect")
+      .set(...AUTH)
+      .send({ return_to: "http://localhost:5174/integrations" });
+    const state = new URL(connectRes.body.data.authorize_url).searchParams.get(
+      "state"
+    )!;
+
+    // Mock the token exchange for the callback.
+    (global as unknown as { fetch: jest.Mock }).fetch = jest
+      .fn()
+      .mockImplementation((url: string) => {
+        if (url === SPOTIFY_OAUTH_TOKEN_URL) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ refresh_token: "cross-instance-token" }),
+          });
+        }
+        return Promise.reject(new Error(`unexpected ${url}`));
+      });
+
+    const cbRes = await request(app).get(
+      `/api/admin/spotify/callback?state=${state}&code=some-code`
+    );
+    expect(cbRes.status).toBe(302);
+    expect(cbRes.headers.location).toBe(
+      "http://localhost:5174/integrations?spotify=connected"
+    );
+
+    // Row is now marked consumed — a replayed callback fails.
+    const replay = await request(app).get(
+      `/api/admin/spotify/callback?state=${state}&code=some-code`
+    );
+    expect(replay.status).toBe(400);
+    expect(replay.headers.location).toBeUndefined();
+  });
+});
+
+describe("task #113 — GET /api/admin/spotify/status contract + precedence", () => {
+  it("requires an admin bearer (machine keys / no key = 401)", async () => {
+    mockVerify.mockRejectedValue(new Error("bad token"));
+    const noAuth = await request(app).get("/api/admin/spotify/status");
+    expect(noAuth.status).toBe(401);
+    const badBearer = await request(app)
+      .get("/api/admin/spotify/status")
+      .set("Authorization", "Bearer nope");
+    expect(badBearer.status).toBe(401);
+    // A machine (pv6k_) bearer is not a valid admin ID token → 401 (checkAdmin
+    // fails signature, requireAdmin never consults api_keys).
+    const machine = await request(app)
+      .get("/api/admin/spotify/status")
+      .set("Authorization", "Bearer pv6k_fake_key");
+    expect(machine.status).toBe(401);
+  });
+
+  it("returns the exact documented contract shape", async () => {
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    // Every field is present, even when null.
+    expect(Object.keys(res.body.data).sort()).toEqual(
+      [
+        "state",
+        "last_success_at",
+        "last_error",
+        "rate_limited_until",
+        "authorized_at",
+        "expires_at",
+      ].sort()
+    );
+  });
+
+  it("state = `disconnected` when no grant is stored (no static fallback)", async () => {
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("disconnected");
+    expect(res.body.data.authorized_at).toBeNull();
+    expect(res.body.data.expires_at).toBeNull();
+  });
+
+  it("state = `connected` only when a grant is stored AND no active suspension", async () => {
+    // Seed a grant via the callback path.
+    (global as unknown as { fetch: jest.Mock }).fetch = jest
+      .fn()
+      .mockImplementation((url: string) => {
+        if (url === SPOTIFY_OAUTH_TOKEN_URL) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ refresh_token: "connected-token" }),
+          });
+        }
+        return Promise.reject(new Error(`unexpected ${url}`));
+      });
+    const state = await mintOAuthState("http://localhost:5174/integrations");
+    await request(app).get(
+      `/api/admin/integrations/spotify/callback?state=${state}&code=c`
+    );
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("connected");
+    expect(res.body.data.authorized_at).not.toBeNull();
+    expect(res.body.data.expires_at).not.toBeNull();
+    // expires_at = authorized_at + 180 days.
+    expect(
+      new Date(res.body.data.expires_at).getTime() -
+        new Date(res.body.data.authorized_at).getTime()
+    ).toBe(SPOTIFY_REFRESH_TOKEN_LIFETIME_MS);
+  });
+
+  it("state = `auth_broken` when the last refresh returned invalid_grant, even with a stored grant", async () => {
+    // Seed a real (decryptable) grant so the status service sees a stored
+    // token; then simulate the invalid_grant observation the poller records
+    // on a dead refresh token (task #112 health mirror).
+    const { saveServiceToken } = await import(
+      "../src/services/serviceTokenStore"
+    );
+    await saveServiceToken("spotify", CLIENT_SECRET, "some-refresh-token");
+    _resetServiceTokenStoreForTests();
+
+    const {
+      noteSpotifyApiError,
+    } = await import("../src/services/spotifyService");
+    noteSpotifyApiError("invalid_grant");
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    // Even though the grant row is present, invalid_grant precedence takes over.
+    expect(res.body.data.state).toBe("auth_broken");
+    expect(res.body.data.last_error?.kind).toBe("invalid_grant");
+  });
+
+  it("state = `rate_limited` when the shared 429 window is active", async () => {
+    // Seed a decryptable grant so the precedence check reaches the
+    // rate-limit level rather than short-circuiting at `disconnected`.
+    const { saveServiceToken } = await import(
+      "../src/services/serviceTokenStore"
+    );
+    await saveServiceToken("spotify", CLIENT_SECRET, "grant-for-rate-limit");
+    _resetServiceTokenStoreForTests();
+
+    // Simulate the leader's local 429 backoff mirror — the status service
+    // falls back to it when Redis is unwired (which it is in these tests).
+    const spotifyService = await import("../src/services/spotifyService");
+    spotifyService.applySpotifyBackoffUntil(Date.now() + 60_000);
+    spotifyService.noteSpotifyApiError(
+      "rate_limited",
+      Date.now(),
+      Date.now() + 60_000
+    );
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("rate_limited");
+    expect(res.body.data.rate_limited_until).not.toBeNull();
+  });
+
+  it("state = `disabled` beats every other signal (precedence top)", async () => {
+    // A stored grant PLUS an active 429 PLUS invalid_grant PLUS everything —
+    // an explicit disable still wins.
+    const { saveServiceToken } = await import(
+      "../src/services/serviceTokenStore"
+    );
+    await saveServiceToken("spotify", CLIENT_SECRET, "grant-for-disable");
+    _resetServiceTokenStoreForTests();
+    const spotifyService = await import("../src/services/spotifyService");
+    spotifyService.applySpotifyBackoffUntil(Date.now() + 60_000);
+    spotifyService.noteSpotifyApiError("invalid_grant");
+
+    await request(app).post("/api/admin/spotify/disable").set(...AUTH);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("disabled");
+  });
+
+  it("NEVER reports connected merely because credentials exist without a working grant", async () => {
+    // No stored grant but the app has spotify_client_id/spotify_client_secret
+    // set from SECRETS — the status endpoint must still say `disconnected`,
+    // NOT `connected` (task #112 killed the static-secret bootstrap).
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).not.toBe("connected");
+    expect(res.body.data.state).toBe("disconnected");
+  });
+});
+
+describe("task #113 — POST /api/admin/spotify/disable stops the poller", () => {
+  it("the now-playing fetcher makes zero Spotify calls when disabled, even with a stored grant", async () => {
+    // Seed a decryptable grant so the fetcher would otherwise refresh + fetch.
+    const { saveServiceToken } = await import(
+      "../src/services/serviceTokenStore"
+    );
+    await saveServiceToken("spotify", CLIENT_SECRET, "grant-for-disable-fetcher");
+    _resetServiceTokenStoreForTests();
+
+    // Flip disabled ON.
+    const dis = await request(app).post("/api/admin/spotify/disable").set(...AUTH);
+    expect(dis.status).toBe(200);
+    expect(dis.body.data.state).toBe("disabled");
+
+    // Persistence across "instances/restarts" — the flag is a DB row, so any
+    // other instance / a new process instantly reads it as disabled.
+    const { isSpotifyDisabled } = await import(
+      "../src/services/serviceSettingsStore"
+    );
+    expect(await isSpotifyDisabled()).toBe(true);
+
+    // Any Spotify HTTP would go through the mocked global fetch — proving
+    // ZERO calls means the fetcher short-circuited before both the token
+    // endpoint and the currently-playing endpoint.
+    const fetchSpy = jest.fn();
+    (global as unknown as { fetch: jest.Mock }).fetch = fetchSpy;
+
+    const { buildFetchers } = await import("../src/services/upstream");
+    const fetchers = buildFetchers(app);
+    const result = await fetchers.nowPlaying();
+    expect(result).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Re-enable brings it back — the fetcher will try again on the next call.
+    const en = await request(app).post("/api/admin/spotify/enable").set(...AUTH);
+    expect(en.status).toBe(200);
+    // The state is `connected` because a grant row exists (albeit undecryptable
+    // in this seed) — but the KEY assertion is that `disabled` is gone.
+    expect(en.body.data.state).not.toBe("disabled");
+    expect(await isSpotifyDisabled()).toBe(false);
+  });
+
+  it("disable/enable are admin-only", async () => {
+    mockVerify.mockRejectedValue(new Error("bad token"));
+    for (const call of [
+      request(app).post("/api/admin/spotify/disable").send({}),
+      request(app).post("/api/admin/spotify/enable").send({}),
+      // A machine (pv6k_) bearer must be denied on humans-only routes.
+      request(app)
+        .post("/api/admin/spotify/disable")
+        .set("Authorization", "Bearer pv6k_fake"),
+    ]) {
+      const res = await call;
+      expect(res.status).toBe(401);
+    }
+  });
+});
+
+describe("task #113 — POST /api/admin/spotify/disconnect", () => {
+  it("deletes the stored grant → status reports disconnected", async () => {
+    // Seed a grant, then disconnect via the new endpoint.
+    (global as unknown as { fetch: jest.Mock }).fetch = jest
+      .fn()
+      .mockImplementation((url: string) => {
+        if (url === SPOTIFY_OAUTH_TOKEN_URL) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ refresh_token: "grant-to-disconnect" }),
+          });
+        }
+        return Promise.reject(new Error(`unexpected ${url}`));
+      });
+    const state = await mintOAuthState("http://localhost:5174/integrations");
+    await request(app).get(
+      `/api/admin/integrations/spotify/callback?state=${state}&code=c`
+    );
+
+    // Confirm the grant is stored before disconnect.
+    _resetServiceTokenStoreForTests();
+    expect(
+      await getStoredServiceToken("spotify", CLIENT_SECRET)
+    ).not.toBeNull();
+
+    const res = await request(app)
+      .post("/api/admin/spotify/disconnect")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data.state).toBe("disconnected");
+    expect(res.body.data.authorized_at).toBeNull();
+    expect(res.body.data.expires_at).toBeNull();
+
+    // Row is gone from the shared table — any other instance sees the same.
+    _resetServiceTokenStoreForTests();
+    expect(await getStoredServiceToken("spotify", CLIENT_SECRET)).toBeNull();
+
+    // Idempotent — second disconnect still reports disconnected, no error.
+    const again = await request(app)
+      .post("/api/admin/spotify/disconnect")
+      .set(...AUTH);
+    expect(again.status).toBe(200);
+    expect(again.body.data.state).toBe("disconnected");
+  });
+
+  it("is admin-only (machine keys 401)", async () => {
+    mockVerify.mockRejectedValue(new Error("bad token"));
+    const noAuth = await request(app).post("/api/admin/spotify/disconnect");
+    expect(noAuth.status).toBe(401);
+    const machine = await request(app)
+      .post("/api/admin/spotify/disconnect")
+      .set("Authorization", "Bearer pv6k_fake");
+    expect(machine.status).toBe(401);
   });
 });

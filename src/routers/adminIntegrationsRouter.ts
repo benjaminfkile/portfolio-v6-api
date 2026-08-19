@@ -18,6 +18,9 @@ import {
   INTEGRATION_DESCRIPTORS,
   getIntegrationDescriptor,
 } from "../services/integrationsService";
+import { computeSpotifyStatus } from "../services/spotifyStatusService";
+import { setSpotifyEnabled } from "../services/serviceSettingsStore";
+import type { UpstreamHandle } from "../services/upstream";
 
 /**
  * Admin integrations router (§4.7) — the generalized replacement for the §4.6
@@ -185,11 +188,11 @@ adminIntegrationsRouter.put(
  * (carrying `return_to` server-side) and return the provider authorize URL. 404
  * for unknown keys, 409 for non-oauth kinds or unconfigured client credentials.
  */
-function handleConnect(
+async function handleConnect(
   descriptor: IntegrationDescriptor | undefined,
   req: Request,
   res: Response
-): void {
+): Promise<void> {
   if (!descriptor) {
     res.status(404).json(failure("Unknown integration."));
     return;
@@ -221,7 +224,9 @@ function handleConnect(
   }
 
   const returnTo = (req.body as { return_to?: unknown } | undefined)?.return_to;
-  const state = mintOAuthState(typeof returnTo === "string" ? returnTo : null);
+  const state = await mintOAuthState(
+    typeof returnTo === "string" ? returnTo : null
+  );
   const authorizeUrl = descriptor.oauth.buildAuthorizeUrl(
     creds.clientId,
     descriptor.oauth.resolveRedirectUri(secrets as IAppSecrets),
@@ -233,8 +238,10 @@ function handleConnect(
 adminIntegrationsRouter.post(
   "/integrations/:key/connect",
   requireAdmin(),
-  (req: Request, res: Response) => {
-    handleConnect(getIntegrationDescriptor(req.params.key), req, res);
+  (req: Request, res: Response, next: NextFunction) => {
+    handleConnect(getIntegrationDescriptor(req.params.key), req, res).catch(
+      (err) => next(err as Error)
+    );
   }
 );
 
@@ -258,7 +265,7 @@ async function handleCallback(
   }
   const flag = descriptor.key;
 
-  const { valid, returnTo } = consumeOAuthState(
+  const { valid, returnTo } = await consumeOAuthState(
     typeof req.query.state === "string" ? req.query.state : null
   );
   if (!valid) {
@@ -342,29 +349,102 @@ adminIntegrationsRouter.delete(
   }
 );
 
-// ---- Legacy /api/admin/spotify/* aliases (§4.6 compatibility) ---------------
-// Thin wrappers over the same handlers with key=spotify, kept until the admin's
-// own task migrates to /integrations. Behaviour is identical to the pre-§4.7
-// adminSpotifyRouter, including the `?spotify=connected|error` redirect flag.
+// ---- /api/admin/spotify/* — the admin-owned Spotify control surface ---------
+// The admin panel builds against this surface (task #113). The status endpoint
+// returns the truthful, precedence-derived contract; enable/disable/disconnect
+// are humans-only writes that persist across instances (service_settings row
+// or service_tokens delete). The legacy /spotify/connect|callback|DELETE
+// endpoints are kept working so the currently-deployed admin keeps functioning
+// during rollout.
 
 const SPOTIFY_KEY = "spotify";
 
+function getUpstream(req: Request): UpstreamHandle | null {
+  const u = req.app.get("upstream") as UpstreamHandle | undefined;
+  return u ?? null;
+}
+
+/**
+ * GET /api/admin/spotify/status — the truthful status contract (task #113).
+ * State precedence: disabled > disconnected > rate_limited > auth_broken >
+ * connected. NEVER reports connected merely because credentials exist.
+ */
 adminIntegrationsRouter.get(
   "/spotify/status",
   requireAdmin(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const descriptor = getIntegrationDescriptor(SPOTIFY_KEY)!;
-      const status = await computeStatus(descriptor, getSecrets(req));
-      // Legacy payload shape: the four status fields only, no key/name/auth_kind.
-      res.status(200).json(
-        success({
-          connected: status.connected,
-          source: status.source,
-          authorized_at: status.authorized_at,
-          expires_at: status.expires_at,
-        })
+      const status = await computeSpotifyStatus(
+        getSecrets(req),
+        getUpstream(req)
       );
+      res.status(200).json(success(status));
+    } catch (err) {
+      next(err as Error);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/spotify/enable — clear the disabled flag. The poller resumes
+ * on its next tick (using whatever grant is stored, or reporting disconnected).
+ */
+adminIntegrationsRouter.post(
+  "/spotify/enable",
+  requireAdmin(),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await setSpotifyEnabled(true);
+      const status = await computeSpotifyStatus(
+        getSecrets(req),
+        getUpstream(req)
+      );
+      res.status(200).json(success(status));
+    } catch (err) {
+      next(err as Error);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/spotify/disable — set the disabled flag. The poller makes
+ * zero Spotify calls regardless of whether a stored grant exists.
+ */
+adminIntegrationsRouter.post(
+  "/spotify/disable",
+  requireAdmin(),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      await setSpotifyEnabled(false);
+      const status = await computeSpotifyStatus(
+        getSecrets(req),
+        getUpstream(req)
+      );
+      res.status(200).json(success(status));
+    } catch (err) {
+      next(err as Error);
+    }
+  }
+);
+
+/**
+ * POST /api/admin/spotify/disconnect — delete the stored grant. Idempotent;
+ * returns the truthful post-write status (which will be `disconnected` unless
+ * the disabled flag is also set).
+ */
+adminIntegrationsRouter.post(
+  "/spotify/disconnect",
+  requireAdmin(),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const descriptor = getIntegrationDescriptor(SPOTIFY_KEY)!;
+      await deleteStoredServiceToken(descriptor.key);
+      descriptor.onTokenChanged?.();
+      const status = await computeSpotifyStatus(
+        getSecrets(req),
+        getUpstream(req)
+      );
+      res.status(200).json(success(status));
     } catch (err) {
       next(err as Error);
     }
@@ -374,8 +454,10 @@ adminIntegrationsRouter.get(
 adminIntegrationsRouter.post(
   "/spotify/connect",
   requireAdmin(),
-  (req: Request, res: Response) => {
-    handleConnect(getIntegrationDescriptor(SPOTIFY_KEY), req, res);
+  (req: Request, res: Response, next: NextFunction) => {
+    handleConnect(getIntegrationDescriptor(SPOTIFY_KEY), req, res).catch(
+      (err) => next(err as Error)
+    );
   }
 );
 
@@ -388,6 +470,8 @@ adminIntegrationsRouter.get(
   }
 );
 
+// Legacy DELETE /spotify — kept so the currently-deployed admin keeps working
+// until it migrates to POST /spotify/disconnect. Behaviour is identical.
 adminIntegrationsRouter.delete(
   "/spotify",
   requireAdmin(),
