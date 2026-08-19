@@ -69,6 +69,18 @@ export interface SpotifyConfig {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  /**
+   * Optional sink called with a rotated refresh token whenever a Spotify
+   * refresh response includes one (task #112). Under Spotify's June 2026
+   * rotation/reuse behavior every successful refresh MAY return a new
+   * `refresh_token`; discarding it kills the stored grant within days. The
+   * callback MUST persist to the shared encrypted store (rotateSpotifyRefreshToken)
+   * so the very next refresh — this process or another — uses the fresh
+   * value. The callback runs BEFORE the fresh access token is returned; a
+   * throw is logged and swallowed so a persistence blip never fails the
+   * live now-playing call.
+   */
+  onRefreshTokenRotated?: (newRefreshToken: string) => Promise<void>;
 }
 
 /** Curated track shape (§4.6) — deliberately NOT Spotify's raw payload. */
@@ -150,6 +162,33 @@ let inBackoff = false;
  */
 let authSuspended = false;
 
+/**
+ * Categorized error kinds observed on the last Spotify interaction (task #112).
+ * The shared health record surfaces these so the truthful status contract
+ * (task 113, 2/2) can distinguish "grant died, admin needs to reconnect"
+ * from "just rate-limited, will recover" from "something else went wrong".
+ */
+export type SpotifyErrorKind = "invalid_grant" | "rate_limited" | "other";
+
+/** One entry in the in-memory health mirror. */
+export interface SpotifyHealthErrorMirror {
+  kind: SpotifyErrorKind;
+  /** Wall-clock ms since epoch of the failure. */
+  atMs: number;
+  /** For rate_limited only — wall-clock ms the 429 window clears at. */
+  rateLimitedUntilMs?: number;
+}
+
+/**
+ * Task #112 — in-memory mirrors of the SHARED health record. Only the
+ * polling leader writes shared health; every process (including non-leaders)
+ * can still populate its mirror from local observations to serve a snapshot-
+ * less request-path fallback. The lane's reconciler is what actually
+ * persists the mirror to Redis (§task #97 pattern).
+ */
+let lastSuccessAtMs: number | null = null;
+let lastError: SpotifyHealthErrorMirror | null = null;
+
 const NOT_PLAYING: NowPlaying = { playing: false };
 
 /**
@@ -213,6 +252,87 @@ export function isSpotifyAuthSuspended(): boolean {
 }
 
 /**
+ * The last observed successful Spotify API fetch, wall-clock ms since epoch,
+ * or null when none has been observed in this process yet. Task #112 — the
+ * health mirror; the shared record is authoritative, this is the local copy
+ * the reconciler flushes each tick.
+ */
+export function getSpotifyLastSuccessAtMs(): number | null {
+  return lastSuccessAtMs;
+}
+
+/** The last observed error, or null when the last observation was a success. */
+export function getSpotifyLastError(): SpotifyHealthErrorMirror | null {
+  return lastError;
+}
+
+/**
+ * Record a successful Spotify API fetch (a 200 from the currently-playing or
+ * recently-played endpoint). Clears `lastError` — the most recent observation
+ * is now a success, and the shared health record mirrors that.
+ */
+export function noteSpotifyApiSuccess(now: number = Date.now()): void {
+  lastSuccessAtMs = now;
+  lastError = null;
+}
+
+/**
+ * Record a categorized failure. Rate-limited failures carry the deadline the
+ * 429 window clears at (matches the shared suspension record's
+ * `suspended_until` for the same 429).
+ */
+export function noteSpotifyApiError(
+  kind: SpotifyErrorKind,
+  now: number = Date.now(),
+  rateLimitedUntilMs?: number
+): void {
+  lastError = {
+    kind,
+    atMs: now,
+    ...(kind === "rate_limited" && rateLimitedUntilMs != null
+      ? { rateLimitedUntilMs }
+      : {}),
+  };
+}
+
+/**
+ * Apply a shared health record into the in-memory mirror. Called by a
+ * freshly-elected leader on first tick so it inherits what the previous
+ * leader observed instead of starting blank. Only overwrites when the shared
+ * value is more recent than what's already in memory (last-write-wins).
+ */
+export function applySpotifyHealthMirror(record: {
+  last_success_at: string | null;
+  last_error: {
+    kind: SpotifyErrorKind;
+    at: string;
+    rate_limited_until?: string;
+  } | null;
+}): void {
+  if (record.last_success_at) {
+    const parsed = Date.parse(record.last_success_at);
+    if (Number.isFinite(parsed) && (lastSuccessAtMs == null || parsed > lastSuccessAtMs)) {
+      lastSuccessAtMs = parsed;
+    }
+  }
+  if (record.last_error) {
+    const at = Date.parse(record.last_error.at);
+    if (Number.isFinite(at) && (lastError == null || at > lastError.atMs)) {
+      const rlu = record.last_error.rate_limited_until
+        ? Date.parse(record.last_error.rate_limited_until)
+        : undefined;
+      lastError = {
+        kind: record.last_error.kind,
+        atMs: at,
+        ...(record.last_error.kind === "rate_limited" && Number.isFinite(rlu as number)
+          ? { rateLimitedUntilMs: rlu as number }
+          : {}),
+      };
+    }
+  }
+}
+
+/**
  * Enter auth suspension. Idempotent. Logs a single line with the reconnect
  * hint the first time — subsequent calls are silent.
  */
@@ -273,6 +393,11 @@ function noteSpotifyRateLimited(res: unknown): void {
   }
   const until = Date.now() + delayMs;
   if (until > backoffUntilMs) backoffUntilMs = until;
+  // Task #112 — health mirror. The `until` deadline matches the shared
+  // suspension record's `suspended_until` for the same 429; the reconciler
+  // flushes this to the shared health record so the admin status endpoint
+  // knows when the current window clears.
+  noteSpotifyApiError("rate_limited", Date.now(), until);
   if (!inBackoff) {
     inBackoff = true;
     const source = retryAfterSec != null ? `Retry-After ${retryAfterSec}s` : "no Retry-After";
@@ -350,6 +475,12 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
         // Suspend now: subsequent token retries would spend against the same
         // daily quota and would keep failing until the admin reconnects.
         suspendSpotifyAuth("invalid_grant on token refresh");
+        // Task #112 — mark the health mirror so the truthful status contract
+        // reflects "grant died, admin must reconnect" and not just "something
+        // went wrong". Persistence happens via the lane's reconciler.
+        noteSpotifyApiError("invalid_grant");
+      } else {
+        noteSpotifyApiError("other");
       }
       const hint =
         res.status === 400
@@ -364,9 +495,33 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
     const body = (await res.json()) as {
       access_token?: string;
       expires_in?: number;
+      refresh_token?: string;
     };
     if (!body.access_token) {
       throw new Error("Spotify token refresh returned no access_token");
+    }
+
+    // Task #112 — Spotify's June 2026 rotation/reuse behavior may return a
+    // NEW refresh_token on any successful refresh. If we discard it, the old
+    // token becomes unusable on the next refresh and the grant dies within
+    // days. Persist BEFORE returning the access token so a crash between
+    // refresh and next-tick can't leave us holding an already-invalidated
+    // token. Persistence errors are logged and swallowed — the fresh access
+    // token still serves this request, and the next refresh will retry the
+    // rotation (worst case: one extra refresh, not a broken grant).
+    if (
+      body.refresh_token &&
+      body.refresh_token !== config.refreshToken &&
+      config.onRefreshTokenRotated
+    ) {
+      try {
+        await config.onRefreshTokenRotated(body.refresh_token);
+      } catch (err) {
+        console.error(
+          "[spotifyService] rotated refresh_token persistence failed:",
+          err instanceof Error ? err.message : err
+        );
+      }
     }
 
     const lifetimeMs = (body.expires_in ?? 3600) * 1000;
@@ -515,6 +670,7 @@ async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
     }
 
     noteSpotifyResponsive();
+    noteSpotifyApiSuccess();
     let body: unknown = null;
     try {
       body = await res.json();
@@ -567,14 +723,17 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
       return NOT_PLAYING;
     }
 
-    // 204 = nothing playing: a normal response, not an error (§4.6).
+    // 204 = nothing playing: a normal response, not an error (§4.6). Counts
+    // as a successful Spotify API fetch for the health record (task #112).
     if (res.status === 204) {
       noteSpotifyResponsive();
+      noteSpotifyApiSuccess();
       return idleWithLastPlayed(token);
     }
 
     if (res.status === 200) {
       noteSpotifyResponsive();
+      noteSpotifyApiSuccess();
       let body: unknown = null;
       try {
         body = await res.json();
@@ -588,8 +747,16 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
 
     // Any other status (still 401 after retry, 5xx, …) → degrade. Do NOT
     // clear the backoff window here: we don't know that Spotify is healthy.
+    noteSpotifyApiError("other");
     throw new Error(`Spotify currently-playing returned status ${res.status}`);
   } catch (err) {
+    // The specific error-kind setters above (invalid_grant, rate_limited,
+    // other-status) already marked the health mirror. Network errors /
+    // timeouts fall through as "other" so the status contract can still
+    // distinguish them from the auth-dead case.
+    if (lastError == null && !authSuspended && !isSpotifyRateLimited()) {
+      noteSpotifyApiError("other");
+    }
     console.error(
       "[spotifyService] now-playing failed; serving { playing: false }:",
       err instanceof Error ? err.message : err
@@ -647,6 +814,11 @@ export function clearSpotifyRuntimeState(): void {
   // A fresh authorization always lifts auth suspension: the whole point of the
   // admin reconnect flow is to install a working refresh token.
   authSuspended = false;
+  // The health mirror is process-scoped observation, not credential state —
+  // dropping it on reconnect gives the truthful status endpoint a clean
+  // starting point for the new grant.
+  lastSuccessAtMs = null;
+  lastError = null;
 }
 
 /** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */

@@ -23,6 +23,7 @@ import { initDb, closeDb, getDb } from "../src/db/db";
 import {
   deleteStoredSpotifyToken,
   getStoredSpotifyToken,
+  rotateSpotifyRefreshToken,
   saveSpotifyRefreshToken,
   SPOTIFY_REFRESH_TOKEN_LIFETIME_MS,
   _resetSpotifyTokenStoreForTests,
@@ -56,7 +57,8 @@ const SECRETS: Partial<IAppSecrets> = {
   port: "3002",
   spotify_client_id: "client-id-abc",
   spotify_client_secret: CLIENT_SECRET,
-  spotify_refresh_token: "", // no static fallback: the store is what's under test
+  // Task #112 killed the static spotify_refresh_token fallback — the store
+  // is now the ONLY grant source.
 };
 
 const mockFetch = jest.fn();
@@ -197,6 +199,184 @@ describe("spotifyTokenStore persistence", () => {
   });
 });
 
+describe("rotateSpotifyRefreshToken (task #112)", () => {
+  it("persists the rotated ciphertext and preserves authorized_at", async () => {
+    await saveSpotifyRefreshToken(CLIENT_SECRET, "original-token");
+    const before = await getStoredSpotifyToken(CLIENT_SECRET);
+    const originalAuthorizedAt = before!.authorizedAt.getTime();
+    const beforeRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+    const beforeCiphertext = beforeRow.token_ciphertext;
+
+    // Wait a real millisecond so updated_at is strictly greater than
+    // authorized_at (Postgres timestamp resolution is microseconds).
+    await new Promise((r) => setTimeout(r, 5));
+
+    const rotated = await rotateSpotifyRefreshToken(
+      CLIENT_SECRET,
+      "rotated-token"
+    );
+    expect(rotated).toBe(true);
+
+    const afterRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+    // Ciphertext changed (proof the rotated token was actually persisted).
+    expect(afterRow.token_ciphertext).not.toBe(beforeCiphertext);
+    expect(afterRow.token_ciphertext.startsWith("v1:")).toBe(true);
+    expect(afterRow.token_ciphertext).not.toContain("rotated-token");
+    // authorized_at was PRESERVED — rotation does not extend the 180-day window.
+    expect(new Date(afterRow.authorized_at).getTime()).toBe(
+      originalAuthorizedAt
+    );
+
+    // Fresh read from DB (bypass cache) surfaces the rotated plaintext
+    // with the ORIGINAL authorized_at.
+    _resetSpotifyTokenStoreForTests();
+    const after = await getStoredSpotifyToken(CLIENT_SECRET);
+    expect(after?.refreshToken).toBe("rotated-token");
+    expect(after!.authorizedAt.getTime()).toBe(originalAuthorizedAt);
+  });
+
+  it("returns false when no row exists (no-op, no accidental insert)", async () => {
+    // Nothing stored — rotation MUST NOT create a fresh row (that would
+    // start a new 180-day window we did not actually earn).
+    const rotated = await rotateSpotifyRefreshToken(
+      CLIENT_SECRET,
+      "phantom-token"
+    );
+    expect(rotated).toBe(false);
+    const rows = await getDb()("service_tokens").where({ service: "spotify" });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("is idempotent / last-write-wins under repeated rotations", async () => {
+    await saveSpotifyRefreshToken(CLIENT_SECRET, "original-token");
+    const originalAuthorizedAt = (await getStoredSpotifyToken(
+      CLIENT_SECRET
+    ))!.authorizedAt.getTime();
+
+    for (const t of ["rotated-1", "rotated-2", "rotated-3"]) {
+      const ok = await rotateSpotifyRefreshToken(CLIENT_SECRET, t);
+      expect(ok).toBe(true);
+    }
+
+    _resetSpotifyTokenStoreForTests();
+    const stored = await getStoredSpotifyToken(CLIENT_SECRET);
+    expect(stored?.refreshToken).toBe("rotated-3");
+    expect(stored!.authorizedAt.getTime()).toBe(originalAuthorizedAt);
+    // Still exactly one row (upsert-style semantics).
+    expect(
+      await getDb()("service_tokens").where({ service: "spotify" })
+    ).toHaveLength(1);
+  });
+});
+
+describe("rotation persistence via Spotify refresh response (task #112)", () => {
+  it("persists a rotated refresh_token from a Spotify token refresh, preserving authorized_at", async () => {
+    // Seed the store with an original grant.
+    await saveSpotifyRefreshToken(CLIENT_SECRET, "original-refresh-token");
+    const originalRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+    const originalAuthorizedAt = new Date(originalRow.authorized_at).getTime();
+    const originalCiphertext = originalRow.token_ciphertext;
+
+    // Spotify's refresh response includes a rotated refresh_token (June 2026
+    // policy). The router path must exchange with the ORIGINAL and persist
+    // the NEW one before returning to the caller.
+    mockFetch.mockImplementation((url: string) => {
+      if (url === SPOTIFY_TOKEN_URL) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: "at-1",
+            expires_in: 3600,
+            refresh_token: "rotated-refresh-token",
+          }),
+        });
+      }
+      if (url === SPOTIFY_NOW_PLAYING_URL) {
+        return Promise.resolve({
+          ok: false,
+          status: 204,
+          json: async () => ({}),
+        });
+      }
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
+
+    // Wait a real millisecond so updated_at is strictly greater than authorized_at.
+    await new Promise((r) => setTimeout(r, 5));
+
+    const res = await request(app).get("/api/now-playing");
+    expect(res.status).toBe(200);
+
+    // Token request went out with the ORIGINAL, not the rotated one.
+    const tokenCall = mockFetch.mock.calls.find(
+      (c) => c[0] === SPOTIFY_TOKEN_URL
+    );
+    expect(String((tokenCall![1] as RequestInit).body)).toContain(
+      "refresh_token=original-refresh-token"
+    );
+
+    // The rotated refresh_token has been PERSISTED — the ciphertext at rest
+    // changed, and the next store read surfaces the new plaintext.
+    const rotatedRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+    expect(rotatedRow.token_ciphertext).not.toBe(originalCiphertext);
+    // authorized_at PRESERVED — the 180-day window still starts at grant time.
+    expect(new Date(rotatedRow.authorized_at).getTime()).toBe(
+      originalAuthorizedAt
+    );
+
+    _resetSpotifyTokenStoreForTests();
+    const persisted = await getStoredSpotifyToken(CLIENT_SECRET);
+    expect(persisted?.refreshToken).toBe("rotated-refresh-token");
+    expect(persisted!.authorizedAt.getTime()).toBe(originalAuthorizedAt);
+  });
+
+  it("does NOT touch the store when Spotify's refresh response has no rotated refresh_token", async () => {
+    await saveSpotifyRefreshToken(CLIENT_SECRET, "original-refresh-token");
+    const beforeRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+
+    mockFetch.mockImplementation((url: string) => {
+      if (url === SPOTIFY_TOKEN_URL) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: "at-1", expires_in: 3600 }),
+        });
+      }
+      if (url === SPOTIFY_NOW_PLAYING_URL) {
+        return Promise.resolve({
+          ok: false,
+          status: 204,
+          json: async () => ({}),
+        });
+      }
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
+
+    const res = await request(app).get("/api/now-playing");
+    expect(res.status).toBe(200);
+
+    const afterRow = await getDb()("service_tokens")
+      .where({ service: "spotify" })
+      .first();
+    // Row unchanged — no rotation happened.
+    expect(afterRow.token_ciphertext).toBe(beforeRow.token_ciphertext);
+    expect(new Date(afterRow.authorized_at).getTime()).toBe(
+      new Date(beforeRow.authorized_at).getTime()
+    );
+  });
+});
+
 describe("reconnect flow end-to-end (callback → store → now-playing)", () => {
   it("callback exchanges the code, persists the token, and redirects connected", async () => {
     mockFetch.mockImplementation((url: string) => {
@@ -242,36 +422,30 @@ describe("reconnect flow end-to-end (callback → store → now-playing)", () =>
     expect(JSON.stringify(res.body)).not.toContain("stored-refresh-token");
   });
 
-  it("/api/now-playing refreshes with the STORED token, not the secrets one", async () => {
-    app.set("secrets", { ...SECRETS, spotify_refresh_token: "stale-secrets-token" });
-    try {
-      await saveSpotifyRefreshToken(CLIENT_SECRET, "stored-refresh-token");
+  it("/api/now-playing refreshes with the STORED token — service_tokens is the ONLY grant source (task #112)", async () => {
+    await saveSpotifyRefreshToken(CLIENT_SECRET, "stored-refresh-token");
 
-      mockFetch.mockImplementation((url: string) => {
-        if (url === SPOTIFY_TOKEN_URL) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ access_token: "at-1", expires_in: 3600 }),
-          });
-        }
-        if (url === SPOTIFY_NOW_PLAYING_URL) {
-          return Promise.resolve({ ok: false, status: 204, json: async () => ({}) });
-        }
-        return Promise.reject(new Error(`unexpected url ${url}`));
-      });
+    mockFetch.mockImplementation((url: string) => {
+      if (url === SPOTIFY_TOKEN_URL) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: "at-1", expires_in: 3600 }),
+        });
+      }
+      if (url === SPOTIFY_NOW_PLAYING_URL) {
+        return Promise.resolve({ ok: false, status: 204, json: async () => ({}) });
+      }
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
 
-      const res = await request(app).get("/api/now-playing");
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ playing: false }); // 204 = idle, normal
+    const res = await request(app).get("/api/now-playing");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ playing: false }); // 204 = idle, normal
 
-      const tokenCall = mockFetch.mock.calls.find((c) => c[0] === SPOTIFY_TOKEN_URL);
-      const body = String((tokenCall![1] as RequestInit).body);
-      expect(body).toContain("refresh_token=stored-refresh-token");
-      expect(body).not.toContain("stale-secrets-token");
-    } finally {
-      app.set("secrets", SECRETS);
-    }
+    const tokenCall = mockFetch.mock.calls.find((c) => c[0] === SPOTIFY_TOKEN_URL);
+    const body = String((tokenCall![1] as RequestInit).body);
+    expect(body).toContain("refresh_token=stored-refresh-token");
   });
 
   it("DELETE /api/admin/spotify removes the stored token", async () => {

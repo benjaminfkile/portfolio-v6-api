@@ -143,6 +143,48 @@ export async function saveServiceToken(
 }
 
 /**
+ * Rotate the ciphertext for an existing row while PRESERVING `authorized_at`
+ * (task #112). Used by the Spotify refresh path: Spotify's June 2026 policy
+ * rotates the refresh token on refresh, but rotation does NOT extend the
+ * 180-day validity window — the original grant time is what expires. If no
+ * row exists this returns false (a fresh grant would go through the admin
+ * reconnect flow / `saveServiceToken`, which sets a new `authorized_at`).
+ * Idempotent / last-write-wins under the single-poller invariant (task #84).
+ */
+export async function rotateServiceTokenCiphertext(
+  service: string,
+  encryptionKey: string,
+  plaintext: string
+): Promise<boolean> {
+  if (!service || !plaintext) {
+    throw new Error("A service key and value are both required");
+  }
+  const now = new Date();
+  const updated = await getDb()("service_tokens")
+    .where({ service })
+    .update({
+      token_ciphertext: encryptToken(encryptionKey, plaintext),
+      updated_at: now,
+    });
+  if (updated === 0) {
+    // No row to rotate — clear the cache so a next read hits the DB and
+    // observes the truth (no stored token). Callers treat that as
+    // "no rotation persisted"; the disconnected state stands.
+    cache.delete(service);
+    return false;
+  }
+  // Preserve the cached authorizedAt if we have it; otherwise drop the cache
+  // so the next read fetches the (unchanged) authorized_at from the DB.
+  const cached = cache.get(service);
+  if (cached && cached.authorizedAt) {
+    cache.set(service, { token: plaintext, authorizedAt: cached.authorizedAt });
+  } else {
+    cache.delete(service);
+  }
+  return true;
+}
+
+/**
  * The stored credential for `service`, or null when absent/undecryptable. Never
  * throws: with no database (IS_LOCAL bring-up before migrate, tests) or a
  * transient DB error it logs and returns null — the §4.7 degrade contract, not a

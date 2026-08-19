@@ -16,6 +16,23 @@ import {
 import { createFakeRedis, type FakeRedis } from "./helpers/fakeRedis";
 import { REALTIME_SERVICE_NAME } from "../src/services/upstream/realtimePublisher";
 
+// Task #112 killed the static `spotify_refresh_token` secret fallback — the
+// grant now comes exclusively from the encrypted service_tokens table. This
+// suite has no database (unit-style integration), so we stub the store's
+// read to inject a working refresh token; the fetcher then behaves exactly
+// as it does in production against a real reconnected admin.
+jest.mock("../src/services/spotifyTokenStore", () => {
+  const actual = jest.requireActual("../src/services/spotifyTokenStore");
+  return {
+    ...actual,
+    getStoredSpotifyToken: jest.fn().mockResolvedValue({
+      refreshToken: "rt",
+      authorizedAt: new Date(0),
+    }),
+    rotateSpotifyRefreshToken: jest.fn().mockResolvedValue(true),
+  };
+});
+
 /**
  * Integration test for Spotify 429 backoff (task #90).
  *
@@ -95,7 +112,6 @@ describe("Spotify 429 backoff — poll-loop integration (task #90)", () => {
       node_env: ENV,
       spotify_client_id: "cid",
       spotify_client_secret: "csec",
-      spotify_refresh_token: "rt",
       gateway_health_url: "http://gateway:8080/health",
     });
 

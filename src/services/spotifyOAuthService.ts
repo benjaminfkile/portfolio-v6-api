@@ -7,10 +7,10 @@ import { IAppSecrets } from "../interfaces";
  * Since Spotify's June 2026 policy change expires refresh tokens 180 days after
  * authorization, re-authorization is a twice-a-year routine. This service holds
  * the pieces the adminSpotifyRouter composes: single-use `state` tokens, the
- * authorize-URL builder, and the code→token exchange. The flow mirrors the
- * one-time `scripts/spotify-auth.ts` bootstrap, but redirects back to the
- * deployed API instead of a local throwaway server, so the admin never handles
- * the token by hand.
+ * authorize-URL builder, and the code→token exchange. Task #112 made the admin
+ * reconnect flow the ONLY bootstrap (no more static `spotify_refresh_token`
+ * secret, no more one-time script) — everything else in the app reads the
+ * token this flow writes.
  *
  * State tokens are opaque 256-bit values in an in-memory map. Only a verified
  * admin can mint one, the callback consumes it (single-use), and it expires

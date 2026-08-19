@@ -49,9 +49,12 @@ import {
 import { fetchPresenceCount } from "./presenceQuery";
 import {
   readNowPlayingLastRequest,
+  readSpotifyHealth,
   readSpotifySuspension,
+  writeSpotifyHealth,
   writeSpotifySuspension,
   deleteSpotifySuspension,
+  type SpotifyHealthRecord,
 } from "./snapshotStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
@@ -65,6 +68,9 @@ import {
   getSpotifyBackoffUntilMs,
   applySpotifyBackoffUntil,
   clearSpotifyBackoff,
+  getSpotifyLastSuccessAtMs,
+  getSpotifyLastError,
+  applySpotifyHealthMirror,
   type SpotifyConfig,
 } from "../spotifyService";
 import { getStatus } from "../statusService";
@@ -84,6 +90,7 @@ import {
 } from "../serviceTokenStore";
 import {
   getStoredSpotifyToken,
+  rotateSpotifyRefreshToken,
   SPOTIFY_SERVICE_KEY,
 } from "../spotifyTokenStore";
 
@@ -132,11 +139,22 @@ export function buildFetchers(
 
   async function spotifyConfig(): Promise<SpotifyConfig> {
     const s = secrets();
-    const stored = await getStoredSpotifyToken(resolveEncryptionKey(s));
+    const encryptionKey = resolveEncryptionKey(s);
+    const stored = await getStoredSpotifyToken(encryptionKey);
     return {
       clientId: s?.spotify_client_id ?? "",
       clientSecret: s?.spotify_client_secret ?? "",
-      refreshToken: stored?.refreshToken ?? s?.spotify_refresh_token ?? "",
+      // service_tokens is the ONLY grant source (task #112) — no static
+      // spotify_refresh_token secret fallback. Missing row = DISCONNECTED,
+      // silent, zero Spotify calls (reuse auth-suspension machinery).
+      refreshToken: stored?.refreshToken ?? "",
+      // Persist a rotated refresh token from any Spotify refresh response
+      // (task #112). Only the polling leader hits this path (single-poller
+      // invariant, task #84), so writes do not race; the store is
+      // idempotent / last-write-wins anyway.
+      onRefreshTokenRotated: async (newRefreshToken: string) => {
+        await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
+      },
     };
   }
 
@@ -305,6 +323,37 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       async clearSharedSuspension() {
         return deleteSpotifySuspension(client, env);
       },
+      readLocalHealth(): SpotifyHealthRecord {
+        const successMs = getSpotifyLastSuccessAtMs();
+        const err = getSpotifyLastError();
+        return {
+          last_success_at:
+            successMs != null ? new Date(successMs).toISOString() : null,
+          last_error: err
+            ? {
+                kind: err.kind,
+                at: new Date(err.atMs).toISOString(),
+                ...(err.kind === "rate_limited" &&
+                err.rateLimitedUntilMs != null
+                  ? {
+                      rate_limited_until: new Date(
+                        err.rateLimitedUntilMs
+                      ).toISOString(),
+                    }
+                  : {}),
+              }
+            : null,
+        };
+      },
+      async readSharedHealth() {
+        return readSpotifyHealth(client, env);
+      },
+      async writeSharedHealth(record) {
+        return writeSpotifyHealth(client, env, record);
+      },
+      applyHealthMirror(record) {
+        applySpotifyHealthMirror(record);
+      },
     },
     {
       publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
@@ -370,6 +419,12 @@ export {
   writeSpotifySuspension,
   deleteSpotifySuspension,
   spotifySuspensionKey,
+  readSpotifyHealth,
+  writeSpotifyHealth,
+  spotifyHealthKey,
   type SpotifySuspensionRecord,
+  type SpotifyHealthRecord,
+  type SpotifyHealthLastError,
+  type SpotifyHealthErrorKind,
 } from "./snapshotStore";
 export { readLocalSnapshot } from "./pollLoop";

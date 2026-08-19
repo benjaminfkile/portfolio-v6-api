@@ -30,7 +30,9 @@ import {
 } from "../src/services/upstream/pollLoop";
 import { createLeaderLease } from "../src/services/upstream/leaderLease";
 import {
+  readSpotifyHealth,
   readSpotifySuspension,
+  writeSpotifyHealth,
   writeSpotifySuspension,
   deleteSpotifySuspension,
   readSnapshot,
@@ -40,6 +42,9 @@ import {
 } from "../src/services/upstream/snapshotStore";
 import {
   _resetSpotifyStateForTests,
+  applySpotifyHealthMirror,
+  getSpotifyLastError,
+  getSpotifyLastSuccessAtMs,
   isSpotifyAuthSuspended,
   suspendSpotifyAuth,
   resumeSpotifyAuth,
@@ -143,6 +148,32 @@ function buildFetchersWithLane(
       writeSharedSuspension: async (record) =>
         writeSpotifySuspension(redis, ENV, record),
       clearSharedSuspension: async () => deleteSpotifySuspension(redis, ENV),
+      readLocalHealth: () => {
+        const successMs = getSpotifyLastSuccessAtMs();
+        const err = getSpotifyLastError();
+        return {
+          last_success_at:
+            successMs != null ? new Date(successMs).toISOString() : null,
+          last_error: err
+            ? {
+                kind: err.kind,
+                at: new Date(err.atMs).toISOString(),
+                ...(err.kind === "rate_limited" &&
+                err.rateLimitedUntilMs != null
+                  ? {
+                      rate_limited_until: new Date(
+                        err.rateLimitedUntilMs
+                      ).toISOString(),
+                    }
+                  : {}),
+              }
+            : null,
+        };
+      },
+      readSharedHealth: async () => readSpotifyHealth(redis, ENV),
+      writeSharedHealth: async (record) =>
+        writeSpotifyHealth(redis, ENV, record),
+      applyHealthMirror: (record) => applySpotifyHealthMirror(record),
     },
     {
       publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
@@ -192,7 +223,6 @@ beforeAll(() => {
     node_env: ENV,
     spotify_client_id: "cid",
     spotify_client_secret: "sec",
-    spotify_refresh_token: "rt",
     gateway_health_url: "http://gateway:8080/health",
   });
 });
@@ -644,8 +674,11 @@ describe("acceptance #370 — suspension state persisted in Redis", () => {
 // (371) — Redis-unconfigured and Redis-error paths keep never-5xx guarantee
 // ----------------------------------------------------------------------------
 describe("acceptance #371 — Redis-unconfigured and Redis-error paths preserve never-5xx", () => {
-  it("with Redis UNCONFIGURED, request path still lazy-fetches Spotify", async () => {
-    // upstream handle installed as null (Redis unconfigured).
+  it("with Redis UNCONFIGURED and no stored token, request path serves DISCONNECTED (zero Spotify calls, task #112)", async () => {
+    // upstream handle installed as null (Redis unconfigured). Task #112:
+    // with no service_tokens row (and no static secrets fallback) the
+    // service is DISCONNECTED — a stable, silent, zero-Spotify-calls state
+    // reusing the existing auth-suspension machinery.
     installUpstream(null);
     mockFetch.mockImplementation((url: string) => {
       if (url === SPOTIFY_TOKEN_URL) return Promise.resolve(tokenResponse("tok"));
@@ -663,10 +696,14 @@ describe("acceptance #371 — Redis-unconfigured and Redis-error paths preserve 
     const res = await request(app).get("/api/now-playing");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ playing: false });
-    // Spotify WAS called (legacy per-instance path).
+    // ZERO Spotify calls — the disconnected state is silent.
     expect(
-      mockFetch.mock.calls.some(([u]) => u === SPOTIFY_NOW_PLAYING_URL)
-    ).toBe(true);
+      mockFetch.mock.calls.some(
+        ([u]) =>
+          typeof u === "string" &&
+          (u.includes("accounts.spotify.com") || u.includes("api.spotify.com"))
+      )
+    ).toBe(false);
   });
 
   it("with Redis ERROR on read, request path falls back to lazy-fetch (not a 5xx)", async () => {
