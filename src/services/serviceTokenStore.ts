@@ -65,8 +65,34 @@ export function resolveEncryptionKey(secrets: IAppSecrets | undefined): string {
 
 // Per-service one-row cache of the decrypted token so hot paths (e.g. the
 // now-playing token refresh, ~1/hour) do not hit the database. A missing map
-// entry = not yet loaded; a `null` value = loaded and known-absent/undecryptable.
-const cache = new Map<string, StoredServiceToken | null>();
+// entry = not yet loaded; a stored `value: null` = loaded and known
+// absent/undecryptable. Every entry carries an `expiresAt` deadline so a
+// process converges on the DB truth within `SERVICE_TOKEN_CACHE_TTL_MS` even
+// when the row was updated on a DIFFERENT process (task #121: cross-instance
+// stale-cache wedge, where a resume-then-fetch on the polling leader would
+// read its own stale token, get invalid_grant, and re-suspend permanently).
+interface CacheEntry {
+  value: StoredServiceToken | null;
+  expiresAt: number;
+}
+const cache = new Map<string, CacheEntry>();
+
+/**
+ * Task #121 - cache TTL for every service. Sixty seconds is short enough that
+ * an admin reconnect on one instance propagates to the polling leader within
+ * one Redis-side resume tick, and long enough that the hot paths (~1/hour
+ * token refresh, ~1/tick presence read) still avoid the DB. Applies uniformly
+ * to spotify / github / duolingo / spotify_listener - one extra DB read per
+ * minute per service is negligible under the single-poller invariant.
+ */
+export const SERVICE_TOKEN_CACHE_TTL_MS = 60 * 1000;
+
+function cacheEntry(
+  value: StoredServiceToken | null,
+  now: number = Date.now()
+): CacheEntry {
+  return { value, expiresAt: now + SERVICE_TOKEN_CACHE_TTL_MS };
+}
 
 function deriveKey(encryptionKey: string): Buffer {
   return scryptSync(encryptionKey, KEY_SALT, 32);
@@ -139,7 +165,7 @@ export async function saveServiceToken(
     })
     .onConflict("service")
     .merge(["token_ciphertext", "authorized_at", "updated_at"]);
-  cache.set(service, { token: plaintext, authorizedAt: now });
+  cache.set(service, cacheEntry({ token: plaintext, authorizedAt: now }));
 }
 
 /**
@@ -176,8 +202,11 @@ export async function rotateServiceTokenCiphertext(
   // Preserve the cached authorizedAt if we have it; otherwise drop the cache
   // so the next read fetches the (unchanged) authorized_at from the DB.
   const cached = cache.get(service);
-  if (cached && cached.authorizedAt) {
-    cache.set(service, { token: plaintext, authorizedAt: cached.authorizedAt });
+  if (cached && cached.value && cached.value.authorizedAt) {
+    cache.set(
+      service,
+      cacheEntry({ token: plaintext, authorizedAt: cached.value.authorizedAt })
+    );
   } else {
     cache.delete(service);
   }
@@ -194,8 +223,14 @@ export async function getStoredServiceToken(
   service: string,
   encryptionKey: string
 ): Promise<StoredServiceToken | null> {
-  if (cache.has(service)) {
-    return cache.get(service) ?? null;
+  const now = Date.now();
+  const cached = cache.get(service);
+  // Task #121 - honour the TTL so a cross-instance update (admin reconnects
+  // via instance A; polling leader is instance B) converges within a minute
+  // even without an explicit invalidation. A stale entry falls through to a
+  // fresh DB read below.
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
   }
   let row: { token_ciphertext: string; authorized_at: Date } | undefined;
   try {
@@ -209,7 +244,7 @@ export async function getStoredServiceToken(
   }
 
   if (!row) {
-    cache.set(service, null);
+    cache.set(service, cacheEntry(null, now));
     return null;
   }
 
@@ -219,12 +254,12 @@ export async function getStoredServiceToken(
       `[serviceTokenStore] stored token for '${service}' could not be decrypted ` +
         "(encryption key rotated?) — re-enter it from the admin Integrations page"
     );
-    cache.set(service, null);
+    cache.set(service, cacheEntry(null, now));
     return null;
   }
 
   const stored = { token, authorizedAt: new Date(row.authorized_at) };
-  cache.set(service, stored);
+  cache.set(service, cacheEntry(stored, now));
   return stored;
 }
 
@@ -258,8 +293,20 @@ export async function deleteStoredServiceToken(
   service: string
 ): Promise<boolean> {
   const deleted = await getDb()("service_tokens").where({ service }).del();
-  cache.set(service, null);
+  cache.set(service, cacheEntry(null));
   return deleted > 0;
+}
+
+/**
+ * Task #121 - explicit cache invalidation for `service`. The next
+ * `getStoredServiceToken(service)` call is guaranteed to hit the database,
+ * regardless of how much of the TTL is left. Called from the Spotify auth
+ * resume path (spotifyService.resumeSpotifyAuth + the spotifyLane resume
+ * transitions) so the first post-resume fetch reads the fresh DB row
+ * immediately rather than up to `SERVICE_TOKEN_CACHE_TTL_MS` later.
+ */
+export function invalidateServiceTokenCache(service: string): void {
+  cache.delete(service);
 }
 
 /** Test-only: forget every in-memory copy so the next read hits the database. */

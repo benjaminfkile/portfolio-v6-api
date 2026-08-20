@@ -114,6 +114,7 @@ import {
 import {
   getStoredServiceToken,
   getServiceTokenUpdatedAt,
+  invalidateServiceTokenCache,
   resolveEncryptionKey,
 } from "../serviceTokenStore";
 import {
@@ -490,6 +491,10 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
         applySpotifyBudgetExhaustion(untilMs),
       clearBudgetExhaustion: () => clearSpotifyBudgetExhaustion(),
       resumeAuth: () => resumeSpotifyAuth(),
+      // Task #121 - drop the decrypted-credential cache on every lane resume
+      // transition so the first post-resume fetch reads the fresh DB row
+      // rather than the potentially-stale process-local memo.
+      invalidateAuthCache: () => invalidateServiceTokenCache(SPOTIFY_SERVICE_KEY),
       async getStoredTokenUpdatedAt() {
         return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);
       },

@@ -212,6 +212,15 @@ export interface SpotifyLaneDeps {
    */
   resumeAuth(): void;
   /**
+   * Task #121 - drop the process-local decrypted-credential cache for the
+   * Spotify service_tokens row so the very next fetch reads the fresh DB
+   * value (an admin reconnect on ANOTHER instance updated it). Called on
+   * every resume transition alongside `resumeAuth`. Optional so pre-#121
+   * lane callers keep working; when absent the store's TTL still converges
+   * within a minute.
+   */
+  invalidateAuthCache?: () => void;
+  /**
    * Gateway presence owner API — return the current count of active clients on
    * the `{service}:now-playing` channel. On presence-API failure this MUST
    * throw / reject so the lane treats the tick as active (fail open).
@@ -523,6 +532,10 @@ export function createSpotifyLane(
         // AND force an immediate poll so the first viewer after reconnect
         // gets fresh data within one tick, not one idle interval.
         deps.resumeAuth();
+        // Task #121 - drop the decrypted-credential cache belt-and-braces
+        // so the immediate fetch below reads the fresh DB row, not the
+        // memoized pre-reconnect token that would 401 as invalid_grant.
+        deps.invalidateAuthCache?.();
         await deps.clearSharedSuspension();
         suspendedSnapshot = undefined;
         wasActive = false;
@@ -542,6 +555,12 @@ export function createSpotifyLane(
     //    in-memory state and prevent a real Spotify call from happening.
     if (deps.isAuthSuspended()) {
       deps.resumeAuth();
+      // Task #121 - shared suspension cleared out from under us (Redis TTL
+      // dropped it, or the operator ran DEL). Whatever the cause, the local
+      // decrypted-credential cache may have been populated before the admin
+      // reconnect happened elsewhere; drop it so the next fetch reads the
+      // fresh DB row.
+      deps.invalidateAuthCache?.();
       wasActive = false;
       nextDueAt = 0;
     }
