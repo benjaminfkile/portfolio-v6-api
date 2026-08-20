@@ -103,6 +103,13 @@ export interface ListenerSupervisorDeps {
    */
   loadCredential: () => Promise<string | null>;
   /**
+   * Durably persist the latest curated now-playing payload (the DB last-known
+   * store). Called on every event and progress tick so `GET /api/now-playing`
+   * has a durable answer after a cold start / Redis flush. Must never throw
+   * (the store swallows its own errors); optional so tests can omit it.
+   */
+  persistLastNowPlaying?: (payload: NowPlaying) => Promise<void>;
+  /**
    * Cheap DB read of `service_tokens.updated_at` for `spotify_listener`.
    * Called at most once per `credentialCheckIntervalMs`. Returns null on
    * absence or DB error (treated as "no change").
@@ -240,6 +247,12 @@ export function createListenerSupervisor(
   }
 
   async function writeAndPublishNowPlaying(payload: NowPlaying): Promise<void> {
+    // Persist the durable last-known FIRST, independent of Redis, so a cold
+    // start / Redis flush can still serve the last track on load. The store
+    // swallows its own errors, so this never fails the event path.
+    if (deps.persistLastNowPlaying) {
+      await deps.persistLastNowPlaying(payload);
+    }
     if (!deps.redis) return;
     await writeSnapshot(deps.redis, deps.env, "now-playing", payload);
     await publish(deps.publisher, {

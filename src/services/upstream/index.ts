@@ -72,6 +72,7 @@ import {
   getListenerCredential,
   getListenerCredentialUpdatedAt,
 } from "../listenerCredentialStore";
+import { saveLastNowPlaying } from "../nowPlayingStateStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
@@ -441,6 +442,9 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       const s = app.get("secrets") as IAppSecrets | undefined;
       const stored = await getListenerCredential(resolveEncryptionKey(s));
       return stored?.spDc ?? null;
+    },
+    async persistLastNowPlaying(payload) {
+      await saveLastNowPlaying(payload);
     },
     async getCredentialUpdatedAt() {
       return getListenerCredentialUpdatedAt();

@@ -1,15 +1,7 @@
 import express, { Request, Response } from "express";
 import { IAppSecrets } from "../interfaces";
-import {
-  getNowPlaying,
-  NowPlaying,
-  SpotifyConfig,
-} from "../services/spotifyService";
-import {
-  getStoredSpotifyToken,
-  rotateSpotifyRefreshToken,
-} from "../services/spotifyTokenStore";
-import { resolveEncryptionKey } from "../services/serviceTokenStore";
+import { NowPlaying } from "../services/spotifyService";
+import { getLastNowPlaying } from "../services/nowPlayingStateStore";
 import {
   readLocalSnapshot,
   type UpstreamHandle,
@@ -20,47 +12,20 @@ import {
 } from "../services/upstream/snapshotStore";
 
 /**
- * Public now-playing router — TECH_SPEC_V1.md §4.6 (`/api/now-playing`) / #442.
+ * Public now-playing router — `GET /api/now-playing` (public, no auth).
  *
- * `GET /api/now-playing` (public, no auth) proxies Spotify's currently-playing
- * endpoint server-side, served from a ~30s in-memory cache. It **degrades rather
- * than errors** (§3.5): nothing playing, or ANY upstream failure, both render as
- * `{ playing: false }`, never a 5xx. No Spotify token is ever in the response —
- * the router only forwards the curated service payload (§4.6).
- *
- * Task #84 layered a shared-snapshot path on top: when Redis is configured,
- * the leader instance is the SOLE writer of the shared now-playing snapshot,
- * populated either by the dealer listener (primary, event-driven — task
- * series #115-#123) or by the polling fallback lane; every other instance
- * serves that snapshot here so at most one Spotify credential is exercised
- * per environment. A Redis outage or a missing snapshot falls back to the
- * per-instance in-memory path so public reads never 5xx because of the
- * shared store.
+ * The now-playing feed is listener-only and event-driven: the dealer listener
+ * (task series #115-#123) is the SOLE source, running on the leader, which
+ * writes the shared Redis snapshot and persists the last curated payload to the
+ * database. This endpoint never calls Spotify itself. It serves, in order of
+ * preference: the live Redis snapshot, the leader's in-process copy, then the
+ * durable DB last-known; failing all of those it returns `{ playing: false }`.
+ * It **degrades rather than errors** (§3.5): every path resolves to a 200 with
+ * a curated payload, never a 5xx, and no token is ever in the response.
  */
 const nowPlayingRouter = express.Router();
 
 const NOT_PLAYING: NowPlaying = { playing: false };
-
-async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
-  const secrets = req.app.get("secrets") as IAppSecrets | undefined;
-  const clientSecret = secrets?.spotify_client_secret ?? "";
-  const encryptionKey = resolveEncryptionKey(secrets);
-  const stored = await getStoredSpotifyToken(encryptionKey);
-  return {
-    clientId: secrets?.spotify_client_id ?? "",
-    clientSecret,
-    // service_tokens is the ONLY grant source. Missing row = DISCONNECTED,
-    // silent, zero Spotify calls (reuse auth-suspension machinery).
-    refreshToken: stored?.refreshToken ?? "",
-    // Persist a rotated refresh token from any Spotify refresh response.
-    // authorized_at is preserved (rotation does not extend the 180-day
-    // window). Only reached from this router when Redis is unconfigured
-    // or errored — otherwise the leader's fetcher persists.
-    onRefreshTokenRotated: async (newRefreshToken: string) => {
-      await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
-    },
-  };
-}
 
 nowPlayingRouter.get("/", async (req: Request, res: Response) => {
   try {
@@ -94,20 +59,23 @@ nowPlayingRouter.get("/", async (req: Request, res: Response) => {
       if (read.status === "missing") {
         // Redis is healthy but the key is absent (leader hasn't run its first
         // tick yet, or briefly between leaders). Try the in-process leader
-        // copy first; otherwise serve degraded idle. NEVER touch Spotify.
+        // copy, then the durable DB last-known, then idle.
         const local = readLocalSnapshot<NowPlaying>("now-playing");
         if (local) {
           return res.status(200).json(local);
         }
-        return res.status(200).json(NOT_PLAYING);
+        const stored = await getLastNowPlaying();
+        return res.status(200).json(stored ?? NOT_PLAYING);
       }
       // read.status === "error" → Redis is unreachable. Fall through to the
-      // legacy per-instance direct fetch so the endpoint stays 200 even
-      // under a Redis outage.
+      // durable DB last-known so the endpoint stays 200 under a Redis outage.
     }
 
-    const payload = await getNowPlaying(await spotifyConfig(req));
-    res.status(200).json(payload);
+    // No live snapshot available (Redis unconfigured or unreachable). Serve the
+    // durable last-known payload the listener persisted. The now-playing feed
+    // is listener-only now, so we NEVER call Spotify from the request path.
+    const stored = await getLastNowPlaying();
+    res.status(200).json(stored ?? NOT_PLAYING);
   } catch (err) {
     console.error("[nowPlayingRouter] unexpected error; serving idle:", err);
     res.status(200).json(NOT_PLAYING);

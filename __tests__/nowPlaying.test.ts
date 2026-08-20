@@ -17,6 +17,14 @@ jest.mock("../src/services/spotifyTokenStore", () => {
   };
 });
 
+// The now-playing feed is listener-only: the public router serves the durable
+// last-known payload the listener persisted (never Spotify). This suite has no
+// database, so we stub the store's read to control what the router returns.
+jest.mock("../src/services/nowPlayingStateStore", () => ({
+  getLastNowPlaying: jest.fn().mockResolvedValue(null),
+  saveLastNowPlaying: jest.fn().mockResolvedValue(undefined),
+}));
+
 import app from "../src/app";
 import {
   getNowPlaying,
@@ -32,6 +40,9 @@ import {
   SPOTIFY_RECENTLY_PLAYED_URL,
   SpotifyConfig,
 } from "../src/services/spotifyService";
+import { getLastNowPlaying } from "../src/services/nowPlayingStateStore";
+
+const mockGetLastNowPlaying = getLastNowPlaying as jest.Mock;
 
 /**
  * /api/now-playing tests — TECH_SPEC_V1.md §4.6 / task #442.
@@ -549,15 +560,18 @@ describe("last-played fallback when idle", () => {
     }
   });
 
-  it("GET /api/now-playing idle response carries last_played and NO token", async () => {
-    routeFetch({
-      nowPlaying: () => statusResponse(204),
-      recentlyPlayed: recentlyPlayed200,
+  it("GET /api/now-playing serves the durable last-known idle payload and NO token", async () => {
+    // Listener-only: the router serves whatever the DB last-known store holds
+    // and never calls Spotify.
+    mockGetLastNowPlaying.mockResolvedValueOnce({
+      playing: false,
+      last_played: LAST_PLAYED,
     });
 
     const res = await request(app).get("/api/now-playing");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ playing: false, last_played: LAST_PLAYED });
+    expect(mockFetch).not.toHaveBeenCalled();
 
     const raw = JSON.stringify(res.body);
     expect(raw).not.toContain(ACCESS_TOKEN);
@@ -602,40 +616,40 @@ describe("getNowPlaying degradation (§4.6 never a 5xx)", () => {
   });
 });
 
-describe("GET /api/now-playing (§4.6) — public, never leaks a token, never 5xx", () => {
-  it("returns the curated playing shape and NO token anywhere in the response", async () => {
-    routeFetch({});
+describe("GET /api/now-playing — public, listener-only, never leaks a token, never 5xx", () => {
+  it("serves the durable last-known playing payload and NEVER calls Spotify", async () => {
+    const track = {
+      title: "Some Song",
+      artists: ["Artist One", "Artist Two"],
+      album: "Some Album",
+      art_url: "https://i.scdn.co/image/abc",
+      url: "https://open.spotify.com/track/xyz",
+      progress_ms: 83000,
+      duration_ms: 214000,
+    };
+    mockGetLastNowPlaying.mockResolvedValueOnce({ playing: true, track });
 
     const res = await request(app).get("/api/now-playing");
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      playing: true,
-      track: {
-        title: "Some Song",
-        artists: ["Artist One", "Artist Two"],
-        album: "Some Album",
-        art_url: "https://i.scdn.co/image/abc",
-        url: "https://open.spotify.com/track/xyz",
-        progress_ms: 83000,
-        duration_ms: 214000,
-      },
-    });
+    expect(res.body).toEqual({ playing: true, track });
+    // The request path must never touch Spotify.
+    expect(mockFetch).not.toHaveBeenCalled();
 
-    // Belt-and-braces: neither access token nor the refresh token appears anywhere.
     const raw = JSON.stringify(res.body);
     expect(raw).not.toContain(ACCESS_TOKEN);
     expect(raw).not.toContain(CONFIG.refreshToken);
     expect(raw).not.toContain(CONFIG.clientSecret);
   });
 
-  it("returns 200 { playing: false } (not a 5xx) when Spotify is unreachable", async () => {
-    mockFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+  it("returns 200 { playing: false } (not a 5xx) when there is no last-known payload", async () => {
+    mockGetLastNowPlaying.mockResolvedValueOnce(null);
 
     const res = await request(app).get("/api/now-playing");
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ playing: false });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 
