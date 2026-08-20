@@ -187,6 +187,45 @@ let inBackoff = false;
 let authSuspended = false;
 
 /**
+ * Task #120 - daily Spotify Web API + token-endpoint budget guard.
+ *
+ * `budgetExhaustedUntilMs` is the wall-clock the current budget window
+ * resets at, mirrored in-process so the fetcher wrapper short-circuits at
+ * the same gate as the 429 backoff. The gate is a mirror of the shared
+ * "budget" suspension record; the lane writes / clears the record and
+ * `applySpotifyBudgetExhaustion` / `clearSpotifyBudgetExhaustion` keep the
+ * local copy in sync.
+ *
+ * `budgetHook` is the injected counter; every outbound call to
+ * `accounts.spotify.com` or `api.spotify.com` runs through it BEFORE the
+ * fetch fires. Returning `capReached: true` skips the fetch (the counter
+ * already recorded it, we just do not spend network bandwidth on a call
+ * whose response we would ignore) and stamps in-process exhaustion so
+ * subsequent Spotify code paths short-circuit until the next reset.
+ */
+let budgetExhaustedUntilMs = 0;
+let budgetHook: SpotifyBudgetHook | null = null;
+
+/**
+ * Interface the injected budget guard exposes to this module. Deliberately
+ * narrow (one method) so the coupling from spotifyService into the listener/
+ * apiBudget module stays a single call site.
+ */
+export interface SpotifyBudgetHook {
+  /**
+   * Record one about-to-fire outbound call. Returns whether the cap has
+   * been reached AFTER counting this call, plus the wall-clock the current
+   * window resets at (used to stamp local exhaustion so the fetcher gate
+   * knows when to lift). MUST NOT throw - a budget-guard failure must
+   * never bring down a Spotify call.
+   */
+  noteCall(now?: number): Promise<{
+    capReached: boolean;
+    nextResetAtMs: number;
+  }>;
+}
+
+/**
  * Categorized error kinds observed on the last Spotify interaction (task #112).
  * The shared health record surfaces these so the truthful status contract
  * (task 113, 2/2) can distinguish "grant died, admin needs to reconnect"
@@ -273,6 +312,55 @@ export function clearSpotifyBackoff(): void {
  */
 export function isSpotifyAuthSuspended(): boolean {
   return authSuspended;
+}
+
+/**
+ * True iff the current process is under a task #120 budget-exhaustion
+ * suspension. Cheap synchronous check the fetcher wrapper uses to skip a
+ * tick without touching Spotify.
+ */
+export function isSpotifyBudgetExhausted(now: number = Date.now()): boolean {
+  return now < budgetExhaustedUntilMs;
+}
+
+/**
+ * Wall-clock (ms since epoch) the budget window resets at, or 0 when not
+ * exhausted. Exposed for the lane's reconciler so it can mirror the local
+ * exhaustion into the shared "budget" suspension record with a real deadline.
+ */
+export function getSpotifyBudgetExhaustedUntilMs(): number {
+  return budgetExhaustedUntilMs;
+}
+
+/**
+ * Prime the local budget-exhaustion mirror from an external source (a
+ * "budget"-reason suspension record read by a freshly-elected leader).
+ * Idempotent, monotonic (only extends the deadline, never shortens it).
+ */
+export function applySpotifyBudgetExhaustion(untilMs: number): void {
+  if (untilMs > budgetExhaustedUntilMs) {
+    budgetExhaustedUntilMs = untilMs;
+  }
+}
+
+/**
+ * Clear the local budget-exhaustion mirror (task #97-style: shared Redis
+ * record is authoritative, so when it is absent local state MUST clear too
+ * or the fetcher wrapper short-circuits on stale in-memory state).
+ */
+export function clearSpotifyBudgetExhaustion(): void {
+  budgetExhaustedUntilMs = 0;
+}
+
+/**
+ * Install the budget hook. Called once at bootstrap; passing null disables
+ * the guard (default behavior for tests that don't opt in). The hook is
+ * consulted BEFORE every outbound call to `accounts.spotify.com` or
+ * `api.spotify.com` - the dealer websocket and other listener traffic do
+ * NOT hit those hosts and are not counted.
+ */
+export function setSpotifyBudgetHook(hook: SpotifyBudgetHook | null): void {
+  budgetHook = hook;
 }
 
 /**
@@ -457,6 +545,33 @@ function timeoutSignal(): { signal: AbortSignal; clear: () => void } {
 }
 
 /**
+ * Wrap `noteCall` on the injected budget hook (task #120). Returns true when
+ * the call is allowed to proceed, false when the cap has been reached and
+ * this call MUST be skipped. Stamps in-process exhaustion on cap so
+ * subsequent code paths short-circuit at the fetcher gate. Never throws -
+ * a hook failure never breaks a Spotify call (the counter is best-effort).
+ */
+async function passesBudget(): Promise<boolean> {
+  if (!budgetHook) return true;
+  try {
+    const { capReached, nextResetAtMs } = await budgetHook.noteCall();
+    if (capReached) {
+      if (Number.isFinite(nextResetAtMs) && nextResetAtMs > 0) {
+        applySpotifyBudgetExhaustion(nextResetAtMs);
+      }
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(
+      "[spotifyService] budget hook threw; skipping guard for this call:",
+      err instanceof Error ? err.message : err
+    );
+    return true;
+  }
+}
+
+/**
  * Exchange the refresh token for a fresh access token and store it in memory
  * (§4.6). Throws on failure — the caller degrades to `{ playing: false }`. The
  * thrown error message NEVER includes the token or the client secret.
@@ -476,6 +591,18 @@ async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
     grant_type: "refresh_token",
     refresh_token: config.refreshToken,
   });
+
+  // Task #120 - count the token endpoint against the daily budget. If the
+  // cap trips we skip the exchange (returns null on this path via a thrown
+  // signal-string caught by the fetcher, which degrades to idle). We still
+  // count the call itself because the counter records every attempt, even
+  // one we are about to bail on.
+  const allowed = await passesBudget();
+  if (!allowed) {
+    throw new Error(
+      "Spotify token refresh skipped: daily API call budget exhausted"
+    );
+  }
 
   const { signal, clear } = timeoutSignal();
   try {
@@ -572,7 +699,11 @@ async function getAccessToken(config: SpotifyConfig): Promise<string> {
   return refreshAccessToken(config);
 }
 
-async function callCurrentlyPlaying(token: string): Promise<Response> {
+async function callCurrentlyPlaying(token: string): Promise<Response | null> {
+  // Task #120 - budget count + guard. When exhausted, return null so the
+  // caller degrades to idle without hitting the network (a spent quota is
+  // as good as a 429).
+  if (!(await passesBudget())) return null;
   const { signal, clear } = timeoutSignal();
   try {
     return await fetch(SPOTIFY_NOW_PLAYING_URL, {
@@ -584,7 +715,9 @@ async function callCurrentlyPlaying(token: string): Promise<Response> {
   }
 }
 
-async function callRecentlyPlayed(token: string): Promise<Response> {
+async function callRecentlyPlayed(token: string): Promise<Response | null> {
+  // Task #120 - budget count + guard. Same as currently-playing above.
+  if (!(await passesBudget())) return null;
   const { signal, clear } = timeoutSignal();
   try {
     return await fetch(SPOTIFY_RECENTLY_PLAYED_URL, {
@@ -666,8 +799,13 @@ async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
   if (isSpotifyRateLimited()) return null;
   // Auth-suspended (task #95): never touch Spotify at all.
   if (authSuspended) return null;
+  // Budget-exhausted (task #120): same short-circuit as rate-limit.
+  if (isSpotifyBudgetExhausted()) return null;
   try {
     const res = await callRecentlyPlayed(token);
+    // Budget hook may have tripped inside callRecentlyPlayed and returned null
+    // rather than firing the fetch. Degrade to no-last-played silently.
+    if (res == null) return null;
 
     if (res.status === 429) {
       noteSpotifyRateLimited(res);
@@ -764,14 +902,23 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
   // Auth-suspended (task #95): the token refresh is dead; degrade to idle
   // without ever touching accounts.spotify.com or api.spotify.com.
   if (authSuspended) return NOT_PLAYING;
+  // Budget-exhausted (task #120): identical short-circuit; the shared record
+  // has reason "budget" and the deadline is the next window reset.
+  if (isSpotifyBudgetExhausted()) return NOT_PLAYING;
   try {
     let token = await getAccessToken(config);
     let res = await callCurrentlyPlaying(token);
+    if (res == null) {
+      // Budget hook tripped this exact call. Degrade to idle so the
+      // fetcher wrapper writes a degraded snapshot on the leader path.
+      return NOT_PLAYING;
+    }
 
     // Expired/invalid access token → force a refresh and retry exactly once.
     if (res.status === 401) {
       token = await refreshAccessToken(config);
       res = await callCurrentlyPlaying(token);
+      if (res == null) return NOT_PLAYING;
     }
 
     // 429 → suspend all Spotify fetches (Retry-After or exponential backoff).
@@ -881,6 +1028,12 @@ export function clearSpotifyRuntimeState(): void {
   backoffUntilMs = 0;
   backoffStreak = 0;
   inBackoff = false;
+  // Fresh authorization does NOT lift a budget exhaustion either (the budget
+  // is per app / client id, unrelated to the refresh token). Reset it here
+  // anyway so a test-only reset via `_resetSpotifyStateForTests` starts
+  // clean; production `clearSpotifyRuntimeState` is only called on admin
+  // reconnect, and the very next tick will re-mirror any live shared record.
+  budgetExhaustedUntilMs = 0;
   // A fresh authorization always lifts auth suspension: the whole point of the
   // admin reconnect flow is to install a working refresh token.
   authSuspended = false;
@@ -894,4 +1047,8 @@ export function clearSpotifyRuntimeState(): void {
 /** Test-only alias: clear the in-memory token, cache, and any in-flight fetch. */
 export function _resetSpotifyStateForTests(): void {
   clearSpotifyRuntimeState();
+  // Detach any injected budget hook so tests do not leak state across
+  // suites (bootstrap installs a hook that survives a runtime-state
+  // clear in production, but tests need a clean slate).
+  budgetHook = null;
 }

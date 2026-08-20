@@ -100,6 +100,26 @@ export function createFakeRedis(): FakeRedis {
       map.delete(key);
       return existed ? 1 : 0;
     },
+    async incr(key) {
+      cmdHistory.push(`INCR ${key}`);
+      maybeThrow();
+      const e = alive(key);
+      const current = e ? Number.parseInt(e.value, 10) || 0 : 0;
+      const next = current + 1;
+      map.set(key, {
+        value: String(next),
+        expiresAt: e ? e.expiresAt : null,
+      });
+      return next;
+    },
+    async pExpire(key, pxMs) {
+      cmdHistory.push(`PEXPIRE ${key} ${pxMs}`);
+      maybeThrow();
+      const e = alive(key);
+      if (!e) return 0;
+      e.expiresAt = now() + pxMs;
+      return 1;
+    },
     async quit() {
       cmdHistory.push("QUIT");
       map.clear();

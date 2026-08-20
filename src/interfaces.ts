@@ -93,6 +93,22 @@ export interface IAppSecrets {
    * set this or every publish is rejected with 403.
    */
   realtime_service_name?: string;
+  /**
+   * Daily cap on outbound Spotify Web API + token-endpoint calls (task #120).
+   * Belt-and-braces safety net for the fallback polling lane: even if
+   * cadence mis-estimates and polls too often, the counter suspends further
+   * calls once the cap is hit until the next window reset, exactly like a
+   * 429 backoff. Default 4000, the observed empirical ceiling for this
+   * app's client id.
+   */
+  spotify_daily_call_budget?: number;
+  /**
+   * UTC time of day the daily Spotify call budget window resets, as "HH:MM".
+   * Default "21:23" - the observed daily reset for this app's client id.
+   * Invalid strings fall back to the default silently (the guard must never
+   * turn into a silent misconfiguration foot-gun).
+   */
+  spotify_budget_reset_utc?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----

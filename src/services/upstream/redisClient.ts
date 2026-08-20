@@ -51,6 +51,20 @@ export interface RedisClient {
    * suspension can positively clear the record (rather than waiting for TTL).
    */
   del(key: string): Promise<number>;
+  /**
+   * Atomic INCR - increments the integer counter at `key` by 1 and returns the
+   * new value. If the key does not exist, it is treated as 0 and INCR sets it
+   * to 1. Used by the Spotify daily-call budget guard (task #120) so multiple
+   * processes / concurrent code paths never lose a count under contention.
+   */
+  incr(key: string): Promise<number>;
+  /**
+   * Set / update the PX expiry on an existing key without changing its value.
+   * Returns 1 on success, 0 when the key is absent. Paired with `incr` so the
+   * budget counter's TTL is renewed on every write to cover the natural
+   * window rollover with slack.
+   */
+  pExpire(key: string, pxMs: number): Promise<number>;
   /** Close any underlying connections. Safe to call on a client already shut. */
   quit(): Promise<void>;
 }
@@ -93,6 +107,8 @@ function buildIoredisClient(url: string): RedisClient {
       ...args: unknown[]
     ) => Promise<string | null>;
     del: (k: string) => Promise<number>;
+    incr: (k: string) => Promise<number>;
+    pexpire: (k: string, pxMs: number) => Promise<number>;
     eval: (
       script: string,
       numKeys: number,
@@ -148,6 +164,14 @@ function buildIoredisClient(url: string): RedisClient {
     },
     async del(key) {
       const res = await client.del(key);
+      return typeof res === "number" ? res : Number(res) || 0;
+    },
+    async incr(key) {
+      const res = await client.incr(key);
+      return typeof res === "number" ? res : Number(res) || 0;
+    },
+    async pExpire(key, pxMs) {
+      const res = await client.pexpire(key, pxMs);
       return typeof res === "number" ? res : Number(res) || 0;
     },
     async quit() {
