@@ -573,7 +573,7 @@ describe("task #113 — GET /api/admin/spotify/status contract + precedence", ()
     expect(machine.status).toBe(401);
   });
 
-  it("returns the exact documented contract shape", async () => {
+  it("returns the exact documented contract shape (task #122 - source, listener, budget always present)", async () => {
     const res = await request(app)
       .get("/api/admin/spotify/status")
       .set(...AUTH);
@@ -582,13 +582,27 @@ describe("task #113 — GET /api/admin/spotify/status contract + precedence", ()
     expect(Object.keys(res.body.data).sort()).toEqual(
       [
         "state",
+        "source",
+        "listener",
         "last_success_at",
         "last_error",
         "rate_limited_until",
         "authorized_at",
         "expires_at",
+        "budget",
       ].sort()
     );
+    // task #122 - the listener sub-object always carries all four keys, even
+    // when the sp_dc credential is absent (no_credential state).
+    expect(Object.keys(res.body.data.listener).sort()).toEqual(
+      ["state", "last_event_at", "error_kind", "credential_present"].sort()
+    );
+    expect(res.body.data.listener.credential_present).toBe(false);
+    expect(res.body.data.listener.state).toBe("no_credential");
+    // Fresh install has no Redis wired in these tests, so budget degrades
+    // to null (never absent).
+    expect(res.body.data).toHaveProperty("budget");
+    expect(res.body.data.budget).toBeNull();
   });
 
   it("state = `disconnected` when no grant is stored (no static fallback)", async () => {
@@ -825,5 +839,342 @@ describe("task #113 — POST /api/admin/spotify/disconnect", () => {
       .post("/api/admin/spotify/disconnect")
       .set("Authorization", "Bearer pv6k_fake");
     expect(machine.status).toBe(401);
+  });
+});
+
+// ============================================================================
+// Task #122 - integrations status contract v2 (source, listener, budget)
+// ============================================================================
+
+describe("task #122 - GET /api/admin/spotify/status source + listener + budget", () => {
+  // Local helpers for this describe block only; kept inline so the shape of
+  // the fake UpstreamHandle stays visible next to the assertions that depend
+  // on it. We import from module paths at test time so this file doesn't grow
+  // a top-level dependency on internals only these tests touch.
+  async function seedSpotifyGrant(refreshToken: string): Promise<void> {
+    const { saveServiceToken } = await import(
+      "../src/services/serviceTokenStore"
+    );
+    await saveServiceToken("spotify", CLIENT_SECRET, refreshToken);
+    _resetServiceTokenStoreForTests();
+  }
+  async function seedListenerCredential(spDc: string): Promise<void> {
+    const { saveListenerCredential } = await import(
+      "../src/services/listenerCredentialStore"
+    );
+    await saveListenerCredential(CLIENT_SECRET, spDc);
+    _resetServiceTokenStoreForTests();
+  }
+  async function makeFakeUpstream(opts: {
+    listenerHealth?: { state: string; last_event_at?: string | null; last_error?: { kind: string; at: string } | null };
+    listenerReadErrors?: number;
+  } = {}) {
+    const { createFakeRedis } = await import("./helpers/fakeRedis");
+    const { spotifyListenerHealthKey } = await import(
+      "../src/services/upstream/snapshotStore"
+    );
+    const redis = createFakeRedis();
+    if (opts.listenerHealth) {
+      redis.seed(
+        spotifyListenerHealthKey("development"),
+        JSON.stringify({
+          state: opts.listenerHealth.state,
+          last_event_at: opts.listenerHealth.last_event_at ?? null,
+          last_error: opts.listenerHealth.last_error ?? null,
+        })
+      );
+    }
+    if (opts.listenerReadErrors) {
+      for (let i = 0; i < opts.listenerReadErrors; i += 1) {
+        redis.queueError(new Error("ECONNREFUSED"));
+      }
+    }
+    return {
+      handle: {
+        enabled: true,
+        lease: null,
+        loop: { stop: () => undefined, runTick: async () => undefined },
+        redis,
+        listenerSupervisor: null,
+        apiBudget: null,
+        stop: async () => undefined,
+      } as unknown,
+      redis,
+    };
+  }
+
+  beforeEach(() => {
+    app.set("upstream", null);
+  });
+  afterEach(() => {
+    app.set("upstream", null);
+  });
+
+  // -- Combinations of listener-state x polling-state -> source --------------
+
+  it("listener 'connected' + polling 'disconnected' -> source 'listener'", async () => {
+    await seedListenerCredential("sp_dc_ABC");
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: {
+        state: "connected",
+        last_event_at: new Date().toISOString(),
+      },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data.state).toBe("disconnected");
+    expect(res.body.data.source).toBe("listener");
+    expect(res.body.data.listener.state).toBe("connected");
+    expect(res.body.data.listener.credential_present).toBe(true);
+    expect(res.body.data.listener.last_event_at).not.toBeNull();
+  });
+
+  it("listener 'connected' + polling 'connected' -> source 'listener' (listener wins)", async () => {
+    await seedSpotifyGrant("polling-grant");
+    await seedListenerCredential("sp_dc_XYZ");
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: { state: "connected" },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("connected");
+    expect(res.body.data.source).toBe("listener");
+  });
+
+  it("listener 'connected' + polling 'disabled' -> source 'listener'", async () => {
+    await seedListenerCredential("sp_dc_D");
+    await seedSpotifyGrant("polling-grant");
+    await request(app).post("/api/admin/spotify/disable").set(...AUTH);
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: { state: "connected" },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("disabled");
+    expect(res.body.data.source).toBe("listener");
+  });
+
+  it("listener 'backoff' + polling 'connected' -> source 'polling'", async () => {
+    await seedSpotifyGrant("polling-grant");
+    await seedListenerCredential("sp_dc_B");
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: { state: "backoff" },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("connected");
+    expect(res.body.data.source).toBe("polling");
+    expect(res.body.data.listener.state).toBe("backoff");
+  });
+
+  it("listener 'idle' (record absent) + polling 'connected' -> source 'polling'", async () => {
+    await seedSpotifyGrant("polling-grant");
+    await seedListenerCredential("sp_dc_I");
+    const { handle } = await makeFakeUpstream(); // no listener record seeded
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("connected");
+    expect(res.body.data.source).toBe("polling");
+    expect(res.body.data.listener.state).toBe("idle");
+  });
+
+  it("listener 'connecting' + polling 'rate_limited' -> source 'none'", async () => {
+    await seedSpotifyGrant("polling-grant");
+    await seedListenerCredential("sp_dc_R");
+    const spotifyService = await import("../src/services/spotifyService");
+    spotifyService.applySpotifyBackoffUntil(Date.now() + 60_000);
+    spotifyService.noteSpotifyApiError(
+      "rate_limited",
+      Date.now(),
+      Date.now() + 60_000
+    );
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: { state: "connecting" },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("rate_limited");
+    expect(res.body.data.source).toBe("none");
+    expect(res.body.data.listener.state).toBe("connecting");
+  });
+
+  it("listener 'credential_dead' + polling 'auth_broken' -> source 'none'", async () => {
+    await seedSpotifyGrant("polling-grant");
+    await seedListenerCredential("sp_dc_C");
+    const spotifyService = await import("../src/services/spotifyService");
+    spotifyService.noteSpotifyApiError("invalid_grant");
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: {
+        state: "credential_dead",
+        last_error: {
+          kind: "invalid_cookie",
+          at: new Date().toISOString(),
+        },
+      },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("auth_broken");
+    expect(res.body.data.source).toBe("none");
+    expect(res.body.data.listener.state).toBe("credential_dead");
+    expect(res.body.data.listener.error_kind).toBe("invalid_cookie");
+  });
+
+  it("no listener credential -> listener state 'no_credential' regardless of polling", async () => {
+    await seedSpotifyGrant("polling-only");
+    const { handle } = await makeFakeUpstream();
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("connected");
+    expect(res.body.data.source).toBe("polling");
+    expect(res.body.data.listener).toEqual({
+      state: "no_credential",
+      last_event_at: null,
+      error_kind: null,
+      credential_present: false,
+    });
+  });
+
+  it("no listener credential + no polling grant -> state 'disconnected', source 'none'", async () => {
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.body.data.state).toBe("disconnected");
+    expect(res.body.data.source).toBe("none");
+    expect(res.body.data.listener.state).toBe("no_credential");
+    expect(res.body.data.listener.credential_present).toBe(false);
+  });
+
+  // -- Redis outage -----------------------------------------------------------
+
+  it("Redis outage -> listener 'unknown', still 200 (never a 5xx)", async () => {
+    await seedListenerCredential("sp_dc_R2");
+    // Every read hits an error - covers the shared health, suspension, and
+    // listener-health lookups.
+    const { handle, redis } = await makeFakeUpstream({
+      listenerReadErrors: 20,
+    });
+    void redis; // keep the reference so lint doesn't complain in the block
+    app.set("upstream", handle);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data.listener.state).toBe("unknown");
+    expect(res.body.data.listener.credential_present).toBe(true);
+  });
+
+  it("Redis unset entirely -> listener 'unknown' when a credential is stored", async () => {
+    await seedListenerCredential("sp_dc_none");
+    // Upstream not installed => no redis client on the request.
+    app.set("upstream", null);
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data.listener.state).toBe("unknown");
+    expect(res.body.data.listener.credential_present).toBe(true);
+  });
+
+  // -- Budget slot ------------------------------------------------------------
+
+  it("budget field is present as `null` when no upstream apiBudget is wired", async () => {
+    app.set("upstream", null);
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveProperty("budget");
+    expect(res.body.data.budget).toBeNull();
+  });
+
+  it("budget field carries { used, cap, resets_at } when the upstream apiBudget is wired", async () => {
+    const { createFakeRedis } = await import("./helpers/fakeRedis");
+    const { createApiBudget } = await import(
+      "../src/services/listener/apiBudget"
+    );
+    const redis = createFakeRedis();
+    const apiBudget = createApiBudget({
+      redis,
+      env: "development",
+      cap: 1234,
+      resetHour: 0,
+      resetMinute: 0,
+    });
+    await apiBudget.noteCall();
+    await apiBudget.noteCall();
+    await apiBudget.noteCall();
+
+    app.set("upstream", {
+      enabled: true,
+      lease: null,
+      loop: { stop: () => undefined, runTick: async () => undefined },
+      redis,
+      listenerSupervisor: null,
+      apiBudget,
+      stop: async () => undefined,
+    });
+
+    const res = await request(app)
+      .get("/api/admin/spotify/status")
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(res.body.data.budget).toMatchObject({ cap: 1234 });
+    expect(res.body.data.budget.used).toBeGreaterThanOrEqual(3);
+    expect(typeof res.body.data.budget.resets_at).toBe("string");
+  });
+
+  // -- Enumeration endpoint carries the same block --------------------------
+
+  it("GET /api/admin/integrations exposes the same source/listener/budget on the spotify entry", async () => {
+    await seedListenerCredential("sp_dc_X");
+    const { handle } = await makeFakeUpstream({
+      listenerHealth: { state: "connected" },
+    });
+    app.set("upstream", handle);
+
+    const res = await request(app).get("/api/admin/integrations").set(...AUTH);
+    expect(res.status).toBe(200);
+    const spotify = res.body.data.integrations.find(
+      (e: { key: string }) => e.key === "spotify"
+    );
+    expect(spotify).toMatchObject({
+      key: "spotify",
+      name: "Spotify",
+      auth_kind: "oauth",
+      source: "listener",
+    });
+    expect(spotify.listener).toMatchObject({
+      state: "connected",
+      credential_present: true,
+    });
+    expect(spotify).toHaveProperty("budget");
   });
 });
