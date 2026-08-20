@@ -20,6 +20,9 @@
  *     curated shape below is returned.
  */
 
+import { invalidateServiceTokenCache } from "./serviceTokenStore";
+import { SPOTIFY_SERVICE_KEY } from "./spotifyTokenStore";
+
 /** Spotify OAuth token endpoint (refresh-token exchange, §4.6). */
 export const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 /** Spotify "currently playing" endpoint (§4.6). */
@@ -471,6 +474,14 @@ export function resumeSpotifyAuth(): void {
   accessToken = null;
   cache = null;
   inFlight = null;
+  // Task #121 - explicit invalidation of the serviceTokenStore cache for
+  // spotify. Without this, a resume-then-fetch on the polling leader can
+  // still read its own stale decrypted refresh token (memoized before the
+  // admin reconnected on another instance), 401 as invalid_grant, and re-
+  // suspend with a fresh updated_at snapshot - wedging Spotify permanently
+  // until the container restarts. The store's TTL alone converges within a
+  // minute; this pushes the fresh row to the very next refresh.
+  invalidateServiceTokenCache(SPOTIFY_SERVICE_KEY);
   console.warn(
     "[spotifyService] Spotify auth resumed; token refresh will be retried on the next tick"
   );
