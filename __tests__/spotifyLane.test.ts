@@ -432,3 +432,45 @@ describe("spotifyLane — Redis is authoritative (task #97)", () => {
     expect(clearBackoff).not.toHaveBeenCalled();
   });
 });
+
+describe("spotifyLane — skip-listener-active (task #118)", () => {
+  it("returns skip-listener-active whenever the listener is connected", async () => {
+    const deps = buildDeps({
+      isListenerConnected: () => true,
+      // Deliberately set every other signal so the lane WOULD normally
+      // fetch every tick - proves the listener check short-circuits before
+      // suspension / viewer / idle logic.
+      getPresenceCount: async () => 10,
+      getLastPublicRequestAt: async () => new Date(0),
+    });
+    const lane = createSpotifyLane(deps, buildConfig());
+    expect(await lane.planTick(1_000)).toBe("skip-listener-active");
+    expect(await lane.planTick(6_000)).toBe("skip-listener-active");
+    expect(await lane.planTick(11_000)).toBe("skip-listener-active");
+  });
+
+  it("does not short-circuit while the listener is idle / backoff / credential_dead", async () => {
+    let connected = false;
+    const deps = buildDeps({
+      isListenerConnected: () => connected,
+      getPresenceCount: async () => 3,
+    });
+    const lane = createSpotifyLane(deps, buildConfig());
+    expect(await lane.planTick(0)).toBe("fetch");
+    connected = true;
+    expect(await lane.planTick(5_000)).toBe("skip-listener-active");
+    connected = false;
+    expect(await lane.planTick(10_000)).toBe("fetch");
+  });
+
+  it("the admin disable flag still wins over listener-active", async () => {
+    const deps = buildDeps({
+      isDisabled: async () => true,
+      isListenerConnected: () => true,
+    });
+    const lane = createSpotifyLane(deps, buildConfig());
+    // Disabled path returns skip-suspended before it even reads the
+    // listener flag - a hard disable trumps every other signal.
+    expect(await lane.planTick(0)).toBe("skip-suspended");
+  });
+});

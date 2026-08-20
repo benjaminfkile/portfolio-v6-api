@@ -469,3 +469,152 @@ export async function readSpotifyHealth(
     return null;
   }
 }
+
+// ============================================================================
+// Shared listener health record (task #118)
+// ============================================================================
+
+/**
+ * Redis key holding the SHARED Spotify LISTENER health record - published by
+ * the leader that owns the dealer websocket so every instance (leaders and
+ * non-leaders alike) can read one truthful view of listener state for the
+ * status endpoint. Distinct from `spotifyHealthKey`, which covers the polling
+ * lane's own health.
+ */
+export function spotifyListenerHealthKey(env: string): string {
+  return `portfolio-v6-api:${env}:snapshot:now-playing:listener-health`;
+}
+
+/**
+ * The five lifecycle states the dealer listener can be in (matches
+ * `DealerState` in the listener module). Kept as a plain string union here so
+ * the snapshot store has no import edge into the listener package.
+ */
+export type ListenerHealthState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "backoff"
+  | "credential_dead";
+
+/**
+ * Categorized last-error kinds the listener surfaces. `invalid_cookie` is the
+ * only stable / terminal case (admin must paste a fresh sp_dc); every other
+ * transient failure the reconnect loop swallows collapses into `transient`.
+ */
+export type ListenerHealthErrorKind = "invalid_cookie" | "transient";
+
+/** One entry in `ListenerHealthRecord.last_error`. */
+export interface ListenerHealthLastError {
+  kind: ListenerHealthErrorKind;
+  /** ISO 8601 wall-clock of the failure. */
+  at: string;
+}
+
+/**
+ * Shared health snapshot for the Spotify listener (task #118). Written by the
+ * leader that owns the dealer socket on every state transition and every
+ * cluster event. Non-leaders read it via `readListenerHealth` for their
+ * status endpoint.
+ */
+export interface ListenerHealthRecord {
+  state: ListenerHealthState;
+  /** ISO 8601 wall-clock of the last cluster event we processed, or null. */
+  last_event_at: string | null;
+  /** Most recent categorized error, or null if the last observation was clean. */
+  last_error: ListenerHealthLastError | null;
+}
+
+/**
+ * TTL floor on the listener health record. Refreshed on every event and
+ * every state transition by the live leader; the TTL just bounds staleness
+ * after a leader dies without a replacement. Aligned with SPOTIFY_HEALTH_TTL_MS.
+ */
+export const LISTENER_HEALTH_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Overwrite the shared listener health record. Failure is logged and
+ * swallowed - health tracking must never crash the listener loop.
+ */
+export async function writeListenerHealth(
+  client: RedisClient,
+  env: string,
+  record: ListenerHealthRecord
+): Promise<void> {
+  const key = spotifyListenerHealthKey(env);
+  try {
+    await client.set(key, JSON.stringify(record), {
+      pxMs: LISTENER_HEALTH_TTL_MS,
+    });
+  } catch (err) {
+    console.error(
+      `[snapshotStore] listener health write failed for ${key}:`,
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/**
+ * Read the shared listener health record, or `null` when absent / on Redis
+ * error / when the stored JSON does not parse. Callers treat `null` as
+ * "listener state unknown" and degrade gracefully.
+ */
+export async function readListenerHealth(
+  client: RedisClient,
+  env: string
+): Promise<ListenerHealthRecord | null> {
+  const key = spotifyListenerHealthKey(env);
+  let raw: string | null = null;
+  try {
+    raw = await client.get(key);
+  } catch (err) {
+    console.error(
+      `[snapshotStore] listener health read failed for ${key}:`,
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(raw) as ListenerHealthRecord;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.state === "string" &&
+      isListenerState(parsed.state)
+    ) {
+      return {
+        state: parsed.state,
+        last_event_at:
+          typeof parsed.last_event_at === "string"
+            ? parsed.last_event_at
+            : null,
+        last_error:
+          parsed.last_error &&
+          typeof parsed.last_error === "object" &&
+          typeof parsed.last_error.kind === "string" &&
+          typeof parsed.last_error.at === "string" &&
+          (parsed.last_error.kind === "invalid_cookie" ||
+            parsed.last_error.kind === "transient")
+            ? {
+                kind: parsed.last_error.kind,
+                at: parsed.last_error.at,
+              }
+            : null,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function isListenerState(v: string): v is ListenerHealthState {
+  return (
+    v === "idle" ||
+    v === "connecting" ||
+    v === "connected" ||
+    v === "backoff" ||
+    v === "credential_dead"
+  );
+}

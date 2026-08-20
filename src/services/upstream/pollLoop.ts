@@ -285,7 +285,13 @@ export function startPollLoop(
           "now-playing"
         );
       }
-      if (!wrote) {
+      if (decision === "skip-listener-active") {
+        // Task #118 — the connect-listener owns the snapshot right now.
+        // Neither fetch NOR write a degraded payload here: overwriting the
+        // key with a stale/idle placeholder would immediately clobber the
+        // listener's event-driven write on the next request. The listener
+        // supervisor is the sole writer while it is `connected`.
+      } else if (!wrote) {
         // Either the lane skipped (suspended / idle) OR the fetcher itself
         // short-circuited (rate-limited / auth-suspended / upstream error).
         // Write a degraded payload — same shape non-leaders will read via

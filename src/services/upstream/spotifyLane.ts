@@ -189,6 +189,15 @@ export interface SpotifyLaneDeps {
    * exactly once, on the fresh leader's first tick.
    */
   applyHealthMirror(record: SpotifyHealthRecord): void;
+  /**
+   * True iff the connect-listener (task series #115-#123) is currently
+   * `connected`, meaning the dealer websocket is holding the primary
+   * now-playing source. When true the lane MUST return
+   * `skip-listener-active` so the polling lane does not fetch redundantly.
+   * Optional so the pre-#118 wiring (no listener) works unchanged; when
+   * absent the lane behaves exactly as it did before.
+   */
+  isListenerConnected?: () => boolean;
 }
 
 /** Runtime knobs — kept small so tests can override any subset. */
@@ -206,8 +215,21 @@ export interface SpotifyLaneConfig {
   idleIntervalMs: number;
 }
 
-/** Per-tick decision: fetch now, or skip this tick (idle / suspended). */
-export type SpotifyLaneDecision = "fetch" | "skip-idle" | "skip-suspended";
+/**
+ * Per-tick decision: fetch now, or skip this tick.
+ *
+ * `skip-listener-active` (task #118) means the connect-listener owns the
+ * primary now-playing source right now: the polling lane MUST NOT fetch,
+ * because it would burn Spotify Web API quota redundantly. Every other
+ * listener state (idle / connecting / backoff / credential_dead) leaves the
+ * polling lane free to operate under the existing suspension / viewer-aware
+ * / 429-backoff rules.
+ */
+export type SpotifyLaneDecision =
+  | "fetch"
+  | "skip-idle"
+  | "skip-suspended"
+  | "skip-listener-active";
 
 export interface SpotifyLane {
   /**
@@ -310,6 +332,17 @@ export function createSpotifyLane(
     const disabled = await deps.isDisabled().catch(() => false);
     if (disabled) {
       return "skip-suspended";
+    }
+
+    // Task #118 — while the connect-listener holds the dealer socket
+    // (`connected`), the polling lane MUST NOT fetch: the listener is the
+    // primary now-playing source and every event flows into the shared
+    // snapshot directly, so any Spotify Web API call here would be pure
+    // redundant quota burn. Every other listener state (idle / connecting /
+    // backoff / credential_dead) leaves the polling fallback free to run
+    // under the usual suspension / viewer-aware rules below.
+    if (deps.isListenerConnected && deps.isListenerConnected()) {
+      return "skip-listener-active";
     }
 
     // Task #112 — one-time inherit of the shared health record into the
