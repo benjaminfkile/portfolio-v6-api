@@ -119,10 +119,11 @@ export function snapshotKey(
 /**
  * TTL after which Redis drops the snapshot. Kept generous (10 minutes) so a
  * brief poll-loop pause on the leader does not empty the cache for readers —
- * the leader refreshes every fast-lane tick anyway, so a stale entry is
- * replaced far before TTL. Slow-lane services (Duolingo/GitHub) have their own
- * ~1h refresh cadence and keep the same 10-minute Redis TTL: the leader re-
- * writes them well before Redis expires them.
+ * the listener rewrites now-playing on every cluster event and the polling
+ * fallback rewrites on every processed tick, so a stale entry is replaced far
+ * before TTL. Slow-lane services (Duolingo/GitHub) have their own ~1h refresh
+ * cadence and keep the same 10-minute Redis TTL: the leader re-writes them
+ * well before Redis expires them.
  */
 export const SNAPSHOT_TTL_MS = 10 * 60 * 1000;
 
@@ -244,9 +245,9 @@ export interface SpotifySuspensionRecord {
 
 /**
  * TTL floor on the suspension record. Redis expiry is a safety net for a
- * situation where the leader dies and nothing rewrites the record; the leader
- * itself refreshes the record every tick while the local state remains
- * suspended. Kept longer than the leader lease TTL (15s) so a brief
+ * situation where the leader dies and nothing rewrites the record; the lane
+ * rewrites the record on every fetch tick that finds local suspension state
+ * still live. Kept longer than the leader lease TTL (15s) so a brief
  * leader-failover window never surfaces a false "not suspended" read.
  */
 export const SPOTIFY_SUSPENSION_MIN_TTL_MS = 60 * 1000;

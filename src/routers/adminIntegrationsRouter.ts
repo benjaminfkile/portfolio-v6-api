@@ -133,11 +133,10 @@ export interface IntegrationStatus {
 }
 
 /**
- * Compute one integration's status. Task #112 killed the static
- * `spotify_refresh_token` secrets fallback — admin-stored credentials are the
- * only grant source now, so the `secretsFallback` branch is dead for every
- * shipping integration but kept so a future one could opt in. Never throws —
- * the store degrades to null without a DB (§4.7).
+ * Compute one integration's status. Admin-stored credentials are the only
+ * grant source for every shipping integration, so the `secretsFallback` branch
+ * is dead today but kept in the descriptor so a future one could opt in.
+ * Never throws — the store degrades to null without a DB (§4.7).
  */
 async function computeStatus(
   descriptor: IntegrationDescriptor,

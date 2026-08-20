@@ -9,9 +9,9 @@ import { IAppSecrets } from "../interfaces";
  * authorization, re-authorization is a twice-a-year routine. This service holds
  * the pieces the adminIntegrationsRouter composes: single-use `state` tokens
  * (DB-backed, task #113), the authorize-URL builder, and the code→token
- * exchange. Task #112 made the admin reconnect flow the ONLY bootstrap
- * (no more static `spotify_refresh_token` secret, no more one-time script) —
- * everything else in the app reads the token this flow writes.
+ * exchange. The admin reconnect flow is the ONLY bootstrap for the polling
+ * fallback lane's grant — everything else in the app reads the token this
+ * flow writes.
  *
  * State tokens are opaque 256-bit values persisted (sha256-hashed) to the
  * shared `spotify_oauth_states` table. Only a verified admin can mint one,

@@ -14,9 +14,8 @@ import {
  *
  * Since Spotify's June 2026 policy change, refresh tokens expire 180 days after
  * the user's original authorization. The admin reconnect flow mints a new one in
- * the browser and stores it here; this store is the ONLY grant source
- * (task #112 killed the static `spotify_refresh_token` secret fallback, and
- * with it the one-time bootstrap script).
+ * the browser and stores it here; this store is the ONLY grant source for the
+ * polling fallback lane (there is no env or secret fallback).
  *
  * The `encryptionKey` argument these helpers take used to be the Spotify client
  * secret verbatim; callers now pass the resolved encryption key
