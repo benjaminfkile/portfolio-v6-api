@@ -238,16 +238,16 @@ export function startPollLoop(
 
   /**
    * Fetch a payload and, if the fetcher returned data, write / publish it.
-   * Returns whether a real payload was written so callers can fall back to a
-   * degraded payload when the fetcher skipped (429 backoff, auth-suspended,
-   * upstream error). Task #96 invariant: EVERY tick writes SOME snapshot for
-   * the fast lanes.
+   * Returns the payload that was written, or `null` when the fetcher skipped
+   * (429 backoff, auth-suspended, upstream error) - callers fall back to a
+   * degraded payload in that case. Task #96 invariant: EVERY tick writes
+   * SOME snapshot for the fast lanes.
    */
   async function refreshOne<T>(
     service: SnapshotService,
     fetcher: Fetcher<T>,
     publishTopic?: string
-  ): Promise<boolean> {
+  ): Promise<T | null> {
     let payload: T | null = null;
     try {
       payload = await fetcher();
@@ -256,12 +256,12 @@ export function startPollLoop(
         `[pollLoop] fetch failed for ${service}:`,
         err instanceof Error ? err.message : err
       );
-      return false;
+      return null;
     }
-    if (payload == null) return false;
+    if (payload == null) return null;
 
     await writeAndMaybePublish(service, payload, publishTopic);
-    return true;
+    return payload;
   }
 
   async function runTick(): Promise<void> {
@@ -277,9 +277,9 @@ export function startPollLoop(
     // falls through to a direct Spotify fetch.
     if (fetchers.spotifyLane) {
       const decision = await fetchers.spotifyLane.planTick(now);
-      let wrote = false;
+      let fetchedPayload: unknown = null;
       if (decision === "fetch") {
-        wrote = await refreshOne(
+        fetchedPayload = await refreshOne(
           "now-playing",
           fetchers.nowPlaying,
           "now-playing"
@@ -291,7 +291,7 @@ export function startPollLoop(
         // key with a stale/idle placeholder would immediately clobber the
         // listener's event-driven write on the next request. The listener
         // supervisor is the sole writer while it is `connected`.
-      } else if (!wrote) {
+      } else if (fetchedPayload == null) {
         // Either the lane skipped (suspended / idle) OR the fetcher itself
         // short-circuited (rate-limited / auth-suspended / upstream error).
         // Write a degraded payload — same shape non-leaders will read via
@@ -305,9 +305,11 @@ export function startPollLoop(
       // ticks the shared record is the source of truth and MUST NOT be
       // re-written from local memory — otherwise an operator DEL race would
       // resurrect the deleted deadline from the leader's mirror.
+      // Task #119: pass the fetched payload so the lane can pin the next
+      // predictive nextDueAt from the observed track's progress/duration.
       if (decision === "fetch") {
         await fetchers.spotifyLane
-          .reconcileAfterFetch(now)
+          .reconcileAfterFetch(now, fetchedPayload)
           .catch((err) =>
             console.error(
               "[pollLoop] Spotify suspension reconcile failed:",
@@ -316,12 +318,12 @@ export function startPollLoop(
           );
       }
     } else {
-      const wrote = await refreshOne(
+      const payload = await refreshOne(
         "now-playing",
         fetchers.nowPlaying,
         "now-playing"
       );
-      if (!wrote) {
+      if (payload == null) {
         const prev = readLocalSnapshot<NowPlayingLike>("now-playing");
         const degraded = degradedNowPlaying(prev, nowIso);
         await writeAndMaybePublish("now-playing", degraded, "now-playing");
@@ -331,8 +333,8 @@ export function startPollLoop(
     // Status stays on the base fast cadence — unaffected by the Spotify lane.
     // Same always-write invariant: a fetcher failure / null payload writes
     // the degraded shape so non-leaders never find the key missing.
-    const wroteStatus = await refreshOne("status", fetchers.status, "status");
-    if (!wroteStatus) {
+    const statusPayload = await refreshOne("status", fetchers.status, "status");
+    if (statusPayload == null) {
       await writeAndMaybePublish("status", DEGRADED_STATUS, "status");
     }
 
