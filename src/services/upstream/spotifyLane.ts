@@ -41,20 +41,49 @@
  *    the shared record so a fresh leader compares its DB read against the
  *    value at trip-time, not against its own first observation.
  *
- * 3) VIEWER-AWARE CADENCE — a portfolio has near-zero viewers most of the
- *    day, so polling Spotify every 5s around the clock is almost pure waste.
+ * 3) VIEWER-AWARE CADENCE + PREDICTIVE POLLING (task #119) - the polling
+ *    lane is a quota-safe FALLBACK, not a primary source (the connect-listener
+ *    from task series #115-#123 is primary). The fixed every-tick fast cadence
+ *    is REMOVED; every fetch is either predictively scheduled based on the
+ *    currently-playing track's remaining playback time or throttled by the
+ *    idle interval.
+ *
  *    The lane considers the site "active" if either:
  *      - the gateway presence owner API reports count > 0 on the
- *        `{service}:now-playing` channel (cached ≤ 30s; presence-API failure
- *        is treated as ACTIVE — a gateway hiccup must never disable the
- *        feature, per the task's "fail open" rule), OR
+ *        `{service}:now-playing` channel (cached at most 30s; presence-API
+ *        failure is treated as ACTIVE, a gateway hiccup must never disable
+ *        the feature per the task's "fail open" rule), OR
  *      - a public `GET /api/now-playing` request has landed on any instance
  *        in the last `SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS` (default 5min;
  *        Redis snapshot store, covers the polling-fallback path).
- *    While active: the lane polls every tick at the base cadence. While idle:
- *    it polls at most once per `spotifyIdleIntervalMs` (default 5min). On the
- *    idle → active transition the lane forces an immediate poll so a new
- *    viewer never sees stale data waiting for the idle deadline to elapse.
+ *
+ *    Cadence rules:
+ *      - Idle (no viewers): fetch at most once per `spotifyIdleIntervalMs`
+ *        (default 5min).
+ *      - Active AND playing (per the last observed payload): schedule the
+ *        next fetch at (track end + 2s), clamped to
+ *        [`SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS`, `spotifyIdleIntervalMs`],
+ *        then capped at `SPOTIFY_DRIFT_CHECK_MS` (60s) so long tracks still
+ *        get one drift-check per minute. Formula:
+ *          next = min(SPOTIFY_DRIFT_CHECK_MS,
+ *                     clamp(remaining_ms + 2000,
+ *                           SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS,
+ *                           idleIntervalMs))
+ *        Averaged across a minute of playback this is at most about 2
+ *        Spotify Web API calls per minute.
+ *      - Active AND not playing: fetch at most once per
+ *        `SPOTIFY_DRIFT_CHECK_MS` (60s) so a newly-started track surfaces
+ *        within a minute without spamming the Web API when nothing changed.
+ *      - On the idle to active transition the lane forces an immediate poll
+ *        so a new viewer never waits for the previous deadline to elapse.
+ *
+ *    The predictive schedule is set post-fetch by `reconcileAfterFetch(now,
+ *    payload)` - the poll loop passes the freshly-fetched now-playing
+ *    payload so the lane can read `track.progress_ms` and `track.duration_ms`
+ *    and pin the next tick. When the fetcher returned no payload (short-
+ *    circuit skip / upstream error) the lane keeps the conservative default
+ *    set in `planTick`, which caps the retry at `SPOTIFY_DRIFT_CHECK_MS`
+ *    while active and `idleIntervalMs` while idle.
  *
  * Everything OTHER than the Spotify lane (status/duolingo/github) is
  * unchanged — the lane returns a single decision (`fetch` / `skip`) for the
@@ -82,6 +111,22 @@ export const SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS = 5 * 60 * 1000;
 
 /** Default idle cadence — one poll per 5 minutes when no viewer is around. */
 export const DEFAULT_SPOTIFY_IDLE_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Task #119 - predictive cadence tuning. `SPOTIFY_TRACK_END_MARGIN_MS` is the
+ * safety margin added to (duration_ms - progress_ms) so the follow-up fetch
+ * lands JUST after a track ends rather than racing the transition.
+ * `SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS` is the floor - even a track with 3
+ * seconds remaining will not trigger a fetch sooner than this, so a burst of
+ * short outros cannot push the polling rate above ~4 calls per minute.
+ * `SPOTIFY_DRIFT_CHECK_MS` is the ceiling for the interval between fetches
+ * while a track is playing - long tracks still get one drift-check per
+ * minute, which catches a user skipping / pausing / switching devices
+ * without spamming the Web API when nothing has changed.
+ */
+export const SPOTIFY_TRACK_END_MARGIN_MS = 2_000;
+export const SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS = 15 * 1000;
+export const SPOTIFY_DRIFT_CHECK_MS = 60 * 1000;
 
 /**
  * Deadline placeholder for auth suspensions. Auth doesn't have a natural
@@ -209,8 +254,13 @@ export interface SpotifyLaneConfig {
   /** How often the lane rechecks `service_tokens.updated_at` while suspended. */
   authResumeCheckMs: number;
   /**
-   * How often the lane polls Spotify while the site is idle (no viewers). The
-   * fast cadence is the base poll interval — always every tick when active.
+   * How often the lane polls Spotify while the site is idle (no viewers), and
+   * the ceiling clamp on the predictive schedule while active (task #119).
+   * The fixed every-tick fast cadence is gone; while active the lane instead
+   * schedules the next fetch at (track end + 2s), clamped to
+   * [`SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS`, `idleIntervalMs`], then capped at
+   * `SPOTIFY_DRIFT_CHECK_MS` so long tracks still get a drift check per
+   * minute. See the module header for the full formula.
    */
   idleIntervalMs: number;
 }
@@ -243,12 +293,20 @@ export interface SpotifyLane {
    * Reconcile the local suspension state (spotifyService's in-process flags)
    * with the shared Redis record AFTER a fetch attempt. Called by the poll
    * loop with `now = Date.now()` ONLY when `planTick` returned `"fetch"`
-   * (task #97) — that guarantees any local suspension observed here is a
+   * (task #97) - that guarantees any local suspension observed here is a
    * genuine fresh trip from THIS tick's fetch, not stale in-memory state
    * carried over from an earlier tick, so the shared record's `suspended_until`
    * carries a real deadline and a deleted key can never resurrect from memory.
+   *
+   * Task #119 - `payload` is the now-playing payload the fetcher returned
+   * this tick (or `null` when the fetcher was short-circuited by a suspension
+   * / rate-limit / upstream error). When the payload carries a playing track
+   * the lane pins `nextDueAt` to the predicted track end + 2s (clamped),
+   * driving the predictive cadence documented in the module header. Passing
+   * `null` (or omitting the argument) keeps the conservative default set in
+   * `planTick`.
    */
-  reconcileAfterFetch(now: number): Promise<void>;
+  reconcileAfterFetch(now: number, payload?: unknown): Promise<void>;
 }
 
 /**
@@ -320,6 +378,33 @@ export function createSpotifyLane(
     if (!record) return false;
     const deadline = Date.parse(record.suspended_until);
     return Number.isFinite(deadline) && deadline > now;
+  }
+
+  /**
+   * Extract playback timing from an opaque now-playing payload. Returns
+   * `"playing"` with the remaining track time (never negative), `"idle"` when
+   * the payload is a valid non-playing shape, or `"unknown"` when the shape
+   * is not recognizable (e.g. the fetcher returned a status payload by
+   * mistake). "unknown" is treated the same as null in the caller - we keep
+   * whatever nextDueAt planTick set.
+   */
+  function extractTrackTiming(
+    payload: unknown
+  ):
+    | { kind: "playing"; remainingMs: number }
+    | { kind: "idle" }
+    | { kind: "unknown" } {
+    if (!payload || typeof payload !== "object") return { kind: "unknown" };
+    const p = payload as Record<string, unknown>;
+    if (p.playing === false) return { kind: "idle" };
+    if (p.playing !== true) return { kind: "unknown" };
+    const track = p.track;
+    if (!track || typeof track !== "object") return { kind: "unknown" };
+    const t = track as Record<string, unknown>;
+    const progress = typeof t.progress_ms === "number" ? t.progress_ms : 0;
+    const duration = typeof t.duration_ms === "number" ? t.duration_ms : 0;
+    const remaining = Math.max(0, duration - progress);
+    return { kind: "playing", remainingMs: remaining };
   }
 
   async function planTick(now: number): Promise<SpotifyLaneDecision> {
@@ -440,32 +525,68 @@ export function createSpotifyLane(
     // reference.
     suspendedSnapshot = undefined;
 
-    // 3) Viewer-aware cadence.
+    // 3) Viewer-aware cadence + predictive polling (task #119).
+    //    The fixed every-tick fast lane is gone: every fetch is scheduled by
+    //    `nextDueAt`, which is either the idle interval floor (no viewers) or
+    //    the predicted track-end + 2s (viewers + playing) or the drift-check
+    //    ceiling (viewers + not playing / unknown). `reconcileAfterFetch`
+    //    tightens nextDueAt post-fetch when it can extract playback timing
+    //    from the payload.
     const active = await checkActive(now);
     const idleToActive = active && !wasActive;
     wasActive = active;
 
-    if (active) {
-      // While active the lane polls every tick at the base cadence — nextDueAt
-      // is only meaningful across idle windows.
+    // Idle to active: force an immediate poll so a fresh viewer never waits
+    // out the previous deadline. Even a still-valid predictive nextDueAt is
+    // dropped here - the viewer's arrival is worth a re-check.
+    if (idleToActive) {
       nextDueAt = 0;
-      return "fetch";
     }
 
-    // Idle path.
-    if (idleToActive) {
-      // Should not happen (active would be true), but keep the invariant.
-      nextDueAt = 0;
-      return "fetch";
+    if (now < nextDueAt) {
+      return "skip-idle";
     }
-    if (now >= nextDueAt) {
-      nextDueAt = now + config.idleIntervalMs;
-      return "fetch";
-    }
-    return "skip-idle";
+
+    // Time to fetch. Set a conservative default so a fetcher that never
+    // triggers a payload-based reconcile (short-circuit skip, upstream
+    // error) still gets a sane pause before the next attempt: the drift-
+    // check ceiling while active, the idle interval while idle.
+    // reconcileAfterFetch may replace this once the payload lands.
+    nextDueAt = now + (active
+      ? Math.min(SPOTIFY_DRIFT_CHECK_MS, config.idleIntervalMs)
+      : config.idleIntervalMs);
+    return "fetch";
   }
 
-  async function reconcileAfterFetch(now: number): Promise<void> {
+  async function reconcileAfterFetch(
+    now: number,
+    payload?: unknown
+  ): Promise<void> {
+    // Task #119 - predictive cadence. When the fetcher returned a payload we
+    // can pin nextDueAt precisely: playing tracks schedule to end + 2s
+    // (clamped), non-playing payloads schedule the next drift check. When
+    // the payload is null / undefined we keep the conservative default that
+    // planTick already set. Applied ONLY while the site is active - idle
+    // uses the base idle-interval cadence regardless of playback state.
+    if (wasActive && payload != null) {
+      const timing = extractTrackTiming(payload);
+      if (timing.kind === "playing") {
+        const clamped = Math.max(
+          SPOTIFY_MIN_PREDICTIVE_INTERVAL_MS,
+          Math.min(
+            config.idleIntervalMs,
+            timing.remainingMs + SPOTIFY_TRACK_END_MARGIN_MS
+          )
+        );
+        nextDueAt = now + Math.min(SPOTIFY_DRIFT_CHECK_MS, clamped);
+      } else if (timing.kind === "idle") {
+        // Active but nothing playing - drift check keeps a fresh track from
+        // waiting longer than a minute to surface.
+        nextDueAt =
+          now + Math.min(SPOTIFY_DRIFT_CHECK_MS, config.idleIntervalMs);
+      }
+    }
+
     // Task #112 — always flush the health mirror after a fetch. Whatever the
     // fetcher observed (success / invalid_grant / rate_limited / other) is
     // now the canonical health for this environment; other instances read

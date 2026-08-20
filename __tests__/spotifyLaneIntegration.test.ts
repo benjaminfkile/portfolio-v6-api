@@ -482,8 +482,14 @@ describe("integration — viewer-aware cadence", () => {
     await handle.runTick();
     expect(spotifyCalls.calls).toBe(2);
 
-    // Continues on fast cadence — every tick calls Spotify.
+    // Task #119 - the every-tick fast lane is gone. The follow-up tick
+    // within the drift-check window skips (no new Spotify call), and the
+    // tick past the 60s drift-check ceiling calls Spotify once more.
     jest.setSystemTime(SPOTIFY_PRESENCE_CACHE_MS + 6_000);
+    await handle.runTick();
+    expect(spotifyCalls.calls).toBe(2);
+
+    jest.setSystemTime(SPOTIFY_PRESENCE_CACHE_MS + 62_000);
     await handle.runTick();
     expect(spotifyCalls.calls).toBe(3);
 
@@ -571,13 +577,20 @@ describe("integration — viewer-aware cadence", () => {
 
     const handle = startPollLoop(redis, lease, fetchers, baseConfig());
 
-    // Every tick polls — presence throw is treated as active.
+    // Task #119 - presence throw counts as active (fail open), so the first
+    // tick fetches. Subsequent ticks respect the drift-check ceiling (60s).
     await handle.runTick();
+    expect(spotifyCalls.calls).toBe(1);
     jest.setSystemTime(5_000);
     await handle.runTick();
+    expect(spotifyCalls.calls).toBe(1);
     jest.setSystemTime(10_000);
     await handle.runTick();
-    expect(spotifyCalls.calls).toBe(3);
+    expect(spotifyCalls.calls).toBe(1);
+    // Past the drift-check window - second fetch.
+    jest.setSystemTime(62_000);
+    await handle.runTick();
+    expect(spotifyCalls.calls).toBe(2);
 
     handle.stop();
   });

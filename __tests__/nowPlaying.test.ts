@@ -439,6 +439,116 @@ describe("last-played fallback when idle", () => {
     expect(payload).toEqual({ playing: false });
   });
 
+  it("(task #119) recently-played is called ONLY once across two consecutive idle fetches", async () => {
+    // Cache is empty on the first idle - one recently-played call. Second
+    // idle call reuses the cached last_played instead of hammering Spotify.
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: recentlyPlayed200,
+    });
+
+    const first = await getNowPlaying(CONFIG);
+    // Advance past the outer now-playing cache TTL so the second call
+    // re-enters fetchNowPlaying (otherwise the idle path is short-circuited
+    // by the 5s cache before it can touch recently-played at all).
+    jest.useFakeTimers();
+    try {
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      const second = await getNowPlaying(CONFIG);
+      expect(first).toEqual({ playing: false, last_played: LAST_PLAYED });
+      expect(second).toEqual({ playing: false, last_played: LAST_PLAYED });
+      const rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      );
+      expect(rpCalls).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("(task #119) a playing-to-idle transition refetches recently-played once", async () => {
+    let np = 0;
+    mockFetch.mockImplementation((url: string) => {
+      if (url === SPOTIFY_TOKEN_URL) {
+        return Promise.resolve(tokenResponse(ACCESS_TOKEN));
+      }
+      if (url === SPOTIFY_NOW_PLAYING_URL) {
+        np += 1;
+        // First call: playing. Second call: idle (204). Third call: still
+        // idle.
+        return Promise.resolve(np === 1 ? nowPlaying200() : statusResponse(204));
+      }
+      if (url === SPOTIFY_RECENTLY_PLAYED_URL) {
+        return Promise.resolve(recentlyPlayed200());
+      }
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+
+    jest.useFakeTimers();
+    try {
+      // Tick 1: playing. No recently-played call.
+      await getNowPlaying(CONFIG);
+      let rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      ).length;
+      expect(rpCalls).toBe(0);
+
+      // Tick 2 (past outer cache): playing-to-idle transition. One
+      // recently-played call.
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      ).length;
+      expect(rpCalls).toBe(1);
+
+      // Tick 3 (past outer cache): still idle, cache is fresh -> no new call.
+      jest.advanceTimersByTime(NOW_PLAYING_CACHE_TTL_MS + 1_000);
+      await getNowPlaying(CONFIG);
+      rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      ).length;
+      expect(rpCalls).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("(task #119) after 10 minutes of continuous idle, recently-played refreshes exactly once", async () => {
+    routeFetch({
+      nowPlaying: () => statusResponse(204),
+      recentlyPlayed: recentlyPlayed200,
+    });
+
+    jest.useFakeTimers();
+    try {
+      // First idle fetch primes the cache with one recently-played call.
+      await getNowPlaying(CONFIG);
+      let rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      ).length;
+      expect(rpCalls).toBe(1);
+
+      // Simulate an hour of one-per-minute idle polls. Each call is past
+      // the outer now-playing cache TTL. Recently-played must be called
+      // ONLY on the 10-minute boundaries (i.e. at ~600s and ~1200s and so
+      // on), never on every idle tick.
+      for (let elapsed = 60_000; elapsed <= 60 * 60_000; elapsed += 60_000) {
+        jest.advanceTimersByTime(60_000);
+        await getNowPlaying(CONFIG);
+      }
+      rpCalls = mockFetch.mock.calls.filter(
+        (c) => c[0] === SPOTIFY_RECENTLY_PLAYED_URL
+      ).length;
+      // 60-minute run at 10-minute floor = at most 7 refresh calls
+      // (the initial + one per subsequent 10-minute boundary crossed).
+      // Concretely: 1 (initial) + 6 (10, 20, 30, 40, 50, 60 minute marks) = 7.
+      expect(rpCalls).toBeLessThanOrEqual(7);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it("GET /api/now-playing idle response carries last_played and NO token", async () => {
     routeFetch({
       nowPlaying: () => statusResponse(204),

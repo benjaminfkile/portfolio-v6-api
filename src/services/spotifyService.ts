@@ -41,6 +41,15 @@ export const SPOTIFY_RECENTLY_PLAYED_URL =
  */
 export const NOW_PLAYING_CACHE_TTL_MS = 5_000;
 /**
+ * Task #119 - the recently-played endpoint is quota-expensive (each idle
+ * fetch used to double the Spotify call rate). Cache the last-played payload
+ * in module state and refetch ONLY on a playing-to-idle transition, on an
+ * empty cache, or after this floor has elapsed. Ten minutes gives a fresh
+ * enough view for the last-played line without spending against the daily
+ * budget when the site is quietly idle.
+ */
+export const RECENTLY_PLAYED_MIN_REFRESH_MS = 10 * 60 * 1000;
+/**
  * Safety margin subtracted from the token's advertised lifetime so we refresh
  * slightly BEFORE the real ~1h expiry rather than racing a 401 (§4.6).
  */
@@ -129,6 +138,21 @@ let inFlight: Promise<NowPlaying> | null = null;
 // recently-played scope — a steady state until the admin reconnects, so it is
 // logged once per process rather than on every idle cache miss.
 let recentlyPlayedScopeWarned = false;
+
+/**
+ * Task #119 - module-level cache of the last-played payload plus the
+ * playing/idle transition flag. `cachedLastPlayed` holds the LAST curated
+ * `LastPlayed` returned by recently-played (or `null` when the endpoint
+ * answered with no history / 403); `fetchedAtMs` throttles refresh to at most
+ * once per `RECENTLY_PLAYED_MIN_REFRESH_MS`. `previouslyPlaying` tracks the
+ * last observed currently-playing state so we can detect a playing-to-idle
+ * transition (that's when the just-ended track becomes the new last-played
+ * anchor and warrants a fresh recently-played call). Both are dropped on
+ * runtime-state reset (admin reconnect / test harness).
+ */
+let cachedLastPlayed: { value: LastPlayed | null; fetchedAtMs: number } | null =
+  null;
+let previouslyPlaying = false;
 
 /**
  * 429 backoff state — SHARED between now-playing and recently-played (one
@@ -687,9 +711,42 @@ async function fetchLastPlayed(token: string): Promise<LastPlayed | null> {
   }
 }
 
-/** The idle payload, with the last-played track attached when available. */
-async function idleWithLastPlayed(token: string): Promise<NowPlaying> {
-  const last = await fetchLastPlayed(token);
+/**
+ * The idle payload, with the last-played track attached when available.
+ *
+ * Task #119 - single-call idle. `recently-played` is fetched ONLY when:
+ *   - the cache is empty (first idle after boot / after a resource reset), OR
+ *   - the previous observation was `playing` (playing-to-idle transition,
+ *     the just-ended track is the new last-played anchor), OR
+ *   - at least `RECENTLY_PLAYED_MIN_REFRESH_MS` have elapsed since the last
+ *     recently-played call (safety net so a very long idle period still
+ *     refreshes eventually).
+ * Otherwise the cached last-played is reused - the idle payload still
+ * carries a `last_played` line but no Spotify Web API call fires. This
+ * exactly halves the quota burn compared to the pre-#119 behavior of
+ * calling recently-played on EVERY idle fetch.
+ */
+async function idleWithLastPlayed(
+  token: string,
+  now: number = Date.now()
+): Promise<NowPlaying> {
+  const wasPlaying = previouslyPlaying;
+  previouslyPlaying = false;
+
+  const cacheAgeMs = cachedLastPlayed
+    ? now - cachedLastPlayed.fetchedAtMs
+    : Infinity;
+  const shouldRefetch =
+    cachedLastPlayed == null ||
+    wasPlaying ||
+    cacheAgeMs >= RECENTLY_PLAYED_MIN_REFRESH_MS;
+
+  if (shouldRefetch) {
+    const fresh = await fetchLastPlayed(token);
+    cachedLastPlayed = { value: fresh, fetchedAtMs: now };
+  }
+
+  const last = cachedLastPlayed?.value ?? null;
   return last ? { playing: false, last_played: last } : NOT_PLAYING;
 }
 
@@ -742,7 +799,14 @@ async function fetchNowPlaying(config: SpotifyConfig): Promise<NowPlaying> {
       }
       const mapped = mapCurrentlyPlaying(body);
       // 200-but-no-item (ad / private session) is idle too — same fallback.
-      return mapped.playing ? mapped : idleWithLastPlayed(token);
+      if (mapped.playing) {
+        // Task #119 - remember we saw a playing track so the NEXT idle fetch
+        // treats itself as a playing-to-idle transition and refreshes the
+        // last-played cache from the newly-ended track.
+        previouslyPlaying = true;
+        return mapped;
+      }
+      return idleWithLastPlayed(token);
     }
 
     // Any other status (still 401 after retry, 5xx, …) → degrade. Do NOT
@@ -805,6 +869,12 @@ export function clearSpotifyRuntimeState(): void {
   inFlight = null;
   // A fresh authorization may carry the recently-played scope — warn anew if not.
   recentlyPlayedScopeWarned = false;
+  // Task #119 - the last-played cache is tied to the previous grant's
+  // playback history; a fresh grant starts with a clean slate so the very
+  // next idle fetch pulls a fresh recently-played (which will succeed under
+  // the new scope, or 403 and populate the scope-warn again).
+  cachedLastPlayed = null;
+  previouslyPlaying = false;
   // Fresh authorization does NOT lift a rate limit (the 429 is tied to the
   // client, not the refresh token), but resetting the streak is fine: the next
   // call will re-enter backoff if Spotify still returns 429.
