@@ -445,6 +445,85 @@ describe("startPollLoop — in-process snapshot cache", () => {
   });
 });
 
+describe("startPollLoop — skip-listener-active (task #118)", () => {
+  it("does NOT fetch and does NOT write a degraded snapshot when the lane returns skip-listener-active", async () => {
+    const redis = createFakeRedis();
+    const lease = await acquireLease(redis);
+    const fetchers = buildFetchers();
+
+    // Seed the shared snapshot with the "listener wrote this a moment ago"
+    // payload; if the poll loop mistakenly wrote a degraded snapshot on the
+    // skip tick it would clobber this.
+    const priorPayload = {
+      playing: true,
+      track: {
+        title: "Listener Track",
+        artists: ["Artist"],
+        album: "Album",
+        art_url: null,
+        url: null,
+        progress_ms: 12_345,
+        duration_ms: 200_000,
+      },
+    };
+    redis.seed(
+      `portfolio-v6-api:${ENV}:snapshot:now-playing`,
+      JSON.stringify({ payload: priorPayload, fetched_at: "2026-01-01T00:00:00.000Z" }),
+      600_000
+    );
+
+    // Fake spotify lane that just reports skip-listener-active.
+    const laneDecision = jest.fn().mockResolvedValue("skip-listener-active");
+    const reconcile = jest.fn().mockResolvedValue(undefined);
+    const laneFetchers = {
+      ...fetchers,
+      spotifyLane: {
+        planTick: laneDecision,
+        isActive: async () => false,
+        reconcileAfterFetch: reconcile,
+      },
+    };
+
+    const handle = startPollLoop(redis, lease, laneFetchers, buildConfig());
+    await handle.runTick();
+
+    expect(fetchers.nowPlaying).not.toHaveBeenCalled();
+    // The listener's snapshot is untouched.
+    const snap = await readSnapshot(redis, ENV, "now-playing");
+    expect(snap?.payload).toEqual(priorPayload);
+    // Reconcile only fires on `fetch` decisions.
+    expect(reconcile).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("resumes polling when the listener drops out of connected", async () => {
+    const redis = createFakeRedis();
+    const lease = await acquireLease(redis);
+    const fetchers = buildFetchers();
+    fetchers.nowPlaying.mockResolvedValue({ playing: false });
+
+    // Lane returns skip-listener-active first, then flips to fetch.
+    const planTick = jest
+      .fn()
+      .mockResolvedValueOnce("skip-listener-active")
+      .mockResolvedValueOnce("fetch");
+    const laneFetchers = {
+      ...fetchers,
+      spotifyLane: {
+        planTick,
+        isActive: async () => true,
+        reconcileAfterFetch: jest.fn().mockResolvedValue(undefined),
+      },
+    };
+    const handle = startPollLoop(redis, lease, laneFetchers, buildConfig());
+    await handle.runTick();
+    await handle.runTick();
+    // Fetcher fired exactly once - on the second tick.
+    expect(fetchers.nowPlaying).toHaveBeenCalledTimes(1);
+    handle.stop();
+  });
+});
+
 describe("stableStringify", () => {
   it("sorts keys for change-detection", () => {
     expect(stableStringify({ a: 1, b: 2 })).toBe(

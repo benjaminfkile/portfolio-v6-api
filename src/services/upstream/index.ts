@@ -56,6 +56,22 @@ import {
   deleteSpotifySuspension,
   type SpotifyHealthRecord,
 } from "./snapshotStore";
+import {
+  createListenerSupervisor,
+  type ListenerSupervisor,
+} from "./listenerSupervisor";
+import {
+  createDealerListener,
+  DEFAULT_CONNECT_STATE_URL,
+  type DealerListener,
+  type DealerSocket,
+  type PutConnectStateArgs,
+} from "../listener/dealerClient";
+import { mintWebToken } from "../listener/webTokenMinter";
+import {
+  getListenerCredential,
+  getListenerCredentialUpdatedAt,
+} from "../listenerCredentialStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
@@ -105,6 +121,12 @@ export interface UpstreamHandle {
   loop: PollLoopHandle;
   /** The Redis client, exposed so routers can read snapshots. */
   redis: RedisClient | null;
+  /**
+   * The connect-listener supervisor (task #118). Null when Redis is unset
+   * (the listener path needs the shared snapshot store to be useful).
+   * Exposed so the admin status endpoint / tests can inspect state.
+   */
+  listenerSupervisor: ListenerSupervisor | null;
   /** Release the lease + stop timers + close the Redis connection. */
   stop(): Promise<void>;
 }
@@ -266,6 +288,7 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       lease: null,
       loop: { stop: () => undefined, runTick: async () => undefined },
       redis: null,
+      listenerSupervisor: null,
       stop: async () => undefined,
     };
   }
@@ -297,6 +320,58 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
   const spotifyIdleIntervalMs =
     secrets.spotify_idle_interval_ms ?? DEFAULT_SPOTIFY_IDLE_INTERVAL_MS;
 
+  // Connect-listener supervisor (task #118). Owns the dealer websocket
+  // lifecycle for this process; leader-gated exactly like polling. Wired
+  // BEFORE the Spotify lane so we can pass `isListenerConnected` into the
+  // lane and it can suppress the polling fetch while the listener is
+  // holding the primary source.
+  const listenerSupervisor = createListenerSupervisor({
+    env,
+    redis: client,
+    publisher: {
+      gatewayInternalUrl:
+        secrets.gateway_internal_url ??
+        process.env.GATEWAY_INTERNAL_URL ??
+        "http://gateway:8080",
+      realtimeToken:
+        secrets.gateway_realtime_token ??
+        process.env.GATEWAY_REALTIME_TOKEN ??
+        "",
+      serviceName:
+        secrets.realtime_service_name ??
+        process.env.REALTIME_SERVICE_NAME ??
+        DEFAULT_REALTIME_SERVICE_NAME,
+    },
+    async loadCredential() {
+      const s = app.get("secrets") as IAppSecrets | undefined;
+      const stored = await getListenerCredential(resolveEncryptionKey(s));
+      return stored?.spDc ?? null;
+    },
+    async getCredentialUpdatedAt() {
+      return getListenerCredentialUpdatedAt();
+    },
+    createListener(spDc: string): DealerListener {
+      return createDealerListener({
+        mintToken: async () => {
+          const minted = await mintWebToken(spDc);
+          return { token: minted.token, expiresAtMs: minted.expiresAtMs };
+        },
+        createSocket: buildDealerSocket,
+        putConnectState: buildPutConnectState(),
+        logger: (level, message) => {
+          if (level === "error") console.error(`[listener] ${message}`);
+          else if (level === "warn") console.warn(`[listener] ${message}`);
+          else console.log(`[listener] ${message}`);
+        },
+      });
+    },
+    logger: (level, message) => {
+      if (level === "error") console.error(`[listenerSupervisor] ${message}`);
+      else if (level === "warn") console.warn(`[listenerSupervisor] ${message}`);
+      else console.log(`[listenerSupervisor] ${message}`);
+    },
+  });
+
   // Viewer-aware + auth-aware Spotify lane (task #95 + shared-suspension #96).
   // Everything the lane needs from the outside world is injected here so the
   // lane module has no dependency on Express / Redis / DB — the tests can
@@ -307,6 +382,9 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
         return isSpotifyDisabled();
       },
       isAuthSuspended: () => isSpotifyAuthSuspended(),
+      // Task #118 — while the listener is `connected` the Spotify polling
+      // lane must not fetch: the connect-listener is the primary source.
+      isListenerConnected: () => listenerSupervisor.isListenerConnected(),
       getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
       applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
       applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
@@ -388,10 +466,41 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
     }
   );
 
+  // Track our own view of leadership so we can drive listener-supervisor
+  // lifecycle on transitions. The lease itself does not fire an
+  // `onLeadershipGain` callback (task #84 predates the listener); we detect
+  // transitions in-band from `isLeader()` observations.
+  let observedLeader = false;
+  async function reconcileLeadership(): Promise<void> {
+    const nowLeader = lease.isLeader();
+    if (nowLeader && !observedLeader) {
+      observedLeader = true;
+      await listenerSupervisor
+        .onLeadershipGain()
+        .catch((err) =>
+          console.error(
+            "[upstream/bootstrap] listener onLeadershipGain failed:",
+            err instanceof Error ? err.message : err
+          )
+        );
+    } else if (!nowLeader && observedLeader) {
+      observedLeader = false;
+      await listenerSupervisor
+        .onLeadershipLoss()
+        .catch((err) =>
+          console.error(
+            "[upstream/bootstrap] listener onLeadershipLoss failed:",
+            err instanceof Error ? err.message : err
+          )
+        );
+    }
+  }
+
   // First-boot acquisition attempt, then the renewal loop takes over. We DO NOT
   // await this — the poll loop is inert until the lease flips leader anyway.
   lease
     .tryAcquire()
+    .then(() => reconcileLeadership())
     .catch((err) =>
       console.error(
         "[upstream/bootstrap] initial acquire failed:",
@@ -405,20 +514,130 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       // instance can resume when Redis recovers. `runTick` self-guards on
       // `isLeader()` so the timer firing while we've lost the lease is a no-op.
       console.warn("[upstream/bootstrap] lost lease; polling suspended");
+      // Task #118 — mirror the leadership loss into the listener supervisor
+      // so the dealer socket is torn down and any other instance can take
+      // over ownership of the single dealer connection per environment.
+      void reconcileLeadership();
     },
   });
+
+  // Piggyback on the lease renewal interval to reconcile the listener on
+  // acquisition too - the lease's built-in acquisition attempts inside the
+  // renewal loop do not surface a gain callback, so poll `isLeader()`
+  // cheaply on the same cadence. The reconciler is idempotent.
+  const leadershipWatch = setInterval(() => {
+    void reconcileLeadership();
+  }, DEFAULT_RENEW_INTERVAL_MS);
+  if (typeof (leadershipWatch as unknown as { unref?: () => void }).unref === "function") {
+    (leadershipWatch as unknown as { unref: () => void }).unref();
+  }
 
   return {
     enabled: true,
     lease,
     loop,
     redis: client,
+    listenerSupervisor,
     async stop() {
+      clearInterval(leadershipWatch);
       loop.stop();
       lease.stop();
+      await listenerSupervisor.stop().catch(() => undefined);
       await lease.release().catch(() => undefined);
       await client.quit().catch(() => undefined);
     },
+  };
+}
+
+/**
+ * Build a production dealer websocket. Uses the runtime's global
+ * `WebSocket` (Node 22+ has it, and Node 20 exposes it under
+ * `--experimental-websocket`) - the listener path is opt-in per environment
+ * (needs a stored `spotify_listener` credential) so a runtime that lacks
+ * `WebSocket` simply keeps the polling lane in charge until the runtime is
+ * upgraded. Tests inject a fake, so this default is never exercised there.
+ */
+function buildDealerSocket(url: string): DealerSocket {
+  const WS = (globalThis as { WebSocket?: new (u: string) => unknown })
+    .WebSocket;
+  if (!WS) {
+    throw new Error(
+      "listener: no global WebSocket available; upgrade Node or install a WebSocket polyfill"
+    );
+  }
+  const raw = new WS(url) as unknown as {
+    send(data: string): void;
+    close(code?: number, reason?: string): void;
+    addEventListener(name: string, cb: (evt: unknown) => void): void;
+  };
+  const adapter: DealerSocket = {
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+    send(data) {
+      raw.send(data);
+    },
+    close(code, reason) {
+      raw.close(code, reason);
+    },
+  };
+  raw.addEventListener("open", () => adapter.onopen?.());
+  raw.addEventListener("message", (evt) => {
+    const data = (evt as { data: string | Buffer | ArrayBuffer }).data;
+    adapter.onmessage?.(data);
+  });
+  raw.addEventListener("close", (evt) => {
+    const e = evt as { code?: number; reason?: string };
+    adapter.onclose?.(e.code ?? 1006, e.reason ?? "");
+  });
+  raw.addEventListener("error", (evt) => {
+    adapter.onerror?.(evt);
+  });
+  return adapter;
+}
+
+/**
+ * Build the production `putConnectState` implementation - a POST to
+ * Spotify's connect-state edge with the minimal observer device descriptor.
+ * The response body carries the current cluster; the dealer client emits it
+ * as the initial `NowPlaying` state.
+ */
+function buildPutConnectState(): (
+  args: PutConnectStateArgs
+) => Promise<unknown> {
+  return async (args) => {
+    const url = DEFAULT_CONNECT_STATE_URL(args.device.device_id);
+    const body = JSON.stringify({
+      member_type: args.memberType,
+      device: {
+        device_info: args.device,
+      },
+    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${args.token}`,
+          "X-Spotify-Connection-Id": args.connectionId,
+        },
+        body,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`connect-state PUT returned status ${res.status}`);
+      }
+      try {
+        return await res.json();
+      } catch {
+        return null;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   };
 }
 
@@ -434,9 +653,23 @@ export {
   readSpotifyHealth,
   writeSpotifyHealth,
   spotifyHealthKey,
+  readListenerHealth,
+  writeListenerHealth,
+  spotifyListenerHealthKey,
   type SpotifySuspensionRecord,
   type SpotifyHealthRecord,
   type SpotifyHealthLastError,
   type SpotifyHealthErrorKind,
+  type ListenerHealthRecord,
+  type ListenerHealthState,
+  type ListenerHealthErrorKind,
+  type ListenerHealthLastError,
 } from "./snapshotStore";
 export { readLocalSnapshot } from "./pollLoop";
+export {
+  createListenerSupervisor,
+  LISTENER_CREDENTIAL_CHECK_INTERVAL_MS,
+  LISTENER_PROGRESS_TICK_MS,
+  type ListenerSupervisor,
+  type ListenerSupervisorDeps,
+} from "./listenerSupervisor";
