@@ -713,10 +713,16 @@ function buildPutConnectState(): (
 ) => Promise<unknown> {
   return async (args) => {
     const url = DEFAULT_CONNECT_STATE_URL(args.device.device_id);
+    // Spotify's connect-state edge rejects any descriptive device fields
+    // (device_id/name/brand/...) inside device_info as INVALID_ENTITY; it
+    // accepts only the capabilities object. The device_id lives in the URL
+    // above, never in the body.
     const body = JSON.stringify({
       member_type: args.memberType,
       device: {
-        device_info: args.device,
+        device_info: {
+          capabilities: args.device.capabilities,
+        },
       },
     });
     const controller = new AbortController();

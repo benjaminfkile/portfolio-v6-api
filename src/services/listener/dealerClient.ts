@@ -166,30 +166,29 @@ export interface DealerListener {
 const NOT_PLAYING: NowPlaying = { playing: false };
 
 /**
- * Build the minimal observer-only device descriptor sent in the connect-state
- * PUT. Overridable via `deps.device`.
+ * Build the minimal observer-only device descriptor for the connect-state PUT.
+ * Overridable via `deps.device`.
+ *
+ * Spotify's connect-state edge validates `device_info` strictly: any of the
+ * librespot-style descriptive fields (device_type, name, brand, model, ...)
+ * makes it reject the whole PUT as INVALID_ENTITY. It accepts only a
+ * `capabilities` object, and only these three flags register a pure observer
+ * that receives full cluster pushes without appearing as a playable device:
+ *   - can_be_player: false        -> never a playback target
+ *   - hidden: true                -> invisible on the account's device list
+ *   - needs_full_player_state: true -> Spotify returns the current cluster
+ * `device_id` is carried here only because it forms the PUT URL; it is NOT
+ * sent inside `device_info` (see buildPutConnectState). Adding any other
+ * capability (e.g. disable_connect) also trips INVALID_ENTITY.
  */
 function makeDefaultDevice(): DeviceDescriptor {
   return {
     device_id: randomUUID().replace(/-/g, ""),
-    device_type: "computer",
-    name: "portfolio-listener",
-    brand: "spotify",
-    model: "web_player",
-    platform_identifier: "web_player linux; portfolio-v6-api;",
     capabilities: {
-      change_volume: false,
-      enable_play_token: false,
-      supports_file_media_type: false,
-      // Marks this "device" as invisible on the account's device list; we
-      // register only to receive cluster pushes, not to be a playable target.
-      disable_connect: true,
-      audio_podcasts: false,
-      video_playback: false,
-      manifest_formats: [],
-      play_token_lost_behavior: "pause",
+      can_be_player: false,
+      hidden: true,
+      needs_full_player_state: true,
     },
-    metadata_map: {},
   };
 }
 
