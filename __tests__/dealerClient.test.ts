@@ -202,7 +202,10 @@ describe("mapClusterToNowPlaying (unit)", () => {
     expect(mapped.track.duration_ms).toBe(213456);
   });
 
-  it("reports { playing: false } when paused", () => {
+  it("reports { playing: false } with last_played (track + art) when paused", () => {
+    // Spotify reports is_playing:true, is_paused:true for a paused track; the
+    // loaded track must still surface as last_played so the widget keeps
+    // showing it (with album art) rather than blanking.
     const cluster = makeCluster();
     (cluster.player_state as {
       is_playing: boolean;
@@ -210,12 +213,21 @@ describe("mapClusterToNowPlaying (unit)", () => {
     }).is_paused = true;
     const mapped = mapClusterToNowPlaying(cluster, NOW);
     expect(mapped.playing).toBe(false);
+    if (mapped.playing) return;
+    expect(mapped.last_played).toBeDefined();
+    expect(mapped.last_played!.track.title).toBe("Never Gonna Give You Up");
+    expect(mapped.last_played!.track.art_url).toBe(
+      "https://i.scdn.co/image/largehash"
+    );
+    expect(mapped.last_played!.played_at).toBe(new Date(NOW).toISOString());
   });
 
-  it("returns { playing: false } for an empty / trackless cluster", () => {
-    expect(mapClusterToNowPlaying(null).playing).toBe(false);
-    expect(mapClusterToNowPlaying({}).playing).toBe(false);
-    expect(mapClusterToNowPlaying({ player_state: {} }).playing).toBe(false);
+  it("returns bare { playing: false } (no last_played) for an empty / trackless cluster", () => {
+    expect(mapClusterToNowPlaying(null)).toEqual({ playing: false });
+    expect(mapClusterToNowPlaying({})).toEqual({ playing: false });
+    expect(mapClusterToNowPlaying({ player_state: {} })).toEqual({
+      playing: false,
+    });
   });
 
   it("degrades unknown metadata to nulls, never throws", () => {

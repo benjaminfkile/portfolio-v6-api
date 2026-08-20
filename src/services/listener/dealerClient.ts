@@ -362,9 +362,15 @@ export function mapClusterToNowPlaying(
   };
 
   if (!isPlaying) {
-    // Paused or explicitly stopped: no `last_played` (that's the polling
-    // fallback's job); just report idle.
-    return NOT_PLAYING;
+    // A track is loaded but not actively playing (paused, or the session is
+    // idle on this device). Surface it as the last-played track — with its
+    // album art — so the widget keeps showing what was on rather than blanking.
+    // Spotify reports `is_playing: true, is_paused: true` for a paused track,
+    // so this is the common case, not an edge case.
+    return {
+      playing: false,
+      last_played: { track: curated, played_at: new Date(now).toISOString() },
+    };
   }
   return { playing: true, track: curated };
 }
