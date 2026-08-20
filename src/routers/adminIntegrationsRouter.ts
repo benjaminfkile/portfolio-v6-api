@@ -27,7 +27,7 @@ import {
 import type { UpstreamHandle } from "../services/upstream";
 
 /**
- * Admin integrations router (§4.7) — the generalized replacement for the §4.6
+ * Admin integrations router (§4.7) - the generalized replacement for the §4.6
  * Spotify-only reconnect router, driving every integration from its descriptor.
  *
  * New surface (all under /api/admin):
@@ -41,12 +41,77 @@ import type { UpstreamHandle } from "../services/upstream";
  * until its own task lands): /api/admin/spotify/status|connect|callback and
  * DELETE /api/admin/spotify all forward to the same handlers with key=spotify.
  *
- * As in §4.6, the oauth callback CANNOT sit behind requireAdmin — it is a browser
+ * As in §4.6, the oauth callback CANNOT sit behind requireAdmin - it is a browser
  * redirect from the provider carrying no bearer token. It is guarded instead by
  * the single-use, 10-minute `state` minted at /connect (only a verified admin can
  * obtain one), so an anonymous hit can never cause a credential to be stored. No
  * token, code, secret, or stored value ever appears in a response, a redirect
  * URL, or a log line.
+ *
+ * ---------------------------------------------------------------------------
+ * GET /api/admin/integrations - response shape (as of task #122)
+ * ---------------------------------------------------------------------------
+ *
+ * Envelope: { data: { integrations: IntegrationEntry[] } } via `success(...)`.
+ * The array carries one entry per descriptor (`spotify`, `github`, `duolingo`).
+ *
+ * Spotify entry (the "whole machine" - drives the admin Integrations card):
+ *   {
+ *     key:              "spotify",
+ *     name:             "Spotify",
+ *     auth_kind:        "oauth",
+ *
+ *     // Task #113 - the truthful 5-state POLLING lane contract.
+ *     state:            "connected" | "auth_broken" | "rate_limited"
+ *                      | "disconnected" | "disabled",
+ *
+ *     // Task #122 - which lane is actually serving now-playing right now.
+ *     //   "listener" iff the shared listener health record is `connected`.
+ *     //   "polling"  iff `state === "connected"` (grant stored, not
+ *     //              disabled/rate-limited/auth-broken) AND the listener is
+ *     //              NOT connected.
+ *     //   "none"     otherwise.
+ *     source:           "listener" | "polling" | "none",
+ *
+ *     // Task #122 - curated connect-listener snapshot read from the shared
+ *     // Redis health record written by the leader (task series 4/9). Redis
+ *     // outage degrades `state` to "unknown" - never a 5xx.
+ *     listener: {
+ *       state:              "idle" | "connecting" | "connected" | "backoff"
+ *                          | "credential_dead" | "no_credential" | "unknown",
+ *       last_event_at:      string (ISO 8601) | null,
+ *       error_kind:         string | null,     // e.g. "invalid_cookie",
+ *                                              //      "transient"
+ *       credential_present: boolean,           // true iff sp_dc row exists
+ *     },
+ *
+ *     // Task #113 - polling-lane observations (shared health mirror).
+ *     last_success_at:  string (ISO 8601) | null,
+ *     last_error:       { kind: "invalid_grant" | "rate_limited" | "other",
+ *                         at:   string (ISO 8601) }
+ *                       | null,
+ *     rate_limited_until: string (ISO 8601) | null,
+ *     authorized_at:      string (ISO 8601) | null,
+ *     expires_at:         string (ISO 8601) | null,  // authorized_at + 180d
+ *
+ *     // Task #120 - daily Web API call budget (task 6/9). Always present.
+ *     //   { used, cap, resets_at }  when either Redis or the in-process
+ *     //                             fallback has data,
+ *     //   null                      otherwise.
+ *     budget: { used: number, cap: number, resets_at: string (ISO 8601) }
+ *           | null,
+ *   }
+ *
+ * GitHub / Duolingo entries (api_key / value kinds, unchanged):
+ *   { key, name, auth_kind, connected: boolean, source: "admin"|"secrets"|null,
+ *     authorized_at: string|null, expires_at: string|null }
+ *
+ * Never-5xx contract: every read (Postgres, Redis, in-process mirror) is
+ * caught and degraded to the safe answer under a fixed precedence, so the
+ * endpoint is safe to poll from the admin UI even during a Redis outage.
+ * The legacy /api/admin/spotify/status endpoint returns the same Spotify
+ * entry shape (minus the outer `integrations` wrapper), so admin code can
+ * migrate at leisure.
  */
 const adminIntegrationsRouter = express.Router();
 
