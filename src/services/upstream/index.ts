@@ -79,16 +79,28 @@ import {
   getNowPlaying,
   isSpotifyRateLimited,
   isSpotifyAuthSuspended,
+  isSpotifyBudgetExhausted,
   resumeSpotifyAuth,
   suspendSpotifyAuth,
   getSpotifyBackoffUntilMs,
   applySpotifyBackoffUntil,
   clearSpotifyBackoff,
+  getSpotifyBudgetExhaustedUntilMs,
+  applySpotifyBudgetExhaustion,
+  clearSpotifyBudgetExhaustion,
+  setSpotifyBudgetHook,
   getSpotifyLastSuccessAtMs,
   getSpotifyLastError,
   applySpotifyHealthMirror,
   type SpotifyConfig,
 } from "../spotifyService";
+import {
+  createApiBudget,
+  DEFAULT_SPOTIFY_BUDGET_RESET_UTC,
+  DEFAULT_SPOTIFY_DAILY_CALL_BUDGET,
+  parseResetTime,
+  type ApiBudget,
+} from "../listener/apiBudget";
 import { getStatus } from "../statusService";
 import {
   getDuolingo,
@@ -127,6 +139,12 @@ export interface UpstreamHandle {
    * Exposed so the admin status endpoint / tests can inspect state.
    */
   listenerSupervisor: ListenerSupervisor | null;
+  /**
+   * Task #120 - the daily Spotify Web API call budget guard. Always present
+   * (with or without Redis - counting degrades to in-process on Redis
+   * outage). Routers use it to expose the budget in the status contract.
+   */
+  apiBudget: ApiBudget;
   /** Release the lease + stop timers + close the Redis connection. */
   stop(): Promise<void>;
 }
@@ -218,6 +236,10 @@ export function buildFetchers(
       // fetcher (tests, non-lane paths) also short-circuits without touching
       // Spotify.
       if (isSpotifyAuthSuspended()) return null;
+      // Task #120 - budget exhaustion is another skip-tick gate; same
+      // defense-in-depth as above so a direct caller never leaks a call
+      // once the cap has been reached this window.
+      if (isSpotifyBudgetExhausted()) return null;
       try {
         return await getNowPlaying(await spotifyConfig());
       } catch (err) {
@@ -283,13 +305,46 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 
   const client = resolveRedisClient(url);
   if (!secrets || !client) {
+    // Task #120 - even on the Redis-unset path we install an in-process
+    // budget so the status endpoint / any future direct caller sees a
+    // real accessor rather than an undefined field. Cap + reset stay at
+    // the compiled-in defaults; the poller is inert in this mode anyway.
+    const fallbackReset =
+      parseResetTime(secrets?.spotify_budget_reset_utc) ??
+      parseResetTime(DEFAULT_SPOTIFY_BUDGET_RESET_UTC)!;
+    const fallbackBudget = createApiBudget({
+      redis: null,
+      env: secrets?.node_env ?? "development",
+      cap:
+        secrets?.spotify_daily_call_budget ??
+        DEFAULT_SPOTIFY_DAILY_CALL_BUDGET,
+      resetHour: fallbackReset.hour,
+      resetMinute: fallbackReset.minute,
+    });
+    // Wire even the fallback into spotifyService so any direct fetcher
+    // caller still gets counted (e.g. tests, local dev without Redis).
+    setSpotifyBudgetHook({
+      noteCall: async (now?: number) => {
+        const w = await fallbackBudget.noteCall(now);
+        const state = await fallbackBudget.getState(now);
+        return {
+          capReached: w.capReached,
+          nextResetAtMs: Date.parse(state.resets_at),
+        };
+      },
+    });
     return {
       enabled: false,
       lease: null,
       loop: { stop: () => undefined, runTick: async () => undefined },
       redis: null,
       listenerSupervisor: null,
-      stop: async () => undefined,
+      apiBudget: fallbackBudget,
+      stop: async () => {
+        // Detach the hook so a subsequent bootstrap (tests) starts clean
+        // and no stale hook holds a reference to this fallback's state.
+        setSpotifyBudgetHook(null);
+      },
     };
   }
 
@@ -319,6 +374,46 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
     secrets.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
   const spotifyIdleIntervalMs =
     secrets.spotify_idle_interval_ms ?? DEFAULT_SPOTIFY_IDLE_INTERVAL_MS;
+
+  // Task #120 - daily Spotify Web API call budget guard, Redis-backed with
+  // an in-process fallback on Redis error. Wired into spotifyService as a
+  // hook so every outbound call to accounts.spotify.com / api.spotify.com
+  // is counted BEFORE the fetch fires. The listener's dealer traffic does
+  // NOT go through this hook (dealer + connect-state edges are not Web
+  // API), so listener events are correctly excluded from the count.
+  const budgetReset =
+    parseResetTime(secrets.spotify_budget_reset_utc) ??
+    parseResetTime(DEFAULT_SPOTIFY_BUDGET_RESET_UTC)!;
+  const budgetCap =
+    secrets.spotify_daily_call_budget ?? DEFAULT_SPOTIFY_DAILY_CALL_BUDGET;
+  const apiBudget = createApiBudget({
+    redis: client,
+    env,
+    cap: budgetCap,
+    resetHour: budgetReset.hour,
+    resetMinute: budgetReset.minute,
+    onCapReached: (nextResetAtMs) => {
+      // Stamp the process-local mirror so the fetcher gate short-circuits
+      // for the rest of the window. The lane's reconcileAfterFetch is what
+      // persists the shared "budget" suspension record so any other
+      // instance / a fresh leader picks up the state.
+      applySpotifyBudgetExhaustion(nextResetAtMs);
+      console.warn(
+        `[apiBudget] Spotify daily call budget of ${budgetCap} reached; ` +
+          `suspending polling until ${new Date(nextResetAtMs).toISOString()}`
+      );
+    },
+  });
+  setSpotifyBudgetHook({
+    noteCall: async (now?: number) => {
+      const w = await apiBudget.noteCall(now);
+      const state = await apiBudget.getState(now);
+      return {
+        capReached: w.capReached,
+        nextResetAtMs: Date.parse(state.resets_at),
+      };
+    },
+  });
 
   // Connect-listener supervisor (task #118). Owns the dealer websocket
   // lifecycle for this process; leader-gated exactly like polling. Wired
@@ -389,6 +484,11 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
       applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
       clearBackoff: () => clearSpotifyBackoff(),
+      // Task #120 - budget getters/setters mirror the 429 backoff trio.
+      getBudgetExhaustedUntilMs: () => getSpotifyBudgetExhaustedUntilMs(),
+      applyBudgetExhaustion: (untilMs) =>
+        applySpotifyBudgetExhaustion(untilMs),
+      clearBudgetExhaustion: () => clearSpotifyBudgetExhaustion(),
       resumeAuth: () => resumeSpotifyAuth(),
       async getStoredTokenUpdatedAt() {
         return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);
@@ -538,6 +638,7 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
     loop,
     redis: client,
     listenerSupervisor,
+    apiBudget,
     async stop() {
       clearInterval(leadershipWatch);
       loop.stop();
@@ -545,6 +646,9 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       await listenerSupervisor.stop().catch(() => undefined);
       await lease.release().catch(() => undefined);
       await client.quit().catch(() => undefined);
+      // Detach the budget hook so a subsequent bootstrap (tests) starts
+      // clean and no stale hook holds a reference to this handle's Redis.
+      setSpotifyBudgetHook(null);
     },
   };
 }

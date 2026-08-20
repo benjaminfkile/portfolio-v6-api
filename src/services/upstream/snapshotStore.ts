@@ -227,16 +227,17 @@ export function spotifySuspensionKey(env: string): string {
  * A persisted Spotify suspension. `suspended_until` is the wall-clock (ISO
  * 8601) that Spotify traffic can resume; every entry carries this deadline so
  * recovery is automatic even when nobody deletes the key. `reason` is a short
- * machine-friendly tag (`"auth"` for invalid_grant / missing credentials,
- * `"429"` for rate-limit backoff); `detail` is a human-readable elaboration
- * kept for logs and admin dashboards. `captured_token_updated_at` snapshots
+ * machine-friendly tag - `"auth"` for invalid_grant / missing credentials,
+ * `"429"` for rate-limit backoff, `"budget"` for the task #120 daily-call
+ * budget cap - and `detail` is a human-readable elaboration kept for logs and
+ * admin dashboards. `captured_token_updated_at` snapshots
  * `service_tokens.updated_at` at the moment the auth suspension was recorded,
  * so any leader (including a fresh one that never observed the trip) can
  * detect an admin reconnect by comparing its DB read against that value.
  */
 export interface SpotifySuspensionRecord {
   suspended_until: string;
-  reason: "auth" | "429";
+  reason: "auth" | "429" | "budget";
   detail?: string;
   captured_token_updated_at?: string | null;
 }
@@ -305,7 +306,9 @@ export async function readSpotifySuspension(
       parsed &&
       typeof parsed === "object" &&
       typeof parsed.suspended_until === "string" &&
-      (parsed.reason === "auth" || parsed.reason === "429")
+      (parsed.reason === "auth" ||
+        parsed.reason === "429" ||
+        parsed.reason === "budget")
     ) {
       return parsed;
     }

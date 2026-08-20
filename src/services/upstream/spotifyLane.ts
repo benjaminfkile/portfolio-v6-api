@@ -182,6 +182,25 @@ export interface SpotifyLaneDeps {
    */
   clearBackoff(): void;
   /**
+   * Task #120 - the wall-clock the local budget-exhaustion mirror clears at,
+   * or 0 if not exhausted. (spotifyService.getSpotifyBudgetExhaustedUntilMs)
+   * Optional so lane callers pre-#120 (tests, non-lane paths) don't need to
+   * plumb it - falsy value is treated as "no budget signal".
+   */
+  getBudgetExhaustedUntilMs?: () => number;
+  /**
+   * Mirror an inherited budget exhaustion into the process (idempotent,
+   * monotonic). Called on a fresh leader that observes a "budget" record in
+   * the shared store. (spotifyService.applySpotifyBudgetExhaustion)
+   */
+  applyBudgetExhaustion?: (untilMs: number) => void;
+  /**
+   * Clear the in-process budget-exhaustion mirror (task #97 pattern - shared
+   * record is authoritative, so when the key is absent local state clears
+   * too). (spotifyService.clearSpotifyBudgetExhaustion)
+   */
+  clearBudgetExhaustion?: () => void;
+  /**
    * Cheap DB read for the current `service_tokens.updated_at` value for
    * spotify. Called at most once per `SPOTIFY_AUTH_RESUME_CHECK_MS`; return
    * `null` on absence or error (treated as "no change").
@@ -462,6 +481,14 @@ export function createSpotifyLane(
           deps.applyBackoffUntil(untilMs);
         }
       }
+      // Task #120 - mirror the budget exhaustion into the local flag so the
+      // fetcher wrapper short-circuits at the same gate, exactly like 429.
+      if (shared.reason === "budget" && deps.applyBudgetExhaustion) {
+        const untilMs = Date.parse(shared.suspended_until);
+        if (Number.isFinite(untilMs)) {
+          deps.applyBudgetExhaustion(untilMs);
+        }
+      }
 
       // Auth suspensions get the resume-check treatment — the admin's
       // reconnect is what shortens the window. `captured_token_updated_at`
@@ -503,7 +530,7 @@ export function createSpotifyLane(
         return "fetch";
       }
 
-      // Non-auth (429 backoff): just wait for the deadline to elapse.
+      // Non-auth (429 backoff / budget): just wait for the deadline to elapse.
       return "skip-suspended";
     }
 
@@ -520,6 +547,18 @@ export function createSpotifyLane(
     }
     if (deps.getBackoffUntilMs() > 0) {
       deps.clearBackoff();
+    }
+    // Task #120 - the local budget mirror follows the same rule: shared
+    // record absent implies local mirror must clear too, otherwise the
+    // fetcher wrapper's isSpotifyBudgetExhausted() short-circuit prevents
+    // any real Spotify call from happening even when the operator DEL'd
+    // the record or the window rolled over on the shared side first.
+    if (
+      deps.getBudgetExhaustedUntilMs &&
+      deps.clearBudgetExhaustion &&
+      deps.getBudgetExhaustedUntilMs() > 0
+    ) {
+      deps.clearBudgetExhaustion();
     }
     // Drop the resume snapshot so a NEW suspension later captures a fresh
     // reference.
@@ -612,6 +651,24 @@ export function createSpotifyLane(
         captured_token_updated_at: capturedAt
           ? capturedAt.toISOString()
           : null,
+      });
+      return;
+    }
+
+    // Task #120 - budget exhaustion outranks 429 because the deadline is
+    // typically hours further out; writing a 429 record on top of it would
+    // shorten the effective suspension. Only one shared record exists so
+    // the higher-deadline reason wins.
+    const budgetUntil = deps.getBudgetExhaustedUntilMs
+      ? deps.getBudgetExhaustedUntilMs()
+      : 0;
+    const localBudget = budgetUntil > now;
+
+    if (localBudget) {
+      await deps.writeSharedSuspension({
+        suspended_until: new Date(budgetUntil).toISOString(),
+        reason: "budget",
+        detail: "daily Spotify API call budget exhausted",
       });
       return;
     }

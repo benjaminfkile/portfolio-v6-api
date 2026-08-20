@@ -10,7 +10,9 @@ import {
   getSpotifyLastSuccessAtMs,
   getSpotifyLastError,
   getSpotifyBackoffUntilMs,
+  getSpotifyBudgetExhaustedUntilMs,
 } from "./spotifyService";
+import type { BudgetState } from "./listener/apiBudget";
 import {
   getStoredSpotifyToken,
   SPOTIFY_REFRESH_TOKEN_LIFETIME_MS,
@@ -60,6 +62,15 @@ export interface SpotifyStatus {
   rate_limited_until: string | null;
   authorized_at: string | null;
   expires_at: string | null;
+  /**
+   * Task #120 - the daily Spotify Web API + token-endpoint call budget for
+   * this environment. `used` is the count so far this window; `cap` is the
+   * ceiling; `resets_at` is the ISO 8601 wall-clock (UTC) of the next reset.
+   * Absent when the upstream handle carries no budget guard (unusual: the
+   * bootstrap always installs one, but tests may hand-craft a partial
+   * handle). Callers that need it are free to degrade to "unknown" on absence.
+   */
+  budget?: BudgetState;
 }
 
 /**
@@ -129,15 +140,25 @@ export async function computeSpotifyStatus(
   // Rate-limit deadline — the shared 429 record is the authoritative source
   // (its `suspended_until` matches the leader's backoff window). Fall back
   // to the local mirror so a Redis blip does not lose the fact of an active
-  // 429 that this instance already observed.
-  const sharedRateUntilMs =
-    sharedSuspension && sharedSuspension.reason === "429"
+  // 429 that this instance already observed. Task #120: a "budget" record
+  // is functionally identical from the admin's perspective ("polling is
+  // paused until X") so it also surfaces as rate_limited here until task
+  // #122 splits the status contract; the budget field on the response
+  // carries the machine-readable used/cap/resets_at for anything that needs
+  // the finer distinction.
+  const sharedPauseUntilMs =
+    sharedSuspension &&
+    (sharedSuspension.reason === "429" ||
+      sharedSuspension.reason === "budget")
       ? Date.parse(sharedSuspension.suspended_until)
       : null;
-  const rateUntilMs = Number.isFinite(sharedRateUntilMs as number)
-    ? (sharedRateUntilMs as number)
+  const localBudgetUntilMs = getSpotifyBudgetExhaustedUntilMs();
+  const rateUntilMs = Number.isFinite(sharedPauseUntilMs as number)
+    ? (sharedPauseUntilMs as number)
     : localBackoffUntilMs > 0
     ? localBackoffUntilMs
+    : localBudgetUntilMs > 0
+    ? localBudgetUntilMs
     : sharedErr?.kind === "rate_limited" && sharedErr.rate_limited_until
     ? Date.parse(sharedErr.rate_limited_until)
     : null;
@@ -146,6 +167,17 @@ export async function computeSpotifyStatus(
     rateUntilMs != null && Number.isFinite(rateUntilMs) && rateUntilMs > now
       ? new Date(rateUntilMs).toISOString()
       : null;
+
+  // Task #120 - budget snapshot for the status contract. Never throws;
+  // absence on the upstream handle degrades to no `budget` field.
+  let budgetState: BudgetState | undefined;
+  if (upstream?.apiBudget) {
+    try {
+      budgetState = await upstream.apiBudget.getState(now);
+    } catch {
+      budgetState = undefined;
+    }
+  }
 
   // ---- State derivation (precedence: disabled > disconnected > rate_limited
   //      > auth_broken > connected) --------------------------------------
@@ -179,5 +211,6 @@ export async function computeSpotifyStatus(
     rate_limited_until: rateLimitedUntil,
     authorized_at: authorizedAt,
     expires_at: expiresAt,
+    ...(budgetState ? { budget: budgetState } : {}),
   };
 }

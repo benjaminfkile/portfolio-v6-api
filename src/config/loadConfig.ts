@@ -55,6 +55,13 @@ function loadLocalConfig(): LoadedConfig {
       process.env.GATEWAY_REALTIME_TOKEN || undefined,
     realtime_service_name:
       process.env.REALTIME_SERVICE_NAME || undefined,
+    // Task #120 - daily Spotify Web API budget guard. Both keys are optional
+    // so IS_LOCAL + tests stay at the compiled-in defaults without any env.
+    spotify_daily_call_budget: parseOptionalInt(
+      process.env.SPOTIFY_DAILY_CALL_BUDGET
+    ),
+    spotify_budget_reset_utc:
+      process.env.SPOTIFY_BUDGET_RESET_UTC || undefined,
   };
 
   const dbSecrets: IDBSecrets = {
