@@ -658,21 +658,18 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 }
 
 /**
- * Build a production dealer websocket. Uses the runtime's global
- * `WebSocket` (Node 22+ has it, and Node 20 exposes it under
- * `--experimental-websocket`) - the listener path is opt-in per environment
- * (needs a stored `spotify_listener` credential) so a runtime that lacks
- * `WebSocket` simply keeps the polling lane in charge until the runtime is
- * upgraded. Tests inject a fake, so this default is never exercised there.
+ * Build a production dealer websocket. Prefers the runtime's global
+ * `WebSocket` (Node 22+ has it) and falls back to the bundled `ws` package on
+ * runtimes that lack it (the runtime image is Node 20, whose global WebSocket
+ * is only behind `--experimental-websocket`). Both expose the same
+ * `addEventListener`-based surface, so the adapter below is identical for
+ * either. Tests inject a fake, so this default is never exercised there.
  */
 function buildDealerSocket(url: string): DealerSocket {
-  const WS = (globalThis as { WebSocket?: new (u: string) => unknown })
-    .WebSocket;
-  if (!WS) {
-    throw new Error(
-      "listener: no global WebSocket available; upgrade Node or install a WebSocket polyfill"
-    );
-  }
+  const WS =
+    (globalThis as { WebSocket?: new (u: string) => unknown }).WebSocket ??
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    (require("ws") as new (u: string) => unknown);
   const raw = new WS(url) as unknown as {
     send(data: string): void;
     close(code?: number, reason?: string): void;
