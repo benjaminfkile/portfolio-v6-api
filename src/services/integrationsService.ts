@@ -1,35 +1,25 @@
 import { IAppSecrets } from "../interfaces";
-import {
-  buildAuthorizeUrl as buildSpotifyAuthorizeUrl,
-  exchangeCodeForRefreshToken as exchangeSpotifyCode,
-  resolveRedirectUri as resolveSpotifyRedirectUri,
-  SPOTIFY_AUTHORIZE_URL,
-  SPOTIFY_OAUTH_SCOPE,
-  SPOTIFY_OAUTH_TOKEN_URL,
-} from "./spotifyOAuthService";
-import { SPOTIFY_REFRESH_TOKEN_LIFETIME_MS } from "./spotifyTokenStore";
-import { clearSpotifyRuntimeState } from "./spotifyService";
 
 /**
- * Integration descriptors (§4.7) — the single registry that generalizes the
- * §4.6 Spotify flow into a pattern the admin `/api/admin/integrations` router
- * drives for every integration.
+ * Integration descriptors (§4.7) — the single registry that the admin
+ * `/api/admin/integrations` router drives for every admin-granted integration.
  *
- * Three real cases, one per auth kind:
- *   - spotify  ('oauth')   — a browser authorization-code flow yields a refresh
- *                            token; expires 180 days after authorization.
+ * Two cases, one per auth kind:
  *   - github   ('api_key') — a personal access token pasted by the admin.
  *   - duolingo ('value')   — a public username pasted by the admin (not secret;
  *                            handled uniformly so the store has one shape).
  *
+ * Spotify is NOT here: now-playing is driven by the connect-listener (an
+ * admin-pasted `sp_dc` cookie managed by the dedicated listener endpoints), and
+ * the old Spotify Web API polling / OAuth path was removed.
+ *
  * A descriptor carries everything the router needs so no integration-specific
  * branching lives in the router: display name, auth kind, the OAuth wiring (for
- * 'oauth' kinds only), an expiry policy, an optional secrets-fallback probe (only
- * Spotify has a static bootstrap secret), and an optional post-write hook to
- * clear any in-memory runtime state.
+ * 'oauth' kinds only), an expiry policy, an optional secrets-fallback probe, and
+ * an optional post-write hook to clear any in-memory runtime state.
  */
 
-export type IntegrationKey = "spotify" | "github" | "duolingo";
+export type IntegrationKey = "github" | "duolingo";
 export type AuthKind = "oauth" | "api_key" | "value";
 
 /** OAuth wiring for an 'oauth' descriptor. Absent on api_key/value kinds. */
@@ -78,29 +68,6 @@ export interface IntegrationDescriptor {
 }
 
 export const INTEGRATION_DESCRIPTORS: IntegrationDescriptor[] = [
-  {
-    key: "spotify",
-    display_name: "Spotify",
-    auth_kind: "oauth",
-    oauth: {
-      authorizeUrl: SPOTIFY_AUTHORIZE_URL,
-      tokenUrl: SPOTIFY_OAUTH_TOKEN_URL,
-      scopes: [SPOTIFY_OAUTH_SCOPE],
-      resolveRedirectUri: resolveSpotifyRedirectUri,
-      resolveClientCredentials: (secrets) => ({
-        clientId: secrets.spotify_client_id,
-        clientSecret: secrets.spotify_client_secret,
-      }),
-      buildAuthorizeUrl: buildSpotifyAuthorizeUrl,
-      exchangeCode: exchangeSpotifyCode,
-    },
-    // Spotify refresh tokens expire 180 days after authorization (§4.6).
-    expiresAt: (authorizedAt) =>
-      new Date(authorizedAt.getTime() + SPOTIFY_REFRESH_TOKEN_LIFETIME_MS),
-    // Admin-granted only. Missing service_tokens row = DISCONNECTED (silent,
-    // zero Spotify calls).
-    onTokenChanged: clearSpotifyRuntimeState,
-  },
   {
     key: "github",
     display_name: "GitHub",

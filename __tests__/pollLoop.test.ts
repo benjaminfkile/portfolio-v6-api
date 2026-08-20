@@ -14,13 +14,13 @@ import {
 } from "../src/services/upstream/realtimePublisher";
 
 /**
- * Poll-loop tests (task #84 core acceptance criteria).
+ * Poll-loop tests.
  *
- * Covered: only the leader polls, snapshot serving on non-leader instances,
- * change-detection publish (no publish when payload unchanged), heartbeat
- * emission, slow-lane cadence (Duolingo/GitHub don't fetch every tick),
- * graceful degradation when Redis errors on write, and no publish + no fetch
- * when the loop isn't the leader.
+ * Now-playing is NOT driven by the poll loop anymore (it is listener-only); the
+ * loop drives only the status, duolingo, and github lanes. Covered: only the
+ * leader polls, change-detection publish (no publish when unchanged), slow-lane
+ * cadence (Duolingo/GitHub don't fetch every tick), graceful degradation when
+ * Redis errors on write, lease failover, and the in-process snapshot cache.
  */
 
 const ENV = "test";
@@ -29,7 +29,6 @@ const PUBLISH_URL = publishUrl("http://gateway:8080");
 const mockFetch = jest.fn();
 
 interface Fetchers {
-  nowPlaying: jest.Mock;
   status: jest.Mock;
   duolingo: jest.Mock;
   github: jest.Mock;
@@ -37,7 +36,6 @@ interface Fetchers {
 
 function buildFetchers(): Fetchers {
   return {
-    nowPlaying: jest.fn().mockResolvedValue({ playing: false }),
     status: jest.fn().mockResolvedValue({ degraded: false, services: [] }),
     duolingo: jest.fn().mockResolvedValue({ available: false }),
     github: jest.fn().mockResolvedValue({ available: false }),
@@ -49,7 +47,6 @@ function buildConfig() {
     env: ENV,
     pollIntervalMs: 5_000,
     slowLaneRefreshMs: 60_000,
-    heartbeatIntervalMs: 30_000,
     publisher: {
       gatewayInternalUrl: "http://gateway:8080",
       realtimeToken: "SECRET-TOKEN-123",
@@ -85,13 +82,12 @@ describe("startPollLoop — leader gating", () => {
     const fetchers = buildFetchers();
     const handle = startPollLoop(null, null, fetchers, buildConfig());
     await handle.runTick();
-    expect(fetchers.nowPlaying).not.toHaveBeenCalled();
+    expect(fetchers.status).not.toHaveBeenCalled();
     handle.stop();
   });
 
   it("does nothing on a runTick when we are not the leader", async () => {
     const redis = createFakeRedis();
-    // Seed another instance's lease so we can't acquire.
     redis.seed(
       `portfolio-v6-api:${ENV}:upstream-leader`,
       "someone-else",
@@ -109,7 +105,6 @@ describe("startPollLoop — leader gating", () => {
 
     await handle.runTick();
 
-    expect(fetchers.nowPlaying).not.toHaveBeenCalled();
     expect(fetchers.status).not.toHaveBeenCalled();
     expect(fetchers.duolingo).not.toHaveBeenCalled();
     expect(fetchers.github).not.toHaveBeenCalled();
@@ -118,51 +113,40 @@ describe("startPollLoop — leader gating", () => {
   });
 });
 
-describe("startPollLoop — fast lane snapshot + publish", () => {
-  it("writes fast-lane snapshots on every tick and publishes on change", async () => {
+describe("startPollLoop — status lane snapshot + publish", () => {
+  it("writes the status snapshot on every tick and publishes on change", async () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
-    // First tick: playing=false; second tick: playing=true → change published.
-    fetchers.nowPlaying
-      .mockResolvedValueOnce({ playing: false })
-      .mockResolvedValueOnce({
-        playing: true,
-        track: { title: "S", artists: [], album: "", art_url: null, url: null, progress_ms: null, duration_ms: null },
-      });
+    // First tick: degraded=false; second tick: degraded=true → change published.
+    fetchers.status
+      .mockResolvedValueOnce({ degraded: false, services: [] })
+      .mockResolvedValueOnce({ degraded: true, services: [] });
 
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
     await handle.runTick();
     await handle.runTick();
 
-    expect(fetchers.nowPlaying).toHaveBeenCalledTimes(2);
     expect(fetchers.status).toHaveBeenCalledTimes(2);
 
-    // Snapshot is present and readable by any instance.
-    const snap = await readSnapshot<{ playing: boolean }>(redis, ENV, "now-playing");
-    expect(snap?.payload).toEqual({
-      playing: true,
-      track: expect.any(Object),
-    });
+    const snap = await readSnapshot<{ degraded: boolean }>(redis, ENV, "status");
+    expect(snap?.payload).toEqual({ degraded: true, services: [] });
     expect(snap?.fetched_at).toEqual(expect.any(String));
 
-    // Publishes: one for now-playing on tick 1 (initial value counts as change),
-    // one for now-playing on tick 2 (change), one for status tick 1 (initial),
-    // plus at least one heartbeat.
     const publishCalls = mockFetch.mock.calls.filter(
       ([url]) => url === PUBLISH_URL
     );
-    const nowPlayingPublishes = publishCalls.filter(([, init]) => {
+    const statusPublishes = publishCalls.filter(([, init]) => {
       const body = JSON.parse((init as RequestInit).body as string);
       return (
-        body.channel === `${REALTIME_SERVICE_NAME}:now-playing` &&
+        body.channel === `${REALTIME_SERVICE_NAME}:status` &&
         body.event === "snapshot"
       );
     });
-    expect(nowPlayingPublishes).toHaveLength(2);
+    // One for tick 1 (initial value counts as change), one for tick 2 (change).
+    expect(statusPublishes).toHaveLength(2);
 
-    // Wire contract (REALTIME.md §4): the publish body carries the payload
-    // under `payload`, never `data` — the gateway 500s on a missing `payload`.
+    // Wire contract: publish body carries the payload under `payload`, not `data`.
     for (const [, init] of publishCalls) {
       const body = JSON.parse((init as RequestInit).body as string);
       expect(body).toHaveProperty("payload");
@@ -172,11 +156,10 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
     handle.stop();
   });
 
-  it("does NOT publish when the fast-lane payload is unchanged", async () => {
+  it("does NOT publish when the status payload is unchanged", async () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
-    fetchers.nowPlaying.mockResolvedValue({ playing: false });
     fetchers.status.mockResolvedValue({ degraded: false, services: [] });
 
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
@@ -184,20 +167,9 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
     await handle.runTick();
     await handle.runTick();
 
-    // First tick publishes each ("empty" prev → first payload is a change);
-    // subsequent unchanged ticks must NOT publish.
     const publishCalls = mockFetch.mock.calls.filter(
       ([url]) => url === PUBLISH_URL
     );
-    const nowPlayingPublishes = publishCalls.filter(([, init]) => {
-      const body = JSON.parse((init as RequestInit).body as string);
-      return (
-        body.channel === `${REALTIME_SERVICE_NAME}:now-playing` &&
-        body.event === "snapshot"
-      );
-    });
-    expect(nowPlayingPublishes).toHaveLength(1);
-
     const statusPublishes = publishCalls.filter(([, init]) => {
       const body = JSON.parse((init as RequestInit).body as string);
       return (
@@ -211,8 +183,6 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
   });
 
   it("prefixes published channels with the configured service name (dev override)", async () => {
-    // The dev deployment runs under a different service name — the channel
-    // prefix must follow, or the gateway rejects the publish with 403.
     const DEV_SERVICE = "portfolio-v6-api-dev";
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
@@ -231,18 +201,14 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
       ([url]) => url === PUBLISH_URL
     );
     expect(publishCalls.length).toBeGreaterThan(0);
-    // Every published channel MUST carry the dev service prefix — nothing
-    // should leak the default `portfolio-v6-api` prefix into the payload.
     for (const [, init] of publishCalls) {
       const body = JSON.parse((init as RequestInit).body as string);
       expect(body.channel).toMatch(new RegExp(`^${DEV_SERVICE}:`));
       expect(body.channel).not.toMatch(/^portfolio-v6-api:/);
     }
-    // Both fast-lane snapshot channels + the heartbeat carry the override.
     const channels = publishCalls.map(([, init]) => {
       return JSON.parse((init as RequestInit).body as string).channel as string;
     });
-    expect(channels).toContain(`${DEV_SERVICE}:now-playing`);
     expect(channels).toContain(`${DEV_SERVICE}:status`);
     handle.stop();
   });
@@ -264,43 +230,21 @@ describe("startPollLoop — fast lane snapshot + publish", () => {
     }
     handle.stop();
   });
-});
 
-describe("startPollLoop — heartbeat", () => {
-  it("emits a heartbeat on the now-playing channel", async () => {
+  it("does NOT publish to a now-playing channel (listener-only)", async () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
     await handle.runTick();
-
-    const heartbeats = mockFetch.mock.calls.filter(([url, init]) => {
-      if (url !== PUBLISH_URL) return false;
-      const body = JSON.parse((init as RequestInit).body as string);
-      return (
-        body.channel === `${REALTIME_SERVICE_NAME}:now-playing` &&
-        body.event === "heartbeat"
-      );
-    });
-    expect(heartbeats).toHaveLength(1);
-    handle.stop();
-  });
-
-  it("does not emit multiple heartbeats within the interval", async () => {
-    const redis = createFakeRedis();
-    const lease = await acquireLease(redis);
-    const fetchers = buildFetchers();
-    // Interval configured at 30s; two fast ticks must NOT produce two heartbeats.
-    const handle = startPollLoop(redis, lease, fetchers, buildConfig());
-    await handle.runTick();
     await handle.runTick();
 
-    const heartbeats = mockFetch.mock.calls.filter(([url, init]) => {
+    const nowPlaying = mockFetch.mock.calls.filter(([url, init]) => {
       if (url !== PUBLISH_URL) return false;
       const body = JSON.parse((init as RequestInit).body as string);
-      return body.event === "heartbeat";
+      return body.channel === `${REALTIME_SERVICE_NAME}:now-playing`;
     });
-    expect(heartbeats).toHaveLength(1);
+    expect(nowPlaying).toHaveLength(0);
     handle.stop();
   });
 });
@@ -312,7 +256,6 @@ describe("startPollLoop — slow lane cadence", () => {
     const fetchers = buildFetchers();
     const handle = startPollLoop(redis, lease, fetchers, {
       ...buildConfig(),
-      // Slow lane elapses well past this test's tick timing.
       slowLaneRefreshMs: 1_000_000,
     });
 
@@ -320,8 +263,8 @@ describe("startPollLoop — slow lane cadence", () => {
     await handle.runTick();
     await handle.runTick();
 
-    // Fast lane ran each tick; slow lane only on tick 1 (initial deadline 0).
-    expect(fetchers.nowPlaying).toHaveBeenCalledTimes(3);
+    // Status ran each tick; slow lane only on tick 1 (initial deadline 0).
+    expect(fetchers.status).toHaveBeenCalledTimes(3);
     expect(fetchers.duolingo).toHaveBeenCalledTimes(1);
     expect(fetchers.github).toHaveBeenCalledTimes(1);
     handle.stop();
@@ -333,21 +276,16 @@ describe("startPollLoop — degradation", () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
-    // Silence expected errors.
     jest.spyOn(console, "error").mockImplementation(() => {});
 
-    // Every subsequent Redis command errors. Publish must still fire.
     redis.queueError(new Error("write failed"));
     redis.queueError(new Error("write failed"));
 
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
     await handle.runTick();
 
-    // Fetchers still ran even though snapshot writes failed.
-    expect(fetchers.nowPlaying).toHaveBeenCalled();
     expect(fetchers.status).toHaveBeenCalled();
 
-    // Publish still fired for now-playing (change from empty).
     const publishCalls = mockFetch.mock.calls.filter(
       ([url]) => url === PUBLISH_URL
     );
@@ -355,24 +293,18 @@ describe("startPollLoop — degradation", () => {
     handle.stop();
   });
 
-  it("skips a tick when a fetcher throws (never crashes the loop)", async () => {
+  it("writes the degraded status when the status fetcher throws", async () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
-    fetchers.nowPlaying.mockRejectedValueOnce(new Error("boom"));
+    fetchers.status.mockRejectedValueOnce(new Error("boom"));
     jest.spyOn(console, "error").mockImplementation(() => {});
 
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
     await handle.runTick();
-    // The status fetcher still ran even though now-playing threw first.
-    expect(fetchers.status).toHaveBeenCalled();
 
-    // No now-playing snapshot was written (fetcher threw), but subsequent
-    // ticks recover on the next successful call.
-    fetchers.nowPlaying.mockResolvedValueOnce({ playing: false });
-    await handle.runTick();
-    const snap = await readSnapshot(redis, ENV, "now-playing");
-    expect(snap?.payload).toEqual({ playing: false });
+    const snap = await readSnapshot(redis, ENV, "status");
+    expect(snap?.payload).toEqual({ degraded: true, services: [] });
     handle.stop();
   });
 
@@ -384,7 +316,7 @@ describe("startPollLoop — degradation", () => {
       ...buildConfig(),
       publisher: {
         gatewayInternalUrl: "http://gateway:8080",
-        realtimeToken: "", // missing → publish is a no-op
+        realtimeToken: "",
       },
     });
     await handle.runTick();
@@ -402,27 +334,17 @@ describe("startPollLoop — lease failover mid-loop", () => {
     const fetchers = buildFetchers();
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
 
-    // Tick 1 as leader.
     await handle.runTick();
-    expect(fetchers.nowPlaying).toHaveBeenCalledTimes(1);
+    expect(fetchers.status).toHaveBeenCalledTimes(1);
 
-    // Another instance seizes the lease.
-    redis.seed(
-      `portfolio-v6-api:${ENV}:upstream-leader`,
-      "usurper",
-      15_000
-    );
-    // Ensure our in-process leader state reflects the loss.
+    redis.seed(`portfolio-v6-api:${ENV}:upstream-leader`, "usurper", 15_000);
     jest.spyOn(console, "error").mockImplementation(() => {});
     expect(await lease.tryRenew()).toBe(false);
 
-    // Tick 2 must be a no-op: no upstream fetchers called, no snapshot written.
-    fetchers.nowPlaying.mockClear();
     fetchers.status.mockClear();
     fetchers.duolingo.mockClear();
     fetchers.github.mockClear();
     await handle.runTick();
-    expect(fetchers.nowPlaying).not.toHaveBeenCalled();
     expect(fetchers.status).not.toHaveBeenCalled();
     expect(fetchers.duolingo).not.toHaveBeenCalled();
     expect(fetchers.github).not.toHaveBeenCalled();
@@ -431,95 +353,19 @@ describe("startPollLoop — lease failover mid-loop", () => {
 });
 
 describe("startPollLoop — in-process snapshot cache", () => {
-  it("exposes the leader's last payload via readLocalSnapshot", async () => {
+  it("exposes the leader's last status payload via readLocalSnapshot", async () => {
     const redis = createFakeRedis();
     const lease = await acquireLease(redis);
     const fetchers = buildFetchers();
-    fetchers.nowPlaying.mockResolvedValueOnce({ playing: false });
+    fetchers.status.mockResolvedValueOnce({ degraded: false, services: [] });
 
     const handle = startPollLoop(redis, lease, fetchers, buildConfig());
     await handle.runTick();
 
-    expect(readLocalSnapshot("now-playing")).toEqual({ playing: false });
-    handle.stop();
-  });
-});
-
-describe("startPollLoop — skip-listener-active (task #118)", () => {
-  it("does NOT fetch and does NOT write a degraded snapshot when the lane returns skip-listener-active", async () => {
-    const redis = createFakeRedis();
-    const lease = await acquireLease(redis);
-    const fetchers = buildFetchers();
-
-    // Seed the shared snapshot with the "listener wrote this a moment ago"
-    // payload; if the poll loop mistakenly wrote a degraded snapshot on the
-    // skip tick it would clobber this.
-    const priorPayload = {
-      playing: true,
-      track: {
-        title: "Listener Track",
-        artists: ["Artist"],
-        album: "Album",
-        art_url: null,
-        url: null,
-        progress_ms: 12_345,
-        duration_ms: 200_000,
-      },
-    };
-    redis.seed(
-      `portfolio-v6-api:${ENV}:snapshot:now-playing`,
-      JSON.stringify({ payload: priorPayload, fetched_at: "2026-01-01T00:00:00.000Z" }),
-      600_000
-    );
-
-    // Fake spotify lane that just reports skip-listener-active.
-    const laneDecision = jest.fn().mockResolvedValue("skip-listener-active");
-    const reconcile = jest.fn().mockResolvedValue(undefined);
-    const laneFetchers = {
-      ...fetchers,
-      spotifyLane: {
-        planTick: laneDecision,
-        isActive: async () => false,
-        reconcileAfterFetch: reconcile,
-      },
-    };
-
-    const handle = startPollLoop(redis, lease, laneFetchers, buildConfig());
-    await handle.runTick();
-
-    expect(fetchers.nowPlaying).not.toHaveBeenCalled();
-    // The listener's snapshot is untouched.
-    const snap = await readSnapshot(redis, ENV, "now-playing");
-    expect(snap?.payload).toEqual(priorPayload);
-    // Reconcile only fires on `fetch` decisions.
-    expect(reconcile).not.toHaveBeenCalled();
-    handle.stop();
-  });
-
-  it("resumes polling when the listener drops out of connected", async () => {
-    const redis = createFakeRedis();
-    const lease = await acquireLease(redis);
-    const fetchers = buildFetchers();
-    fetchers.nowPlaying.mockResolvedValue({ playing: false });
-
-    // Lane returns skip-listener-active first, then flips to fetch.
-    const planTick = jest
-      .fn()
-      .mockResolvedValueOnce("skip-listener-active")
-      .mockResolvedValueOnce("fetch");
-    const laneFetchers = {
-      ...fetchers,
-      spotifyLane: {
-        planTick,
-        isActive: async () => true,
-        reconcileAfterFetch: jest.fn().mockResolvedValue(undefined),
-      },
-    };
-    const handle = startPollLoop(redis, lease, laneFetchers, buildConfig());
-    await handle.runTick();
-    await handle.runTick();
-    // Fetcher fired exactly once - on the second tick.
-    expect(fetchers.nowPlaying).toHaveBeenCalledTimes(1);
+    expect(readLocalSnapshot("status")).toEqual({
+      degraded: false,
+      services: [],
+    });
     handle.stop();
   });
 });

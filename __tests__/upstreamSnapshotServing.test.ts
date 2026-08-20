@@ -6,7 +6,6 @@ import {
   snapshotKey,
 } from "../src/services/upstream/snapshotStore";
 import { _resetPollLoopStateForTests } from "../src/services/upstream/pollLoop";
-import { _resetSpotifyStateForTests } from "../src/services/spotifyService";
 import { _resetStatusCacheForTests } from "../src/services/statusService";
 import { _resetDuolingoCacheForTests } from "../src/services/duolingoService";
 import { _resetGithubCacheForTests } from "../src/services/githubService";
@@ -52,7 +51,6 @@ beforeEach(() => {
   (global as unknown as { fetch: jest.Mock }).fetch = mockFetch;
   mockFetch.mockReset();
   _resetPollLoopStateForTests();
-  _resetSpotifyStateForTests();
   _resetStatusCacheForTests();
   _resetDuolingoCacheForTests();
   _resetGithubCacheForTests();

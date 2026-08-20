@@ -10,11 +10,10 @@ import path from "path";
  *   1) Every cache entry carries a `SERVICE_TOKEN_CACHE_TTL_MS` TTL, so a
  *      process converges on the DB truth within a minute even when the row
  *      was updated on ANOTHER instance.
- *   2) `resumeSpotifyAuth()` (and by extension the spotifyLane resume
- *      transitions that call it via `deps.resumeAuth`) explicitly
- *      invalidates the cache for `spotify`, so the very first post-resume
- *      fetch reads the fresh DB row, not the stale memoized token that
- *      would 401 as invalid_grant and re-wedge the leader.
+ *   2) `invalidateServiceTokenCache(service)` explicitly drops a service's
+ *      cached entry so the very next read hits the DB, converging on a
+ *      cross-instance credential change immediately rather than up to a TTL
+ *      later.
  *   3) A DB read failure is still NOT cached - a transient error must be
  *      retried on the next call, not remembered as "no stored token".
  *
@@ -32,12 +31,9 @@ import {
   saveServiceToken,
   _resetServiceTokenStoreForTests,
 } from "../src/services/serviceTokenStore";
-import {
-  resumeSpotifyAuth,
-  suspendSpotifyAuth,
-  _resetSpotifyStateForTests,
-} from "../src/services/spotifyService";
-import { SPOTIFY_SERVICE_KEY } from "../src/services/spotifyTokenStore";
+
+// Any real service key exercises the shared cache identically.
+const SERVICE_KEY = "github";
 
 const PG_BIN = "/usr/lib/postgresql/15/bin";
 const PG_PORT = "55465"; // distinct from other tasks' throwaway clusters
@@ -118,7 +114,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   _resetServiceTokenStoreForTests();
-  _resetSpotifyStateForTests();
   await getDb()("service_tokens").del();
   jest.restoreAllMocks();
 });
@@ -130,9 +125,9 @@ describe("serviceTokenStore TTL (task #121)", () => {
 
   it("expires a cache entry after the TTL so a cross-instance update converges", async () => {
     // Instance A: seed the store and prime the cache with the original token.
-    await saveServiceToken(SPOTIFY_SERVICE_KEY, ENCRYPTION_KEY, "orig-token");
+    await saveServiceToken(SERVICE_KEY, ENCRYPTION_KEY, "orig-token");
     const primed = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(primed?.token).toBe("orig-token");
@@ -141,7 +136,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
     // reconnect that landed on a DIFFERENT process). No cache invalidation
     // fires on Instance A - only the row moves.
     await getDb()("service_tokens")
-      .where({ service: SPOTIFY_SERVICE_KEY })
+      .where({ service: SERVICE_KEY })
       .update({
         token_ciphertext: encryptToken(ENCRYPTION_KEY, "fresh-token"),
         updated_at: new Date(),
@@ -151,7 +146,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
     // the cache is doing what it claims to (a hot-path read does not hit
     // the DB every time).
     const stillCached = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(stillCached?.token).toBe("orig-token");
@@ -166,7 +161,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
       .mockReturnValue(Date.now() + SERVICE_TOKEN_CACHE_TTL_MS + 1);
     try {
       const converged = await getStoredServiceToken(
-        SPOTIFY_SERVICE_KEY,
+        SERVICE_KEY,
         ENCRYPTION_KEY
       );
       expect(converged?.token).toBe("fresh-token");
@@ -177,7 +172,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
 
   it("does NOT cache a DB read failure - the next call retries", async () => {
     // Save real data first so the SUCCESS path has something to return.
-    await saveServiceToken(SPOTIFY_SERVICE_KEY, ENCRYPTION_KEY, "real-token");
+    await saveServiceToken(SERVICE_KEY, ENCRYPTION_KEY, "real-token");
     _resetServiceTokenStoreForTests();
 
     // Fail the very first DB read; the next one goes through unmodified.
@@ -192,7 +187,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
     });
 
     const first = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(first).toBeNull();
@@ -201,7 +196,7 @@ describe("serviceTokenStore TTL (task #121)", () => {
     // the real value. If the failure had been cached, this would return
     // null without another DB read.
     const second = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(second?.token).toBe("real-token");
@@ -211,63 +206,27 @@ describe("serviceTokenStore TTL (task #121)", () => {
   });
 });
 
-describe("resumeSpotifyAuth invalidates the cache (task #121 wedge repro)", () => {
-  it("resume + fetch reads the fresh row immediately, not up to 60 seconds later", async () => {
-    // Setup: the leader (Instance B) has already suspended after observing
-    // an invalid_grant, and its cache holds the stale pre-reconnect token.
-    await saveServiceToken(SPOTIFY_SERVICE_KEY, ENCRYPTION_KEY, "stale-token");
-    const primed = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
-      ENCRYPTION_KEY
-    );
-    expect(primed?.token).toBe("stale-token");
-    suspendSpotifyAuth("invalid_grant on token refresh");
-
-    // Admin reconnects on Instance A: the ciphertext gets swapped out
-    // from under Instance B via the shared DB (no in-process signal).
-    await getDb()("service_tokens")
-      .where({ service: SPOTIFY_SERVICE_KEY })
-      .update({
-        token_ciphertext: encryptToken(ENCRYPTION_KEY, "fresh-token"),
-        updated_at: new Date(),
-      });
-
-    // The lane's resume path runs (updated_at change detected). This is
-    // the exact code path we are patching: resumeSpotifyAuth must
-    // explicitly drop the cached-decrypted-token entry so the follow-up
-    // fetch does not read the memoized "stale-token" and 401 again.
-    resumeSpotifyAuth();
-
-    // Zero wall-clock elapsed, TTL definitely not up yet. Without the
-    // explicit invalidation this returns the stale value; with it, the
-    // DB is re-read and the fresh grant surfaces.
-    const afterResume = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
-      ENCRYPTION_KEY
-    );
-    expect(afterResume?.token).toBe("fresh-token");
-  });
-
-  it("invalidateServiceTokenCache alone forces a DB re-read for the named service", async () => {
-    // Prove the exported helper works standalone (the spotifyLane resume
-    // transitions call it belt-and-braces via `deps.invalidateAuthCache`).
-    await saveServiceToken(SPOTIFY_SERVICE_KEY, ENCRYPTION_KEY, "one");
+describe("invalidateServiceTokenCache (task #121)", () => {
+  it("forces a DB re-read for the named service, with zero wall-clock elapsed", async () => {
+    // The wedge fix: a cross-instance credential change plus an explicit
+    // invalidate must surface the fresh row immediately, not up to a TTL later.
+    await saveServiceToken(SERVICE_KEY, ENCRYPTION_KEY, "one");
     const first = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(first?.token).toBe("one");
 
     await getDb()("service_tokens")
-      .where({ service: SPOTIFY_SERVICE_KEY })
+      .where({ service: SERVICE_KEY })
       .update({
         token_ciphertext: encryptToken(ENCRYPTION_KEY, "two"),
         updated_at: new Date(),
       });
 
-    invalidateServiceTokenCache(SPOTIFY_SERVICE_KEY);
+    invalidateServiceTokenCache(SERVICE_KEY);
     const afterInvalidate = await getStoredServiceToken(
-      SPOTIFY_SERVICE_KEY,
+      SERVICE_KEY,
       ENCRYPTION_KEY
     );
     expect(afterInvalidate?.token).toBe("two");

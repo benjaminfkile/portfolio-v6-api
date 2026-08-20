@@ -29,7 +29,6 @@ import {
 import {
   startPollLoop,
   DEFAULT_POLL_INTERVAL_MS,
-  HEARTBEAT_INTERVAL_MS,
   SLOW_LANE_REFRESH_MS,
   type PollLoopHandle,
   type PollFetchers,
@@ -38,24 +37,6 @@ import {
   DEFAULT_REALTIME_SERVICE_NAME,
   type RealtimePublisherConfig,
 } from "./realtimePublisher";
-import {
-  createSpotifyLane,
-  DEFAULT_SPOTIFY_IDLE_INTERVAL_MS,
-  SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
-  SPOTIFY_AUTH_RESUME_CHECK_MS,
-  SPOTIFY_PRESENCE_CACHE_MS,
-  type SpotifyLane,
-} from "./spotifyLane";
-import { fetchPresenceCount } from "./presenceQuery";
-import {
-  readNowPlayingLastRequest,
-  readSpotifyHealth,
-  readSpotifySuspension,
-  writeSpotifyHealth,
-  writeSpotifySuspension,
-  deleteSpotifySuspension,
-  type SpotifyHealthRecord,
-} from "./snapshotStore";
 import {
   createListenerSupervisor,
   type ListenerSupervisor,
@@ -76,32 +57,6 @@ import { saveLastNowPlaying } from "../nowPlayingStateStore";
 
 // Fetcher helpers reach into the existing per-service modules so the leader
 // uses the SAME curation / degrade logic the routers used to serve directly.
-import {
-  getNowPlaying,
-  isSpotifyRateLimited,
-  isSpotifyAuthSuspended,
-  isSpotifyBudgetExhausted,
-  resumeSpotifyAuth,
-  suspendSpotifyAuth,
-  getSpotifyBackoffUntilMs,
-  applySpotifyBackoffUntil,
-  clearSpotifyBackoff,
-  getSpotifyBudgetExhaustedUntilMs,
-  applySpotifyBudgetExhaustion,
-  clearSpotifyBudgetExhaustion,
-  setSpotifyBudgetHook,
-  getSpotifyLastSuccessAtMs,
-  getSpotifyLastError,
-  applySpotifyHealthMirror,
-  type SpotifyConfig,
-} from "../spotifyService";
-import {
-  createApiBudget,
-  DEFAULT_SPOTIFY_BUDGET_RESET_UTC,
-  DEFAULT_SPOTIFY_DAILY_CALL_BUDGET,
-  parseResetTime,
-  type ApiBudget,
-} from "../listener/apiBudget";
 import { getStatus } from "../statusService";
 import {
   getDuolingo,
@@ -114,16 +69,8 @@ import {
 } from "../githubService";
 import {
   getStoredServiceToken,
-  getServiceTokenUpdatedAt,
-  invalidateServiceTokenCache,
   resolveEncryptionKey,
 } from "../serviceTokenStore";
-import {
-  getStoredSpotifyToken,
-  rotateSpotifyRefreshToken,
-  SPOTIFY_SERVICE_KEY,
-} from "../spotifyTokenStore";
-import { isSpotifyDisabled } from "../serviceSettingsStore";
 
 /** Handle returned from bootstrap — kept small for shutdown. */
 export interface UpstreamHandle {
@@ -141,12 +88,6 @@ export interface UpstreamHandle {
    * Exposed so the admin status endpoint / tests can inspect state.
    */
   listenerSupervisor: ListenerSupervisor | null;
-  /**
-   * Task #120 - the daily Spotify Web API call budget guard. Always present
-   * (with or without Redis - counting degrades to in-process on Redis
-   * outage). Routers use it to expose the budget in the status contract.
-   */
-  apiBudget: ApiBudget;
   /** Release the lease + stop timers + close the Redis connection. */
   stop(): Promise<void>;
 }
@@ -161,44 +102,15 @@ export function envKeyPrefix(secrets: IAppSecrets): string {
 }
 
 /**
- * Options for `buildFetchers`. `spotifyLane` is opt-in so the existing tests
- * (which construct fetchers to assert individual behavior) don't accidentally
- * pick up viewer-aware cadence they don't want.
- */
-export interface BuildFetchersOptions {
-  spotifyLane?: SpotifyLane;
-}
-
-/**
  * Wire the curated fetchers to the existing service modules. Each fetcher
  * catches every error and returns `null` on failure so the poll loop treats
  * the tick as a skip (no snapshot write, no publish, no crash).
+ *
+ * Now-playing is NOT here — it is listener-only (the dealer listener owns that
+ * snapshot). The loop drives only status, duolingo, and github.
  */
-export function buildFetchers(
-  app: Express,
-  options: BuildFetchersOptions = {}
-): PollFetchers {
+export function buildFetchers(app: Express): PollFetchers {
   const secrets = () => app.get("secrets") as IAppSecrets | undefined;
-
-  async function spotifyConfig(): Promise<SpotifyConfig> {
-    const s = secrets();
-    const encryptionKey = resolveEncryptionKey(s);
-    const stored = await getStoredSpotifyToken(encryptionKey);
-    return {
-      clientId: s?.spotify_client_id ?? "",
-      clientSecret: s?.spotify_client_secret ?? "",
-      // service_tokens is the ONLY grant source. Missing row = DISCONNECTED,
-      // silent, zero Spotify calls (reuse auth-suspension machinery).
-      refreshToken: stored?.refreshToken ?? "",
-      // Persist a rotated refresh token from any Spotify refresh response.
-      // Only the polling leader hits this path (single-poller invariant,
-      // task #84), so writes do not race; the store is idempotent /
-      // last-write-wins anyway.
-      onRefreshTokenRotated: async (newRefreshToken: string) => {
-        await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
-      },
-    };
-  }
 
   async function duolingoUsername(): Promise<string> {
     const s = secrets();
@@ -219,39 +131,6 @@ export function buildFetchers(
   }
 
   return {
-    async nowPlaying() {
-      // Task #113 — the admin disable flag makes zero Spotify calls
-      // regardless of grant state. Checked FIRST so a disable flip takes
-      // effect within one tick even on a code path that bypasses the lane
-      // (tests, non-lane callers). A DB read failure fails open (treated
-      // as enabled) so a Postgres blip cannot silently disable a working
-      // integration.
-      const disabled = await isSpotifyDisabled().catch(() => false);
-      if (disabled) return null;
-      // While under Spotify's 429 backoff (task #90) skip the tick entirely —
-      // returning null tells the poll loop to preserve the last-good snapshot
-      // and NOT record a failure. Non-Spotify lanes are unaffected.
-      if (isSpotifyRateLimited()) return null;
-      // Auth-suspended (task #95): the poll loop's spotifyLane also gates on
-      // this, but a defense-in-depth check here means a direct call to the
-      // fetcher (tests, non-lane paths) also short-circuits without touching
-      // Spotify.
-      if (isSpotifyAuthSuspended()) return null;
-      // Task #120 - budget exhaustion is another skip-tick gate; same
-      // defense-in-depth as above so a direct caller never leaks a call
-      // once the cap has been reached this window.
-      if (isSpotifyBudgetExhausted()) return null;
-      try {
-        return await getNowPlaying(await spotifyConfig());
-      } catch (err) {
-        console.error(
-          "[upstream/nowPlaying] fetcher threw:",
-          err instanceof Error ? err.message : err
-        );
-        return null;
-      }
-    },
-    spotifyLane: options.spotifyLane,
     async status() {
       try {
         const s = secrets();
@@ -306,46 +185,13 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 
   const client = resolveRedisClient(url);
   if (!secrets || !client) {
-    // Task #120 - even on the Redis-unset path we install an in-process
-    // budget so the status endpoint / any future direct caller sees a
-    // real accessor rather than an undefined field. Cap + reset stay at
-    // the compiled-in defaults; the poller is inert in this mode anyway.
-    const fallbackReset =
-      parseResetTime(secrets?.spotify_budget_reset_utc) ??
-      parseResetTime(DEFAULT_SPOTIFY_BUDGET_RESET_UTC)!;
-    const fallbackBudget = createApiBudget({
-      redis: null,
-      env: secrets?.node_env ?? "development",
-      cap:
-        secrets?.spotify_daily_call_budget ??
-        DEFAULT_SPOTIFY_DAILY_CALL_BUDGET,
-      resetHour: fallbackReset.hour,
-      resetMinute: fallbackReset.minute,
-    });
-    // Wire even the fallback into spotifyService so any direct fetcher
-    // caller still gets counted (e.g. tests, local dev without Redis).
-    setSpotifyBudgetHook({
-      noteCall: async (now?: number) => {
-        const w = await fallbackBudget.noteCall(now);
-        const state = await fallbackBudget.getState(now);
-        return {
-          capReached: w.capReached,
-          nextResetAtMs: Date.parse(state.resets_at),
-        };
-      },
-    });
     return {
       enabled: false,
       lease: null,
       loop: { stop: () => undefined, runTick: async () => undefined },
       redis: null,
       listenerSupervisor: null,
-      apiBudget: fallbackBudget,
-      stop: async () => {
-        // Detach the hook so a subsequent bootstrap (tests) starts clean
-        // and no stale hook holds a reference to this fallback's state.
-        setSpotifyBudgetHook(null);
-      },
+      stop: async () => undefined,
     };
   }
 
@@ -373,54 +219,10 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
 
   const pollIntervalMs =
     secrets.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
-  const spotifyIdleIntervalMs =
-    secrets.spotify_idle_interval_ms ?? DEFAULT_SPOTIFY_IDLE_INTERVAL_MS;
-
-  // Task #120 - daily Spotify Web API call budget guard, Redis-backed with
-  // an in-process fallback on Redis error. Wired into spotifyService as a
-  // hook so every outbound call to accounts.spotify.com / api.spotify.com
-  // is counted BEFORE the fetch fires. The listener's dealer traffic does
-  // NOT go through this hook (dealer + connect-state edges are not Web
-  // API), so listener events are correctly excluded from the count.
-  const budgetReset =
-    parseResetTime(secrets.spotify_budget_reset_utc) ??
-    parseResetTime(DEFAULT_SPOTIFY_BUDGET_RESET_UTC)!;
-  const budgetCap =
-    secrets.spotify_daily_call_budget ?? DEFAULT_SPOTIFY_DAILY_CALL_BUDGET;
-  const apiBudget = createApiBudget({
-    redis: client,
-    env,
-    cap: budgetCap,
-    resetHour: budgetReset.hour,
-    resetMinute: budgetReset.minute,
-    onCapReached: (nextResetAtMs) => {
-      // Stamp the process-local mirror so the fetcher gate short-circuits
-      // for the rest of the window. The lane's reconcileAfterFetch is what
-      // persists the shared "budget" suspension record so any other
-      // instance / a fresh leader picks up the state.
-      applySpotifyBudgetExhaustion(nextResetAtMs);
-      console.warn(
-        `[apiBudget] Spotify daily call budget of ${budgetCap} reached; ` +
-          `suspending polling until ${new Date(nextResetAtMs).toISOString()}`
-      );
-    },
-  });
-  setSpotifyBudgetHook({
-    noteCall: async (now?: number) => {
-      const w = await apiBudget.noteCall(now);
-      const state = await apiBudget.getState(now);
-      return {
-        capReached: w.capReached,
-        nextResetAtMs: Date.parse(state.resets_at),
-      };
-    },
-  });
 
   // Connect-listener supervisor (task #118). Owns the dealer websocket
-  // lifecycle for this process; leader-gated exactly like polling. Wired
-  // BEFORE the Spotify lane so we can pass `isListenerConnected` into the
-  // lane and it can suppress the polling fetch while the listener is
-  // holding the primary source.
+  // lifecycle for this process; leader-gated. It is the SOLE source of
+  // now-playing (the Spotify Web API polling path was removed).
   const listenerSupervisor = createListenerSupervisor({
     env,
     redis: client,
@@ -471,105 +273,14 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
     },
   });
 
-  // Viewer-aware + auth-aware Spotify lane (task #95 + shared-suspension #96).
-  // Everything the lane needs from the outside world is injected here so the
-  // lane module has no dependency on Express / Redis / DB — the tests can
-  // build a pure fake.
-  const spotifyLane = createSpotifyLane(
-    {
-      async isDisabled() {
-        return isSpotifyDisabled();
-      },
-      isAuthSuspended: () => isSpotifyAuthSuspended(),
-      // Task #118 — while the listener is `connected` the Spotify polling
-      // lane must not fetch: the connect-listener is the primary source.
-      isListenerConnected: () => listenerSupervisor.isListenerConnected(),
-      getBackoffUntilMs: () => getSpotifyBackoffUntilMs(),
-      applyAuthSuspension: (reason) => suspendSpotifyAuth(reason),
-      applyBackoffUntil: (untilMs) => applySpotifyBackoffUntil(untilMs),
-      clearBackoff: () => clearSpotifyBackoff(),
-      // Task #120 - budget getters/setters mirror the 429 backoff trio.
-      getBudgetExhaustedUntilMs: () => getSpotifyBudgetExhaustedUntilMs(),
-      applyBudgetExhaustion: (untilMs) =>
-        applySpotifyBudgetExhaustion(untilMs),
-      clearBudgetExhaustion: () => clearSpotifyBudgetExhaustion(),
-      resumeAuth: () => resumeSpotifyAuth(),
-      // Task #121 - drop the decrypted-credential cache on every lane resume
-      // transition so the first post-resume fetch reads the fresh DB row
-      // rather than the potentially-stale process-local memo.
-      invalidateAuthCache: () => invalidateServiceTokenCache(SPOTIFY_SERVICE_KEY),
-      async getStoredTokenUpdatedAt() {
-        return getServiceTokenUpdatedAt(SPOTIFY_SERVICE_KEY);
-      },
-      async getPresenceCount() {
-        return fetchPresenceCount({
-          gatewayInternalUrl: publisher.gatewayInternalUrl,
-          realtimeToken: publisher.realtimeToken,
-          serviceName: publisher.serviceName ?? DEFAULT_REALTIME_SERVICE_NAME,
-          topic: "now-playing",
-        });
-      },
-      async getLastPublicRequestAt() {
-        return readNowPlayingLastRequest(client, env);
-      },
-      async readSharedSuspension() {
-        return readSpotifySuspension(client, env);
-      },
-      async writeSharedSuspension(record) {
-        return writeSpotifySuspension(client, env, record);
-      },
-      async clearSharedSuspension() {
-        return deleteSpotifySuspension(client, env);
-      },
-      readLocalHealth(): SpotifyHealthRecord {
-        const successMs = getSpotifyLastSuccessAtMs();
-        const err = getSpotifyLastError();
-        return {
-          last_success_at:
-            successMs != null ? new Date(successMs).toISOString() : null,
-          last_error: err
-            ? {
-                kind: err.kind,
-                at: new Date(err.atMs).toISOString(),
-                ...(err.kind === "rate_limited" &&
-                err.rateLimitedUntilMs != null
-                  ? {
-                      rate_limited_until: new Date(
-                        err.rateLimitedUntilMs
-                      ).toISOString(),
-                    }
-                  : {}),
-              }
-            : null,
-        };
-      },
-      async readSharedHealth() {
-        return readSpotifyHealth(client, env);
-      },
-      async writeSharedHealth(record) {
-        return writeSpotifyHealth(client, env, record);
-      },
-      applyHealthMirror(record) {
-        applySpotifyHealthMirror(record);
-      },
-    },
-    {
-      publicRequestWindowMs: SPOTIFY_ACTIVE_PUBLIC_REQUEST_WINDOW_MS,
-      presenceCacheMs: SPOTIFY_PRESENCE_CACHE_MS,
-      authResumeCheckMs: SPOTIFY_AUTH_RESUME_CHECK_MS,
-      idleIntervalMs: spotifyIdleIntervalMs,
-    }
-  );
-
   const loop = startPollLoop(
     client,
     lease,
-    buildFetchers(app, { spotifyLane }),
+    buildFetchers(app),
     {
       env,
       pollIntervalMs,
       slowLaneRefreshMs: SLOW_LANE_REFRESH_MS,
-      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
       publisher,
     }
   );
@@ -646,7 +357,6 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
     loop,
     redis: client,
     listenerSupervisor,
-    apiBudget,
     async stop() {
       clearInterval(leadershipWatch);
       loop.stop();
@@ -654,9 +364,6 @@ export function bootstrapUpstream(app: Express): UpstreamHandle {
       await listenerSupervisor.stop().catch(() => undefined);
       await lease.release().catch(() => undefined);
       await client.quit().catch(() => undefined);
-      // Detach the budget hook so a subsequent bootstrap (tests) starts
-      // clean and no stale hook holds a reference to this handle's Redis.
-      setSpotifyBudgetHook(null);
     },
   };
 }
