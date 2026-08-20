@@ -20,6 +20,10 @@ import {
 } from "../services/integrationsService";
 import { computeSpotifyStatus } from "../services/spotifyStatusService";
 import { setSpotifyEnabled } from "../services/serviceSettingsStore";
+import {
+  deleteListenerCredential,
+  saveListenerCredential,
+} from "../services/listenerCredentialStore";
 import type { UpstreamHandle } from "../services/upstream";
 
 /**
@@ -483,6 +487,54 @@ adminIntegrationsRouter.get(
     handleCallback(getIntegrationDescriptor(SPOTIFY_KEY), req, res).catch((err) =>
       next(err as Error)
     );
+  }
+);
+
+/**
+ * PUT /api/admin/integrations/spotify/listener, upsert the `sp_dc` Spotify
+ * web-player session cookie the connect-listener uses (task series #115
+ * through #123).
+ *
+ * The value is write-only: it is persisted encrypted in `service_tokens` under
+ * key `spotify_listener` (§4.7) and is NEVER echoed back in a response, a
+ * redirect, or a log line. Returns 204 on success, 400 on a missing/empty body.
+ */
+adminIntegrationsRouter.put(
+  "/integrations/spotify/listener",
+  requireAdmin(),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const spDc = (req.body as { sp_dc?: unknown } | undefined)?.sp_dc;
+      if (typeof spDc !== "string" || spDc.trim() === "") {
+        return res
+          .status(400)
+          .json(failure("A non-empty `sp_dc` string is required."));
+      }
+
+      const secrets = getSecrets(req);
+      await saveListenerCredential(resolveEncryptionKey(secrets), spDc.trim());
+      // 204, no body, no echo of the stored value.
+      res.status(204).end();
+    } catch (err) {
+      next(err as Error);
+    }
+  }
+);
+
+/**
+ * DELETE /api/admin/integrations/spotify/listener, remove the stored `sp_dc`
+ * cookie. Idempotent: 204 whether or not a row existed.
+ */
+adminIntegrationsRouter.delete(
+  "/integrations/spotify/listener",
+  requireAdmin(),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      await deleteListenerCredential();
+      res.status(204).end();
+    } catch (err) {
+      next(err as Error);
+    }
   }
 );
 
