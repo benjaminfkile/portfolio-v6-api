@@ -68,11 +68,9 @@ export interface IntegrationDescriptor {
   expiresAt(authorizedAt: Date): Date | null;
   /**
    * True when a static app-secret provides this integration without a stored
-   * row. NO real integration uses this today — Spotify's static
-   * `spotify_refresh_token` fallback was killed by task #112 (admin-granted
-   * credentials ONLY), and github/duolingo never had a static path. Kept in
-   * the interface so a future integration could opt in without reshaping
-   * the descriptor.
+   * row. NO real integration uses this today — every shipping integration is
+   * admin-granted only. Kept in the interface so a future integration could
+   * opt in without reshaping the descriptor.
    */
   secretsFallback?(secrets: IAppSecrets): boolean;
   /** Clear any in-memory runtime state after the stored credential changes. */
@@ -99,9 +97,8 @@ export const INTEGRATION_DESCRIPTORS: IntegrationDescriptor[] = [
     // Spotify refresh tokens expire 180 days after authorization (§4.6).
     expiresAt: (authorizedAt) =>
       new Date(authorizedAt.getTime() + SPOTIFY_REFRESH_TOKEN_LIFETIME_MS),
-    // Task #112 killed the static spotify_refresh_token fallback — the admin
-    // reconnect flow is the only bootstrap. Missing service_tokens row =
-    // DISCONNECTED (silent, zero Spotify calls).
+    // Admin-granted only. Missing service_tokens row = DISCONNECTED (silent,
+    // zero Spotify calls).
     onTokenChanged: clearSpotifyRuntimeState,
   },
   {

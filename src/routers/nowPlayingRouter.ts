@@ -28,12 +28,14 @@ import {
  * `{ playing: false }`, never a 5xx. No Spotify token is ever in the response —
  * the router only forwards the curated service payload (§4.6).
  *
- * Task #84 layered a shared-snapshot path on top: when Redis is configured, the
- * leader instance polls Spotify and writes the curated payload to a Redis
- * snapshot; every other instance serves that snapshot here so each Spotify
- * upstream is polled once per environment, not once per instance. A Redis
- * outage or a missing snapshot falls back to the per-instance in-memory path so
- * public reads never 5xx because of the shared store.
+ * Task #84 layered a shared-snapshot path on top: when Redis is configured,
+ * the leader instance is the SOLE writer of the shared now-playing snapshot,
+ * populated either by the dealer listener (primary, event-driven — task
+ * series #115-#123) or by the polling fallback lane; every other instance
+ * serves that snapshot here so at most one Spotify credential is exercised
+ * per environment. A Redis outage or a missing snapshot falls back to the
+ * per-instance in-memory path so public reads never 5xx because of the
+ * shared store.
  */
 const nowPlayingRouter = express.Router();
 
@@ -47,14 +49,13 @@ async function spotifyConfig(req: Request): Promise<SpotifyConfig> {
   return {
     clientId: secrets?.spotify_client_id ?? "",
     clientSecret,
-    // service_tokens is the ONLY grant source (task #112) — no static
-    // spotify_refresh_token secret fallback. Missing row = DISCONNECTED,
+    // service_tokens is the ONLY grant source. Missing row = DISCONNECTED,
     // silent, zero Spotify calls (reuse auth-suspension machinery).
     refreshToken: stored?.refreshToken ?? "",
-    // Persist a rotated refresh token from any Spotify refresh response
-    // (task #112). authorized_at is preserved (rotation does not extend
-    // the 180-day window). Only reached from this router when Redis is
-    // unconfigured / errored — otherwise the leader's fetcher persists.
+    // Persist a rotated refresh token from any Spotify refresh response.
+    // authorized_at is preserved (rotation does not extend the 180-day
+    // window). Only reached from this router when Redis is unconfigured
+    // or errored — otherwise the leader's fetcher persists.
     onRefreshTokenRotated: async (newRefreshToken: string) => {
       await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
     },

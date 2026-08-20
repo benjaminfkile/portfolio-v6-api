@@ -590,7 +590,8 @@ async function passesBudget(): Promise<boolean> {
 async function refreshAccessToken(config: SpotifyConfig): Promise<string> {
   if (!config.clientId || !config.clientSecret || !config.refreshToken) {
     // Missing credentials is a stable state until an admin reconnects —
-    // suspend so the poll loop stops hammering `refreshAccessToken` every tick.
+    // suspend so any subsequent polling-fallback tick short-circuits at the
+    // fetcher gate instead of re-entering `refreshAccessToken`.
     suspendSpotifyAuth("no stored Spotify credentials");
     throw new Error("Spotify credentials are not configured");
   }

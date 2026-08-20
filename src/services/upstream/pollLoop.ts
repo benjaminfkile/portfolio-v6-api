@@ -4,12 +4,16 @@
  * The leader (see `leaderLease`) runs this loop; every non-leader is silent.
  * The base tick — `POLL_INTERVAL_MS`, default 10s (prod runs 5s, dev 10s) —
  * drives:
- *   - fast lane, refreshed EVERY tick: Spotify now-playing + status.
+ *   - Spotify now-playing (fallback lane): the dealer listener from task
+ *     series #115-#123 is the primary source; polling only runs when the
+ *     listener is not connected AND the Spotify lane's predictive/idle
+ *     deadline has elapsed (see spotifyLane for the full cadence rules).
+ *   - gateway status, refreshed EVERY tick (independent of Spotify).
  *   - slow lane, refreshed only when the local deadline has elapsed: Duolingo
  *     and GitHub. Their upstream TTLs stay long (~1h); the leader re-fetches
  *     them once per TTL, not every tick.
  *
- * After each fast-lane fetch, the loop:
+ * After each fetch, the loop:
  *   1. writes the curated payload + `fetched_at` to the shared snapshot store,
  *   2. publishes to the gateway realtime hub ONLY IF the payload differs from
  *      the previous one (change-detection — silent when nothing changed),
@@ -31,10 +35,7 @@ import {
   publish,
   RealtimePublisherConfig,
 } from "./realtimePublisher";
-import {
-  DEFAULT_SPOTIFY_IDLE_INTERVAL_MS,
-  type SpotifyLane,
-} from "./spotifyLane";
+import type { SpotifyLane } from "./spotifyLane";
 
 /**
  * Degraded now-playing payload written when the Spotify lane skips (429
@@ -71,7 +72,7 @@ function degradedNowPlaying(
 
 const DEGRADED_STATUS: StatusLike = { degraded: true, services: [] };
 
-/** Base cadence defaults — used when POLL_INTERVAL_MS is unset. */
+/** Base tick default — used when POLL_INTERVAL_MS is unset. */
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 /** Heartbeat emission cadence on the now-playing channel (~30s). */
@@ -99,8 +100,9 @@ export type Fetcher<T> = () => Promise<T | null>;
  * next to this file) so this module stays free of app-specific imports.
  *
  * `spotifyLane` is optional: when present (task #95) it decides on each tick
- * whether the Spotify lane fetches (viewer-aware cadence + auth suspension);
- * when absent the loop polls `nowPlaying` every tick as it did before. The
+ * whether the Spotify lane fetches (viewer-aware + predictive cadence, auth
+ * suspension, listener-active suppression); when absent the loop degrades to
+ * polling `nowPlaying` every tick, used only by the pre-#95 tests. The
  * status/duolingo/github lanes are UNAFFECTED by the Spotify lane in either
  * case.
  */
@@ -116,7 +118,7 @@ export interface PollFetchers {
 export interface PollLoopConfig {
   /** Environment name used to prefix Redis snapshot keys. */
   env: string;
-  /** Base tick — how often the fast lane fetches. */
+  /** Base tick — how often the loop wakes and evaluates each lane. */
   pollIntervalMs: number;
   /**
    * Slow-lane refresh deadline. Exposed so tests can shorten it; production
@@ -128,9 +130,6 @@ export interface PollLoopConfig {
   /** Realtime publish config; unset fields disable publishing (no-op). */
   publisher: RealtimePublisherConfig;
 }
-
-// Re-export so bootstrap and tests share one default without a duplicate import.
-export { DEFAULT_SPOTIFY_IDLE_INTERVAL_MS };
 
 /**
  * Handle returned by `startPollLoop`. `stop()` clears every timer and is
@@ -240,8 +239,8 @@ export function startPollLoop(
    * Fetch a payload and, if the fetcher returned data, write / publish it.
    * Returns the payload that was written, or `null` when the fetcher skipped
    * (429 backoff, auth-suspended, upstream error) - callers fall back to a
-   * degraded payload in that case. Task #96 invariant: EVERY tick writes
-   * SOME snapshot for the fast lanes.
+   * degraded payload in that case. Task #96 invariant: EVERY processed tick
+   * writes SOME snapshot for now-playing + status.
    */
   async function refreshOne<T>(
     service: SnapshotService,
@@ -270,11 +269,13 @@ export function startPollLoop(
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
 
-    // Spotify lane (task #95, #96) — the lane decides suspend vs. active vs.
-    // idle. When no lane is wired we keep the pre-#95 behavior: poll every
-    // tick. Task #96 invariant: EVERY processed tick writes SOME snapshot
-    // for now-playing, so no instance ever finds the shared key missing and
-    // falls through to a direct Spotify fetch.
+    // Spotify lane (task #95, #96, #119) — the lane decides suspend vs.
+    // fetch vs. skip-listener-active vs. skip-idle. When no lane is wired we
+    // keep the pre-#95 behavior: poll every tick (tests only). Task #96
+    // invariant: EVERY processed tick writes SOME snapshot for now-playing
+    // (except while the listener is active and owns the snapshot), so no
+    // instance ever finds the shared key missing and falls through to a
+    // direct Spotify fetch.
     if (fetchers.spotifyLane) {
       const decision = await fetchers.spotifyLane.planTick(now);
       let fetchedPayload: unknown = null;
@@ -330,7 +331,7 @@ export function startPollLoop(
       }
     }
 
-    // Status stays on the base fast cadence — unaffected by the Spotify lane.
+    // Status refreshes on the base tick, unaffected by the Spotify lane.
     // Same always-write invariant: a fetcher failure / null payload writes
     // the degraded shape so non-leaders never find the key missing.
     const statusPayload = await refreshOne("status", fetchers.status, "status");

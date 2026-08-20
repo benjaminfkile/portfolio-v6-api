@@ -58,7 +58,7 @@ enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/s
 | GET | `/api/posts` | Published post summaries; keyset pagination via `?cursor=`; filters `?limit=`, `?tag=`, `?blog=`. |
 | GET | `/api/posts/:slug` | One published post (`published_body`); `ETag`/304; 404 for drafts. |
 | GET | `/api/status` | Curated gateway-health payload, ~30s cache; degrades, never 5xx. |
-| GET | `/api/now-playing` | Spotify proxy, ~30s cache; degrades to `{playing:false}`. |
+| GET | `/api/now-playing` | Serves the shared Redis snapshot written by the dealer listener (primary) or the polling fallback lane; degrades to `{playing:false}`. |
 | GET | `/api/duolingo` | Streak/course (`?language=`), ~1h cache; degrades to `{available:false}`. |
 | GET | `/api/github` | Contribution calendar (`?year=YYYY` or trailing 12 months), ~1h cache; 400 only on invalid year. |
 | GET | `/api/ops` | Daily-replay ops report (v1.7): `?date=YYYY-MM-DD` or latest; 400 malformed date, 404 none available. |
@@ -143,20 +143,71 @@ migrate:latest` (Knex, env-driven `knexfile.ts`). Deployed containers auto-run m
 only when `node_env !== 'production'` — **prod migrations are run manually** against the
 prod DB before deploying a schema change.
 
-### Single-poller upstream refresh (task #84)
+### Now-playing (task #84 shared snapshot + listener series #115-#123)
 
-Multiple API instances per environment would each independently poll Spotify every 5s
-and trip Spotify's 429s. Instead exactly one instance per environment polls upstreams,
-shares the curated payloads through Redis, and publishes updates to browsers through
-the gateway's realtime hub (see `REALTIME.md` in the gateway repo for the contract).
-Every variable below is **optional** — leaving `REDIS_URL` unset falls back to today's
-per-instance in-memory caches and opens no Redis connection (so local dev and CI stay
-Redis-free).
+Multiple API instances per environment would each independently exercise the shared
+Spotify credentials and trip Spotify's per-client rate limits. A Redis leader lease
+elects exactly one instance per environment as the sole writer of the shared
+now-playing snapshot; every other instance serves reads from that snapshot and pushes
+updates to browsers through the gateway realtime hub (see `REALTIME.md` in the gateway
+repo for the contract). Every variable in the table below is **optional** — leaving
+`REDIS_URL` unset falls back to per-instance in-memory caches and opens no Redis
+connection (so local dev and CI stay Redis-free).
+
+The now-playing snapshot has two writers on the leader, in strict order:
+
+1. **Dealer listener (primary, event-driven)**. The connect-listener does what the
+   Spotify web player does: mints a web-player access token from the stored `sp_dc`
+   cookie (see `src/services/listener/webTokenMinter.ts`), holds the account's
+   dealer websocket open, and receives cluster (playback state) pushes for every
+   device on the account. Each cluster event is curated and written straight to the
+   shared snapshot; while a track is playing, the supervisor also re-writes the
+   snapshot every 20s with a locally-advanced `progress_ms` so polling-fallback
+   viewers see progress move without any extra Spotify traffic. The listener is
+   leader-gated (only the leader holds the socket), and stays idle until an admin
+   pastes an `sp_dc` cookie into the `spotify_listener` integration; missing
+   credential = idle, no dealer connection at all. See
+   `src/services/upstream/listenerSupervisor.ts` and
+   `src/services/listener/dealerClient.ts`.
+2. **Polling fallback (Spotify Web API)**. When the listener is not `connected`
+   (no credential, idle, backoff, or credential dead), the leader's Spotify lane
+   polls Spotify's `/me/player/currently-playing` endpoint. Cadence is
+   viewer-aware and predictive: idle (no viewers) polls at most once every 5min;
+   active-and-playing schedules the next fetch at (track end + 2s), floored at
+   15s and ceilinged at 60s so long tracks still get one drift-check per minute;
+   active-but-idle polls at most once per 60s. On a 429 the lane suspends until
+   `Retry-After` (or exponential backoff, capped at 15min), sharing the
+   suspension deadline across instances via Redis so a fresh leader honors an
+   existing suspension without a fresh trip. A daily Spotify Web API call budget
+   (default 4000 calls, resetting at 21:23 UTC) is a belt-and-braces cap that
+   suspends further calls once hit until the next window reset. See
+   `src/services/upstream/spotifyLane.ts` and `src/services/listener/apiBudget.ts`.
+3. **Shared Redis snapshot serving `/api/now-playing`**. Every instance (leader
+   included) serves the public endpoint from the Redis snapshot key; no HTTP
+   request ever fetches Spotify itself while Redis is reachable. A Redis outage
+   falls back to the per-instance in-memory path so public reads never 5xx.
+
+**Admin-granted credentials in `service_tokens`.** Both the OAuth refresh token
+(`spotify`) that the polling fallback uses and the `sp_dc` cookie (`spotify_listener`)
+the dealer listener uses live in the encrypted `service_tokens` table, minted only
+through the admin Integrations page. Neither has any env or secret fallback; a missing
+row means the corresponding lane is silently disconnected (zero Spotify traffic).
+
+**Operational note: web-token minting.** The dealer listener mints a web-player
+access token by calling Spotify's `get_access_token` endpoint with the stored `sp_dc`
+cookie — a reverse-engineered endpoint the official mobile/web clients use, not part
+of Spotify's public developer API. If Spotify changes the endpoint URL, expected
+headers, or response shape, update the constants at the top of
+`src/services/listener/webTokenMinter.ts` (URL, request headers, response parsing).
+The listener degrades to `credential_dead` on any 4xx from that endpoint; the polling
+fallback continues to operate independently.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `REDIS_URL` | *(unset)* | Enables the subsystem when set. Prod and dev MUST NOT share a keyspace (use different DBs, e.g. `/0` and `/1`); keys are also prefixed with the env name. Placeholders only in the repo — the real value lives in the deployed secret. |
-| `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`, dev runs `10000`. Fast-lane services (Spotify now-playing, gateway status) refresh every tick; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
+| `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`, dev runs `10000`. Gateway status refreshes every tick; Spotify polling only fires when the listener is not connected AND the Spotify lane's predictive / idle deadline has elapsed; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
+| `SPOTIFY_DAILY_CALL_BUDGET` | `4000` | Hard daily cap on outbound Spotify Web API + token-endpoint calls made by the polling fallback. Suspends polling once reached until the next window reset. |
+| `SPOTIFY_BUDGET_RESET_UTC` | `21:23` | UTC time of day (`HH:MM`) the daily Spotify call budget window resets; invalid strings silently fall back to the default. |
 | `GATEWAY_INTERNAL_URL` | `http://gateway:8080` | Internal base URL the container uses to reach the gateway's `POST /internal/publish` endpoint (realtime hub). |
 | `GATEWAY_REALTIME_TOKEN` | *(unset)* | Shared secret the gateway injects into every service container so the internal publish endpoint can authenticate this API. Sent as the `X-Gateway-Realtime-Token` header. Never returned to any response and never logged. |
 | `REALTIME_SERVICE_NAME` | `portfolio-v6-api` | Manifest service name that prefixes every published channel (`{service_name}:{topic}`). MUST match the service the gateway's publish token is scoped to. Prod runs `portfolio-v6-api`; the **dev deployment runs under `portfolio-v6-api-dev` and MUST set this** — a mismatched prefix is rejected with 403. Also settable via the `realtime_service_name` secret. |

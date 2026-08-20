@@ -1,12 +1,14 @@
 /**
  * Redis leader lease (task #84).
  *
- * We now run multiple API instances per environment; without coordination each
- * one independently polls Spotify every 5s, which trips Spotify's 429s. The
- * lease is a `SET NX PX` on a single Redis key: exactly one instance wins per
- * environment, holds the key for `leaseTtlMs`, and periodically CAS-renews it
- * every `renewIntervalMs`. On renewal failure (Redis outage, or another
- * instance stole the lease after the TTL) the loop STOPS fetching immediately;
+ * We run multiple API instances per environment; without coordination each one
+ * would independently exercise the shared Spotify credentials (a dealer
+ * websocket, or a Web API poll every few seconds), which trips Spotify's per-
+ * client rate limits. The lease is a `SET NX PX` on a single Redis key:
+ * exactly one instance wins per environment, holds the key for `leaseTtlMs`,
+ * and periodically CAS-renews it every `renewIntervalMs`. On renewal failure
+ * (Redis outage, or another instance stole the lease after the TTL) the
+ * leader-gated work (dealer listener, polling fallback) STOPS immediately;
  * another instance will acquire within one lease TTL.
  *
  * The lease VALUE is a per-process instance id (a UUID minted at boot). Renew

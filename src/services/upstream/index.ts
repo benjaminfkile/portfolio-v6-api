@@ -186,14 +186,13 @@ export function buildFetchers(
     return {
       clientId: s?.spotify_client_id ?? "",
       clientSecret: s?.spotify_client_secret ?? "",
-      // service_tokens is the ONLY grant source (task #112) — no static
-      // spotify_refresh_token secret fallback. Missing row = DISCONNECTED,
+      // service_tokens is the ONLY grant source. Missing row = DISCONNECTED,
       // silent, zero Spotify calls (reuse auth-suspension machinery).
       refreshToken: stored?.refreshToken ?? "",
-      // Persist a rotated refresh token from any Spotify refresh response
-      // (task #112). Only the polling leader hits this path (single-poller
-      // invariant, task #84), so writes do not race; the store is
-      // idempotent / last-write-wins anyway.
+      // Persist a rotated refresh token from any Spotify refresh response.
+      // Only the polling leader hits this path (single-poller invariant,
+      // task #84), so writes do not race; the store is idempotent /
+      // last-write-wins anyway.
       onRefreshTokenRotated: async (newRefreshToken: string) => {
         await rotateSpotifyRefreshToken(encryptionKey, newRefreshToken);
       },
