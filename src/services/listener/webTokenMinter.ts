@@ -64,9 +64,10 @@ const FRAGILE = {
    * MUST always be updated together (Spotify's server checks that `totpVer`
    * matches the secret it was signed with).
    */
-  totpSecretVersion: 10,
+  totpSecretVersion: 61,
   totpSecretCipherBytes: [
-    61, 105, 55, 82, 76, 91, 88, 51, 76, 88, 45, 44, 79, 122, 116, 111,
+    44, 55, 47, 42, 70, 40, 34, 114, 76, 74, 50, 111, 120, 97, 75, 76, 94,
+    102, 43, 69, 49, 120, 118, 80, 64, 78,
   ] as readonly number[],
   /**
    * TOTP shape parameters: HMAC-SHA1, 6 digits, 30-second step. These have
@@ -164,8 +165,10 @@ function base32Encode(bytes: Uint8Array): string {
 
 /**
  * Derive the base32 TOTP secret from the current cipher bytes. The
- * transformation (XOR per index, decimal-string join, utf8-hex-string, then
- * base32 of the hex bytes) mirrors what the Spotify web-player bundle does.
+ * transformation mirrors the Spotify web-player bundle: XOR each cipher byte
+ * with a per-index constant, join the results as one decimal string, and
+ * base32-encode that string's UTF-8 bytes. (The bundle hex-encodes and then
+ * hex-decodes in between, a round-trip that cancels out, so we skip it.)
  * Isolated so a single function needs to change when Spotify rotates the
  * scheme rather than the cipher bytes.
  */
@@ -174,10 +177,7 @@ function deriveTotpBase32Secret(): string {
     (byte, index) => byte ^ ((index % 33) + 9)
   );
   const decimalJoined = processed.join("");
-  const utf8 = Buffer.from(decimalJoined, "utf8");
-  const hex = utf8.toString("hex");
-  const hexBytes = Buffer.from(hex, "utf8");
-  return base32Encode(hexBytes).replace(/=+$/, "");
+  return base32Encode(Buffer.from(decimalJoined, "utf8")).replace(/=+$/, "");
 }
 
 /**
