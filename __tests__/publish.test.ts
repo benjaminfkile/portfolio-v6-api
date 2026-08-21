@@ -462,6 +462,85 @@ describe("publish validation refusal (§3.9)", () => {
     expect(Number(count[0].count)).toBe(0);
   });
 
+  it("publishes a hero with a nested `background` presentation object — every provided key survives into the served document", async () => {
+    // A hero carrying the new `background` object (task Hero background
+    // settings). The publish path must NOT whitelist hero keys in a way that
+    // drops it; the served document must expose every provided key, unchanged
+    // and untouched by defaults (an absent key stays absent).
+    const heroWithBg = (
+      await createSection({
+        type: "hero",
+        data: {
+          title: "Ben",
+          background: {
+            opacity_dark: 0.2,
+            opacity_light: 0.08,
+            object_fit: "contain",
+            object_position: "50% 30%",
+            blur_px: 12,
+            grayscale: 0.5,
+            brightness: 1.1,
+            contrast: 0.9,
+            saturate: 1.2,
+            scale: 1.25,
+            overlay_dark: 0.3,
+            overlay_light: 0.1,
+          },
+        },
+      })
+    ).body.data;
+
+    const pub = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub.status).toBe(201);
+
+    const content = await request(app).get("/api/content");
+    const sections = content.body.pages[0].sections as Array<{
+      id: string;
+      type: string;
+      data: Record<string, unknown>;
+    }>;
+    const hero = sections.find((s) => s.id === heroWithBg.id);
+    expect(hero).toBeDefined();
+    expect(hero!.data.background).toEqual({
+      opacity_dark: 0.2,
+      opacity_light: 0.08,
+      object_fit: "contain",
+      object_position: "50% 30%",
+      blur_px: 12,
+      grayscale: 0.5,
+      brightness: 1.1,
+      contrast: 0.9,
+      saturate: 1.2,
+      scale: 1.25,
+      overlay_dark: 0.3,
+      overlay_light: 0.1,
+    });
+
+    // A partial `background` (only two keys) also survives — absent keys stay
+    // absent, no defaults are materialised into the stored/served document.
+    const heroPartial = (
+      await createSection({
+        type: "hero",
+        data: {
+          background: { opacity_dark: 0.15, object_fit: "cover" },
+        },
+      })
+    ).body.data;
+    const pub2 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
+    expect(pub2.status).toBe(201);
+    const content2 = await request(app).get("/api/content");
+    const sections2 = content2.body.pages[0].sections as Array<{
+      id: string;
+      data: Record<string, unknown>;
+    }>;
+    const heroP = sections2.find((s) => s.id === heroPartial.id);
+    expect(heroP).toBeDefined();
+    expect(heroP!.data.background).toEqual({
+      opacity_dark: 0.15,
+      object_fit: "cover",
+    });
+  });
+
   it("publishes a hero with no title AND an about with no heading — NO section requires a heading (task #106)", async () => {
     // Product rule: NOTHING should require a heading. A hero with no title and
     // an about with no heading are both valid content and must publish through

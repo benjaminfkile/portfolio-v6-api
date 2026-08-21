@@ -7,17 +7,27 @@
  * the canonical schemas; fields whose canonical schema allows an empty string
  * carry `.default("")` there, so a stripped field publishes identically to an
  * explicit empty string.
+ *
+ * Recurses into nested objects and arrays so an empty-string field one level
+ * down (e.g. the hero section's nested `background.object_position`) is
+ * stripped the same way a top-level one is. Array element positions are
+ * preserved — an empty string inside an array stays as `""` because the
+ * scalar-vs-container distinction is made against the container it belongs
+ * to, not the element itself.
  */
 export function stripEmptyStrings(
   value: unknown
 ): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (Array.isArray(value)) {
+    return value.map(stripEmptyStrings);
+  }
+  if (value === null || typeof value !== "object") {
     return value;
   }
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     if (v === "") continue;
-    out[k] = v;
+    out[k] = stripEmptyStrings(v);
   }
   return out;
 }

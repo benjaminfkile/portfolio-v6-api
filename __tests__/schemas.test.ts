@@ -11,6 +11,7 @@ import {
   postRefSchema,
   DRAFT_ITEM_SCHEMAS,
   heroData,
+  heroBackground,
   statusData,
   blogData,
   nowPlayingData,
@@ -31,6 +32,7 @@ import {
   draftPageSchema,
   RESERVED_PAGE_SLUGS,
 } from "../src/schemas";
+import { stripEmptyStrings } from "../src/utils/draftData";
 
 describe("Link schema (§3.4) — protocol allowlist", () => {
   it("accepts http and https URLs with a required label", () => {
@@ -583,6 +585,158 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(
       DRAFT_SECTION_DATA_SCHEMAS.hero.safeParse({ tagline: "just a tagline" }).success
     ).toBe(true);
+  });
+
+  it("hero — optional strict `background` presentation controls, defaults absent, ranges enforced, unknown key rejected", () => {
+    // Absent: an existing hero with only background_media_id keeps its shape
+    // (no `background` key is inserted, no defaults materialised).
+    const bare = heroData.safeParse({
+      title: "Ben",
+      background_media_id: "11111111-1111-1111-1111-111111111111",
+    });
+    expect(bare.success).toBe(true);
+    if (bare.success) {
+      expect("background" in bare.data).toBe(false);
+    }
+
+    // Every key can be provided at once and each one survives the round trip.
+    const full = heroBackground.safeParse({
+      opacity_dark: 0.2,
+      opacity_light: 0.08,
+      object_fit: "contain",
+      object_position: "50% 30%",
+      blur_px: 12,
+      grayscale: 0.5,
+      brightness: 1.1,
+      contrast: 0.9,
+      saturate: 1.2,
+      scale: 1.25,
+      overlay_dark: 0.3,
+      overlay_light: 0.1,
+    });
+    expect(full.success).toBe(true);
+
+    // A `background` sub-object nested in the hero also passes end-to-end.
+    expect(
+      heroData.safeParse({
+        background: { opacity_dark: 0.15, object_fit: "cover" },
+      }).success
+    ).toBe(true);
+
+    // Range boundaries — each min/max endpoint on each numeric key is inclusive,
+    // just past either endpoint is rejected.
+    expect(heroBackground.safeParse({ opacity_dark: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ opacity_dark: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ opacity_dark: -0.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ opacity_dark: 1.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ opacity_light: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ opacity_light: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ opacity_light: 1.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ blur_px: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ blur_px: 40 }).success).toBe(true);
+    expect(heroBackground.safeParse({ blur_px: 40.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ blur_px: -1 }).success).toBe(false);
+    expect(heroBackground.safeParse({ grayscale: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ grayscale: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ grayscale: 1.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ brightness: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ brightness: 2 }).success).toBe(true);
+    expect(heroBackground.safeParse({ brightness: 2.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ contrast: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ contrast: 2 }).success).toBe(true);
+    expect(heroBackground.safeParse({ contrast: 2.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ saturate: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ saturate: 2 }).success).toBe(true);
+    expect(heroBackground.safeParse({ saturate: 2.01 }).success).toBe(false);
+    // `scale` starts at 1 (a hero image never shrinks below its natural size).
+    expect(heroBackground.safeParse({ scale: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ scale: 2 }).success).toBe(true);
+    expect(heroBackground.safeParse({ scale: 0.99 }).success).toBe(false);
+    expect(heroBackground.safeParse({ scale: 2.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ overlay_dark: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ overlay_dark: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ overlay_dark: 1.01 }).success).toBe(false);
+    expect(heroBackground.safeParse({ overlay_light: 0 }).success).toBe(true);
+    expect(heroBackground.safeParse({ overlay_light: 1 }).success).toBe(true);
+    expect(heroBackground.safeParse({ overlay_light: 1.01 }).success).toBe(false);
+
+    // object_fit is an enum — anything else is rejected.
+    for (const fit of ["cover", "contain", "fill", "none", "scale-down"]) {
+      expect(heroBackground.safeParse({ object_fit: fit }).success).toBe(true);
+    }
+    expect(heroBackground.safeParse({ object_fit: "stretch" }).success).toBe(false);
+
+    // object_position — CSS-like short strings pass; typical variants and
+    // percentages included. Longer than 40 chars, or containing a disallowed
+    // char, is rejected.
+    for (const pos of [
+      "50% 50%",
+      "50% 30%",
+      "center top",
+      "top",
+      "0% 0%",
+      "100% 100%",
+      "-10% 50%",
+    ]) {
+      expect(heroBackground.safeParse({ object_position: pos }).success).toBe(true);
+    }
+    // Length cap.
+    expect(
+      heroBackground.safeParse({ object_position: "a".repeat(41) }).success
+    ).toBe(false);
+    // Disallowed characters (angle brackets, quotes, slash, comma) are rejected.
+    expect(heroBackground.safeParse({ object_position: "50%,30%" }).success).toBe(
+      false
+    );
+    expect(
+      heroBackground.safeParse({ object_position: "<script>" }).success
+    ).toBe(false);
+    expect(heroBackground.safeParse({ object_position: "50% 30% /" }).success).toBe(
+      false
+    );
+
+    // Unknown keys inside `background` are rejected (strict). Both a nested
+    // typo AND an unknown key on the hero itself must 400.
+    expect(
+      heroBackground.safeParse({ opacity_darkk: 0.2 }).success
+    ).toBe(false);
+    expect(
+      heroData.safeParse({ background: { totally_unknown: 1 } }).success
+    ).toBe(false);
+
+    // Draft-lenient path: partial() keeps the whole thing optional and the
+    // strip-empty-strings helper flattens cleared fields inside `background`
+    // to absent so a form clearing `object_position` to `""` still validates.
+    expect(
+      DRAFT_SECTION_DATA_SCHEMAS.hero.safeParse({ background: {} }).success
+    ).toBe(true);
+    const cleared = stripEmptyStrings({
+      background: {
+        opacity_dark: 0.1,
+        object_position: "",
+      },
+    }) as Record<string, unknown>;
+    const parsedCleared = DRAFT_SECTION_DATA_SCHEMAS.hero.safeParse(cleared);
+    expect(parsedCleared.success).toBe(true);
+    if (parsedCleared.success) {
+      const bg = (parsedCleared.data as { background?: Record<string, unknown> })
+        .background;
+      expect(bg).toBeDefined();
+      expect("object_position" in (bg ?? {})).toBe(false);
+      expect(bg!.opacity_dark).toBe(0.1);
+    }
+
+    // Numbers-as-strings are tolerated via z.coerce.number() — the admin sends
+    // numbers as numbers, but a lenient form that stringified them still parses.
+    const coerced = heroBackground.safeParse({
+      opacity_dark: "0.25",
+      blur_px: "8",
+    });
+    expect(coerced.success).toBe(true);
+    if (coerced.success) {
+      expect(coerced.data.opacity_dark).toBe(0.25);
+      expect(coerced.data.blur_px).toBe(8);
+    }
   });
 
   it("no section type has a required heading/title/eyebrow (task #106)", () => {

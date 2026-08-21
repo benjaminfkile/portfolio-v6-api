@@ -31,7 +31,50 @@ export type SectionType = (typeof SECTION_TYPES)[number];
 // Static content sections -------------------------------------------------
 
 /**
- * §3.8 — retained as a static section: title, tagline, optional background.
+ * Hero background media presentation controls. Every key is optional; when
+ * absent the site renderer applies its own default (documented alongside each
+ * field on the hero background docs) so an existing hero with only
+ * `background_media_id` keeps looking exactly as it did before this shape
+ * landed. Numbers are `z.coerce.number()` so numeric-string values from a
+ * lenient admin form still parse, while the draft path strips `""` first so a
+ * cleared field becomes absent (not `0`) via `stripEmptyStrings`. `.strict()`
+ * rejects unknown keys so a typo cannot silently persist.
+ *
+ * `object_position` is a free CSS `object-position` string (e.g. `50% 30%`,
+ * `center top`); capped at 40 chars and constrained to a small character set
+ * that covers every keyword and percentage/length form without allowing an
+ * XSS-shaped value into inline styles.
+ */
+const OBJECT_POSITION_REGEX = /^[a-zA-Z0-9 %.-]{1,40}$/;
+
+export const heroBackground = z
+  .object({
+    opacity_dark: z.coerce.number().min(0).max(1).optional(),
+    opacity_light: z.coerce.number().min(0).max(1).optional(),
+    object_fit: z
+      .enum(["cover", "contain", "fill", "none", "scale-down"])
+      .optional(),
+    object_position: z
+      .string()
+      .max(40)
+      .regex(OBJECT_POSITION_REGEX)
+      .optional(),
+    blur_px: z.coerce.number().min(0).max(40).optional(),
+    grayscale: z.coerce.number().min(0).max(1).optional(),
+    brightness: z.coerce.number().min(0).max(2).optional(),
+    contrast: z.coerce.number().min(0).max(2).optional(),
+    saturate: z.coerce.number().min(0).max(2).optional(),
+    scale: z.coerce.number().min(1).max(2).optional(),
+    overlay_dark: z.coerce.number().min(0).max(1).optional(),
+    overlay_light: z.coerce.number().min(0).max(1).optional(),
+  })
+  .strict();
+
+export type HeroBackground = z.infer<typeof heroBackground>;
+
+/**
+ * §3.8 — retained as a static section: title, tagline, optional background
+ * media reference plus the optional `background` presentation controls above.
  *
  * Product rule (task #106): NO section requires a heading. `title` here is the
  * hero's header-copy field, so it is `.optional()` — a hero with no title is a
@@ -44,6 +87,7 @@ export const heroData = z
     title: z.string().min(1).optional(),
     tagline: z.string().optional(),
     background_media_id: z.string().uuid().optional(),
+    background: heroBackground.optional(),
   })
   .strict();
 
