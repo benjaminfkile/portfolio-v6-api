@@ -34,7 +34,7 @@ import {
 } from "../src/schemas";
 import { stripEmptyStrings } from "../src/utils/draftData";
 
-describe("Link schema (§3.4) — protocol allowlist", () => {
+describe("Link schema (§3.4), protocol allowlist", () => {
   it("accepts http and https URLs with a required label", () => {
     expect(
       linkSchema.safeParse({
@@ -100,7 +100,7 @@ describe("Link schema (§3.4) — protocol allowlist", () => {
     ).toBe(true);
   });
 
-  it("rejects a bare email address (no scheme) — must be a real URL", () => {
+  it("rejects a bare email address (no scheme), must be a real URL", () => {
     expect(
       linkSchema.safeParse({
         type: "other",
@@ -261,10 +261,10 @@ describe("code block language allowlist (§3.7 pass-through)", () => {
 });
 
 describe("section item schemas (§3.4 table)", () => {
-  it("timeline item — valid and invalid", () => {
+  it("timeline item, valid and invalid", () => {
     expect(
       timelineItemSchema.safeParse({
-        date_range: "2020–2022",
+        date_range: "2020-2022",
         title: "Role",
         description: "did things",
       }).success
@@ -278,7 +278,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("timeline item — media_id was removed; the strict schema rejects it (create + PATCH)", () => {
+  it("timeline item, media_id was removed; the strict schema rejects it (create + PATCH)", () => {
     // Timeline entries no longer carry an image. The canonical strict schema
     // rejects an unknown `media_id` key with a validation error…
     const create = timelineItemSchema.safeParse({
@@ -297,7 +297,7 @@ describe("section item schemas (§3.4 table)", () => {
     expect(patch.success).toBe(false);
   });
 
-  it("skills item — valid without proficiency; rejects a leftover proficiency key (strict, v1.5)", () => {
+  it("skills item, valid without proficiency; rejects a leftover proficiency key (strict, v1.5)", () => {
     expect(
       skillsItemSchema.safeParse({
         title: "TypeScript",
@@ -305,7 +305,7 @@ describe("section item schemas (§3.4 table)", () => {
         icon_source: "devicon:typescript",
       }).success
     ).toBe(true);
-    // proficiency was removed from the product — a strict schema rejects it.
+    // proficiency was removed from the product, a strict schema rejects it.
     expect(
       skillsItemSchema.safeParse({
         title: "TypeScript",
@@ -323,7 +323,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("skills item — optional icon_source_dark; absent round-trips as absent (v1.6)", () => {
+  it("skills item, optional icon_source_dark; absent round-trips as absent (v1.6)", () => {
     // A dark-theme override is accepted alongside the required light icon.
     const withDark = skillsItemSchema.safeParse({
       title: "TypeScript",
@@ -335,7 +335,7 @@ describe("section item schemas (§3.4 table)", () => {
       expect(withDark.data.icon_source_dark).toBe("https://cdn/ts-plain.svg");
     }
 
-    // Absent is valid and must NOT materialize a key — renderers fall back to
+    // Absent is valid and must NOT materialize a key, renderers fall back to
     // icon_source only when the override is truly absent.
     const noDark = skillsItemSchema.safeParse({
       title: "TypeScript",
@@ -357,7 +357,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("portfolio item — valid with links, rejects bad media_id and js link", () => {
+  it("portfolio item, valid with links, rejects bad media_id and js link", () => {
     expect(
       portfolioItemSchema.safeParse({
         title: "Project",
@@ -395,7 +395,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("portfolio item — skill_refs must be uuids (§Skill Refs v1.8)", () => {
+  it("portfolio item, skill_refs must be uuids (§Skill Refs v1.8)", () => {
     // A well-formed uuid array is accepted.
     expect(
       portfolioItemSchema.safeParse({
@@ -421,7 +421,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("portfolio item — legacy tech_icons is rejected by the strict canonical schema", () => {
+  it("portfolio item, legacy tech_icons is rejected by the strict canonical schema", () => {
     // The field was REPLACED by skill_refs; the strict schema now treats
     // tech_icons as an unknown key. Present-tech_icons (even alongside a valid
     // skill_refs) fails, and an item missing skill_refs fails too.
@@ -461,7 +461,7 @@ describe("section item schemas (§3.4 table)", () => {
   const PID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
   const PID_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
-  it("portfolio item — post_refs is an optional ordered uuid array (§Post Refs v1.14)", () => {
+  it("portfolio item, post_refs is an optional ordered uuid array (§Post Refs v1.14)", () => {
     // Absent is fine (optional).
     expect(portfolioItemSchema.safeParse(PORTFOLIO_BASE).success).toBe(true);
     // An empty array is fine.
@@ -477,7 +477,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(true);
   });
 
-  it("portfolio item — post_refs rejects non-uuids, >12 entries, and duplicates", () => {
+  it("portfolio item, post_refs rejects non-uuids, >12 entries, and duplicates", () => {
     // Non-uuid entry rejected.
     expect(
       portfolioItemSchema.safeParse({
@@ -503,7 +503,7 @@ describe("section item schemas (§3.4 table)", () => {
     ).toBe(false);
   });
 
-  it("draft-lenient portfolio — post_refs stays permissive (array of strings)", () => {
+  it("draft-lenient portfolio, post_refs stays permissive (array of strings)", () => {
     const draft = DRAFT_ITEM_SCHEMAS.portfolio;
     // A not-yet-valid id string is accepted in a draft (publish re-parses).
     expect(draft.safeParse({ post_refs: ["draft-id", "another"] }).success).toBe(
@@ -515,7 +515,7 @@ describe("section item schemas (§3.4 table)", () => {
     expect(draft.safeParse({}).success).toBe(true);
   });
 
-  it("postRefSchema — resolved read shape {id, slug, title, blog}", () => {
+  it("postRefSchema, resolved read shape {id, slug, title, blog}", () => {
     // With an owning blog.
     expect(
       postRefSchema.safeParse({
@@ -556,15 +556,15 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     );
   });
 
-  it("hero — title is optional (task #106): absent validates, present-but-empty is still rejected", () => {
-    // Present and non-empty — the classic case still works.
+  it("hero, title is optional (task #106): absent validates, present-but-empty is still rejected", () => {
+    // Present and non-empty, the classic case still works.
     expect(heroData.safeParse({ title: "Ben", tagline: "builder" }).success).toBe(
       true
     );
 
     // NO section requires a heading (product rule, task #106). A hero with no
     // title validates on the CANONICAL (publish) schema and simply renders
-    // without one — including a hero with only a tagline, and a fully empty hero.
+    // without one, including a hero with only a tagline, and a fully empty hero.
     const noTitle = heroData.safeParse({ tagline: "no title" });
     expect(noTitle.success).toBe(true);
     if (noTitle.success) {
@@ -572,7 +572,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     }
     expect(heroData.safeParse({}).success).toBe(true);
 
-    // "Absent is how you omit" — an explicit empty string is still rejected by
+    // "Absent is how you omit", an explicit empty string is still rejected by
     // the retained `.min(1)`. The admin write path strips `""` before
     // validation (draftData.stripEmptyStrings), so the empty-string case never
     // reaches the canonical schema in practice.
@@ -587,7 +587,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     ).toBe(true);
   });
 
-  it("hero — optional strict `background` presentation controls, defaults absent, ranges enforced, unknown key rejected", () => {
+  it("hero, optional strict `background` presentation controls, defaults absent, ranges enforced, unknown key rejected", () => {
     // Absent: an existing hero with only background_media_id keeps its shape
     // (no `background` key is inserted, no defaults materialised).
     const bare = heroData.safeParse({
@@ -623,7 +623,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
       }).success
     ).toBe(true);
 
-    // Range boundaries — each min/max endpoint on each numeric key is inclusive,
+    // Range boundaries, each min/max endpoint on each numeric key is inclusive,
     // just past either endpoint is rejected.
     expect(heroBackground.safeParse({ opacity_dark: 0 }).success).toBe(true);
     expect(heroBackground.safeParse({ opacity_dark: 1 }).success).toBe(true);
@@ -660,13 +660,13 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(heroBackground.safeParse({ overlay_light: 1 }).success).toBe(true);
     expect(heroBackground.safeParse({ overlay_light: 1.01 }).success).toBe(false);
 
-    // object_fit is an enum — anything else is rejected.
+    // object_fit is an enum, anything else is rejected.
     for (const fit of ["cover", "contain", "fill", "none", "scale-down"]) {
       expect(heroBackground.safeParse({ object_fit: fit }).success).toBe(true);
     }
     expect(heroBackground.safeParse({ object_fit: "stretch" }).success).toBe(false);
 
-    // object_position — CSS-like short strings pass; typical variants and
+    // object_position, CSS-like short strings pass; typical variants and
     // percentages included. Longer than 40 chars, or containing a disallowed
     // char, is rejected.
     for (const pos of [
@@ -726,7 +726,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
       expect(bg!.opacity_dark).toBe(0.1);
     }
 
-    // Numbers-as-strings are tolerated via z.coerce.number() — the admin sends
+    // Numbers-as-strings are tolerated via z.coerce.number(), the admin sends
     // numbers as numbers, but a lenient form that stringified them still parses.
     const coerced = heroBackground.safeParse({
       opacity_dark: "0.25",
@@ -747,7 +747,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     // where the admin has intentionally left the header copy blank.
     const HEADER_COPY_KEYS = ["heading", "title", "eyebrow"] as const;
 
-    // A minimal, structurally-complete payload for each section type — the
+    // A minimal, structurally-complete payload for each section type, the
     // config/structural fields their schema requires, and NOTHING else. If a
     // header-copy field is anywhere in here, that's a bug in the fixture.
     const structuralOnly: Record<string, Record<string, unknown>> = {
@@ -783,7 +783,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     }
   });
 
-  it("status — services list, optional response times", () => {
+  it("status, services list, optional response times", () => {
     expect(
       statusData.safeParse({
         services: ["gateway", "portfolio-v6-api"],
@@ -795,12 +795,12 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     );
   });
 
-  it("blog — positive integer limit", () => {
+  it("blog, positive integer limit", () => {
     expect(blogData.safeParse({ limit: 5, tag: "eng" }).success).toBe(true);
     expect(blogData.safeParse({ limit: 0 }).success).toBe(false);
   });
 
-  it("blog — optional `blog` slug accepts any string (Blogs v1.13)", () => {
+  it("blog, optional `blog` slug accepts any string (Blogs v1.13)", () => {
     // Draft-lenient / publish schema takes a plain string here; the existence
     // check is a publish-time concern, not a schema one.
     expect(blogData.safeParse({ limit: 5, blog: "code" }).success).toBe(true);
@@ -808,7 +808,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(blogData.safeParse({ limit: 5, blog: 42 }).success).toBe(false);
   });
 
-  it("blog — mode accepts 'teaser'/'index', rejects other values, defaults to 'teaser' (task #101)", () => {
+  it("blog, mode accepts 'teaser'/'index', rejects other values, defaults to 'teaser' (task #101)", () => {
     // Both modes validate.
     expect(blogData.safeParse({ mode: "teaser", limit: 5 }).success).toBe(true);
     expect(blogData.safeParse({ mode: "index" }).success).toBe(true);
@@ -820,7 +820,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(blogData.safeParse({ mode: 1, limit: 5 }).success).toBe(false);
 
     // Omitting mode validates and, on the canonical (publish) schema, reads as
-    // 'teaser' — every section stored before this task (no `mode` key) is
+    // 'teaser', every section stored before this task (no `mode` key) is
     // untouched.
     const noMode = blogData.safeParse({ limit: 5 });
     expect(noMode.success).toBe(true);
@@ -838,7 +838,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     ).toBe(false);
   });
 
-  it("blog — optional `page_size` is a positive int; unknown keys rejected (task #101)", () => {
+  it("blog, optional `page_size` is a positive int; unknown keys rejected (task #101)", () => {
     expect(blogData.safeParse({ mode: "index", page_size: 10 }).success).toBe(true);
     expect(blogData.safeParse({ mode: "index", page_size: 0 }).success).toBe(false);
     expect(blogData.safeParse({ mode: "index", page_size: -1 }).success).toBe(false);
@@ -847,7 +847,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(blogData.safeParse({ mode: "index", nope: true }).success).toBe(false);
   });
 
-  it("now_playing — idle enum only hide|message", () => {
+  it("now_playing, idle enum only hide|message", () => {
     expect(nowPlayingData.safeParse({ idle: "hide" }).success).toBe(true);
     expect(
       nowPlayingData.safeParse({ idle: "message", idle_message: "away" }).success
@@ -855,7 +855,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(nowPlayingData.safeParse({ idle: "explode" }).success).toBe(false);
   });
 
-  it("skills — optional integer sphere_detail 0–4, round-trips absent as absent (v1.5)", () => {
+  it("skills, optional integer sphere_detail 0-4, round-trips absent as absent (v1.5)", () => {
     // Heading/intro only (no sphere_detail) is valid, and the parsed value has
     // no sphere_detail key: absent must round-trip as absent (AUTO), not a
     // defaulted number.
@@ -878,11 +878,11 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(skillsData.safeParse({ sphere_detail: -1 }).success).toBe(false);
     expect(skillsData.safeParse({ sphere_detail: 2.5 }).success).toBe(false);
 
-    // proficiency is gone from the section data too — unknown keys rejected.
+    // proficiency is gone from the section data too, unknown keys rejected.
     expect(skillsData.safeParse({ proficiency: 50 }).success).toBe(false);
   });
 
-  it("duolingo/github/ops — optional intro accepted, round-tripped, strict otherwise (v1.6b)", () => {
+  it("duolingo/github/ops, optional intro accepted, round-tripped, strict otherwise (v1.6b)", () => {
     // Each live-section schema now accepts an optional `intro` (lead-in prose
     // rendered under the heading as a <p>). It round-trips exactly, is valid
     // when absent, and unknown keys are still rejected via .strict().
@@ -901,7 +901,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(gh.success).toBe(true);
     if (gh.success) expect(gh.data.intro).toBe("A year of commits.");
 
-    // v1.10: the section is browsable via the year picker — `weeks` is removed.
+    // v1.10: the section is browsable via the year picker, `weeks` is removed.
     expect(githubData.safeParse({ weeks: 52 }).success).toBe(false);
 
     const ops = opsData.safeParse({
@@ -911,7 +911,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(ops.success).toBe(true);
     if (ops.success) expect(ops.data.intro).toBe("Live infrastructure metrics.");
 
-    // v1.7: the lookback is no longer configurable — `window_hours` is rejected.
+    // v1.7: the lookback is no longer configurable, `window_hours` is rejected.
     expect(opsData.safeParse({ window_hours: 3 }).success).toBe(false);
 
     // Absent intro round-trips as absent (not defaulted to a string).
@@ -930,7 +930,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(opsData.safeParse({ bogus: true }).success).toBe(false);
   });
 
-  it("resume (task #92) — heading/intro only, NO items, strict on unknown keys", () => {
+  it("resume (task #92), heading/intro only, NO items, strict on unknown keys", () => {
     // Registry membership: the section type is real and has both canonical and
     // draft-lenient data schemas backing it.
     expect(SECTION_TYPES).toContain("resume");
@@ -938,7 +938,7 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     expect(DRAFT_SECTION_DATA_SCHEMAS.resume).toBeDefined();
 
     // Empty object is valid (heading/intro both optional). Absent must round-trip
-    // as absent — not defaulted to a string.
+    // as absent, not defaulted to a string.
     const empty = resumeData.safeParse({});
     expect(empty.success).toBe(true);
     if (empty.success) {
@@ -958,14 +958,14 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
     }
 
     // The resume section has no items (task #92): no `items` field on data,
-    // and no item schema is expected for this section type — unknown keys are
+    // and no item schema is expected for this section type, unknown keys are
     // rejected by .strict().
     expect(resumeData.safeParse({ items: [{}] }).success).toBe(false);
     expect(resumeData.safeParse({ bogus: true }).success).toBe(false);
     expect(resumeData.safeParse({ heading: 42 }).success).toBe(false);
   });
 
-  it("contact — optional links honour the protocol allowlist", () => {
+  it("contact, optional links honour the protocol allowlist", () => {
     expect(
       contactData.safeParse({
         heading: "Contact",
@@ -1040,7 +1040,7 @@ describe("page schema (§3.10)", () => {
     }
     // `home` is special, NOT reserved.
     expect(pageSlugSchema.safeParse("home").success).toBe(true);
-    // `blog` is NOT reserved as of task #101 — the blog index now lives inside
+    // `blog` is NOT reserved as of task #101, the blog index now lives inside
     // a normal admin-composed page whose slug is `blog`.
     expect(pageSlugSchema.safeParse("blog").success).toBe(true);
   });
@@ -1098,7 +1098,7 @@ describe("page schema (§3.10)", () => {
     // A fresh, incomplete draft passes.
     expect(draftPageSchema.safeParse({}).success).toBe(true);
     expect(draftPageSchema.safeParse({ title: "WIP" }).success).toBe(true);
-    // But a provided field is still validated — a bad slug is rejected even in
+    // But a provided field is still validated, a bad slug is rejected even in
     // a draft, and unknown keys are still rejected.
     expect(draftPageSchema.safeParse({ slug: "Bad Slug" }).success).toBe(false);
     expect(draftPageSchema.safeParse({ slug: "admin" }).success).toBe(false);

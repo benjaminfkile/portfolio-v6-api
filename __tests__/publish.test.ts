@@ -6,14 +6,14 @@ import express, { Express } from "express";
 import request from "supertest";
 
 /**
- * Publish pipeline integration tests — TECH_SPEC_V1.md §3.3, §4.1, §4.2, §6.8
+ * Publish pipeline integration tests, TECH_SPEC_V1.md §3.3, §4.1, §4.2, §6.8
  * (task #439 DoD). Exercises the real routers + services against a throwaway
  * Postgres 15 cluster (unix-socket-only, under /tmp, per agent-pre-checks.md).
  *
  * No AWS is touched: the Cognito verifier is mocked so `requireAdmin` passes with
  * a bearer token, and CDN resolution is exercised through the configured
  * `cdn_domain` secret (no S3/CloudFront call is made). The `pg` client is given
- * an explicit `user` because — unlike psql — it does not infer the OS user.
+ * an explicit `user` because, unlike psql, it does not infer the OS user.
  *
  * Covered: publish → content → 304 flow, empty-state 200, validation refusal,
  * restore rebuilds the working set, and prune-at-50 behavior.
@@ -196,7 +196,7 @@ async function insertMedia(id: string, s3Key: string) {
 
 // ---- empty state (§4.1) ----------------------------------------------------
 
-describe("GET /api/content — empty state (§4.1)", () => {
+describe("GET /api/content, empty state (§4.1)", () => {
   it("returns 200 with an empty pages array when nothing was ever published", async () => {
     const res = await request(app).get("/api/content");
     expect(res.status).toBe(200);
@@ -323,7 +323,7 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
     await createSection({ type: "hero", data: { title: "Home" } });
     await createSection({
       type: "github",
-      // v1.10: the section is browsable via the year picker — config is header
+      // v1.10: the section is browsable via the year picker, config is header
       // copy only; the removed `weeks` key is no longer accepted.
       data: { heading: "Contributions", intro: "A year of commits." },
     });
@@ -370,7 +370,7 @@ describe("publish → content → 304 flow (§3.3 / §4.1 / §6.8)", () => {
 
 // ---- timeline items no longer contribute media refs (§3.4 v1.17) ----------
 
-describe("publish media-ref collection — timeline items", () => {
+describe("publish media-ref collection, timeline items", () => {
   it("publishes a timeline item AND a hero (with a background_media_id), and the resolved media map contains ONLY the hero's media", async () => {
     // A rehearsal of what a page carrying a timeline section looks like now:
     // the timeline items are the {date_range, title, description} shape only;
@@ -385,7 +385,7 @@ describe("publish media-ref collection — timeline items", () => {
     });
     const timeline = (await createSection({ type: "timeline", data: {} })).body.data;
     await createItem(timeline.id, {
-      date_range: "2020–2022",
+      date_range: "2020-2022",
       title: "Role",
       description: "did things",
     });
@@ -395,7 +395,7 @@ describe("publish media-ref collection — timeline items", () => {
 
     const content = await request(app).get("/api/content");
     // The published document resolves the hero's media, and the media map
-    // holds exactly one entry — proof that the collector does not sweep in a
+    // holds exactly one entry, proof that the collector does not sweep in a
     // timeline reference (there is none to sweep now that the field is gone).
     expect(Object.keys(content.body.media)).toEqual([HERO_MEDIA]);
   });
@@ -405,13 +405,13 @@ describe("publish media-ref collection — timeline items", () => {
     // items whose `data` no longer carries `media_id`. Publish must accept the
     // new canonical shape without complaint.
     const timeline = (await createSection({ type: "timeline", data: {} })).body.data;
-    // Insert directly — mirroring a post-migration row — with the tightened
+    // Insert directly, mirroring a post-migration row, with the tightened
     // {date_range, title, description} shape and nothing else.
     await getDb()("section_items").insert({
       section_id: timeline.id,
       position: 0,
       data: {
-        date_range: "2020–2022",
+        date_range: "2020-2022",
         title: "Role",
         description: "did things",
       },
@@ -429,7 +429,7 @@ describe("publish media-ref collection — timeline items", () => {
     );
     expect(tl.items).toHaveLength(1);
     expect(tl.items[0].data).toEqual({
-      date_range: "2020–2022",
+      date_range: "2020-2022",
       title: "Role",
       description: "did things",
     });
@@ -444,7 +444,7 @@ describe("publish validation refusal (§3.9)", () => {
     // Create a valid hero, then corrupt its data directly in the DB so the row
     // is invalid at publish time (the write path would have rejected it). Task
     // #106 made heading/title/eyebrow optional on every section type, so a
-    // missing title is NOT a validity failure any more — we corrupt with a
+    // missing title is NOT a validity failure any more, we corrupt with a
     // wrong-typed field (title as a number, which the canonical strict schema
     // still rejects on the retained `.min(1)` string constraint) to keep this
     // testing publish-time content validation rather than the header rule.
@@ -462,7 +462,7 @@ describe("publish validation refusal (§3.9)", () => {
     expect(Number(count[0].count)).toBe(0);
   });
 
-  it("publishes a hero with a nested `background` presentation object — every provided key survives into the served document", async () => {
+  it("publishes a hero with a nested `background` presentation object, every provided key survives into the served document", async () => {
     // A hero carrying the new `background` object (task Hero background
     // settings). The publish path must NOT whitelist hero keys in a way that
     // drops it; the served document must expose every provided key, unchanged
@@ -516,7 +516,7 @@ describe("publish validation refusal (§3.9)", () => {
       overlay_light: 0.1,
     });
 
-    // A partial `background` (only two keys) also survives — absent keys stay
+    // A partial `background` (only two keys) also survives, absent keys stay
     // absent, no defaults are materialised into the stored/served document.
     const heroPartial = (
       await createSection({
@@ -541,7 +541,7 @@ describe("publish validation refusal (§3.9)", () => {
     });
   });
 
-  it("publishes a hero with no title AND an about with no heading — NO section requires a heading (task #106)", async () => {
+  it("publishes a hero with no title AND an about with no heading, NO section requires a heading (task #106)", async () => {
     // Product rule: NOTHING should require a heading. A hero with no title and
     // an about with no heading are both valid content and must publish through
     // to the served document, where they simply render without a header. The
@@ -568,7 +568,7 @@ describe("publish validation refusal (§3.9)", () => {
     const about = sections.find((s) => s.id === aboutNoHeading.id);
     expect(hero).toBeDefined();
     expect(about).toBeDefined();
-    // The header-copy keys are ABSENT (not defaulted to a string) — round-trips
+    // The header-copy keys are ABSENT (not defaulted to a string), round-trips
     // as absent through the whole publish → snapshot → read pipeline.
     expect(hero!.data).not.toHaveProperty("title");
     expect(hero!.data.tagline).toBe("just a tagline");
@@ -700,7 +700,7 @@ describe("publish skill_refs validation (§Skill Refs v1.8)", () => {
 
 // ---- post_refs publish validation + read resolution (§Post Refs v1.14) -----
 
-describe("Post Refs v1.14 — publish validation + read resolution", () => {
+describe("Post Refs v1.14, publish validation + read resolution", () => {
   const PORTFOLIO_MEDIA = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
   /** Insert a blog row directly; returns its id. */
@@ -781,13 +781,13 @@ describe("Post Refs v1.14 — publish validation + read resolution", () => {
     );
     // The raw id-based refs are retained in the document.
     expect(portfolio.items[0].data.post_refs).toEqual([unpublishedId]);
-    // The resolved `posts` array is empty — the ref points at an unpublished post.
+    // The resolved `posts` array is empty, the ref points at an unpublished post.
     expect(portfolio.items[0].data.posts).toEqual([]);
   });
 
   it("resolves published post_refs at read: order preserved, unpublished omitted, blog included", async () => {
     const blogId = await insertBlog("code", "Code");
-    // Author order: A (published, blog), B (unpublished — will be omitted),
+    // Author order: A (published, blog), B (unpublished, will be omitted),
     // C (published, no blog).
     const idA = await insertPost({
       slug: "alpha",
@@ -823,7 +823,7 @@ describe("Post Refs v1.14 — publish validation + read resolution", () => {
     ]);
   });
 
-  it("resolution follows the LIVE post lifecycle — unpublishing a post drops it at read without republishing the site", async () => {
+  it("resolution follows the LIVE post lifecycle, unpublishing a post drops it at read without republishing the site", async () => {
     const idA = await insertPost({ slug: "alpha", title: "Alpha", published: true });
     await makePortfolioItem([idA], "Live Lifecycle");
 
@@ -837,7 +837,7 @@ describe("Post Refs v1.14 — publish validation + read resolution", () => {
     );
     expect(portfolio.items[0].data.posts).toHaveLength(1);
 
-    // Unpublish the post directly (no site republish) — read now omits it.
+    // Unpublish the post directly (no site republish), read now omits it.
     await getDb()("posts").where({ id: idA }).update({ published_at: null });
     content = await request(app).get("/api/content");
     portfolio = content.body.pages[0].sections.find(
@@ -874,7 +874,7 @@ describe("Post Refs v1.14 — publish validation + read resolution", () => {
 
 describe("publish pages validation (§3.10)", () => {
   it("refuses to publish when no page has slug 'home' (400)", async () => {
-    // A single non-home page with a valid section — still unpublishable: a site
+    // A single non-home page with a valid section, still unpublishable: a site
     // with no home page cannot be published (§3.10).
     const about = (await createPage({ slug: "about", title: "About" })).body.data;
     await createSection({ type: "hero", data: { title: "x" }, page_id: about.id });
@@ -889,7 +889,7 @@ describe("publish pages validation (§3.10)", () => {
   });
 
   it("refuses to publish when there is no non-hidden page (400)", async () => {
-    // The only page is `home`, but it is hidden — zero non-hidden pages, so the
+    // The only page is `home`, but it is hidden, zero non-hidden pages, so the
     // published document would be empty. Refuse (§3.10).
     const home = (
       await createPage({ slug: "home", title: "Home", nav_label: "Home" })
@@ -1102,7 +1102,7 @@ describe("restore (§4.2)", () => {
     expect(ws[0].position).toBe(0);
 
     // A publish immediately after restore snapshots the restored working set,
-    // not the discarded draft — proving the rebuild is authoritative.
+    // not the discarded draft, proving the rebuild is authoritative.
     const v4 = await request(app).post("/api/admin/publish").set(...AUTH).send({});
     expect(v4.body.data.version).toBe(4);
     expect(v4.body.data.document.pages).toHaveLength(1);
@@ -1146,7 +1146,7 @@ describe("versions & prune-at-50 (§3.3 / §4.2)", () => {
       .select("version")
       .orderBy("version", "asc");
     expect(rows).toHaveLength(50);
-    // The oldest surviving version is 6 (versions 1–5 pruned), newest is 55.
+    // The oldest surviving version is 6 (versions 1-5 pruned), newest is 55.
     expect(rows[0].version).toBe(6);
     expect(rows[rows.length - 1].version).toBe(55);
   });
@@ -1154,7 +1154,7 @@ describe("versions & prune-at-50 (§3.3 / §4.2)", () => {
 
 // ---- draft preview (§4.2 †, §7) --------------------------------------------
 
-describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
+describe("GET /api/admin/preview, draft serialization (§4.2 / §7)", () => {
   it("serializes the draft in exactly the /api/content shape", async () => {
     const MEDIA_ID = "22222222-2222-2222-2222-222222222222";
     await insertMedia(MEDIA_ID, "media/draft.webp");
@@ -1163,7 +1163,7 @@ describe("GET /api/admin/preview — draft serialization (§4.2 / §7)", () => {
       data: { title: "Draft", background_media_id: MEDIA_ID },
     });
 
-    // Nothing published yet — preview still serves the draft.
+    // Nothing published yet, preview still serves the draft.
     const preview = await request(app).get("/api/admin/preview").set(...AUTH);
     expect(preview.status).toBe(200);
     const draft = preview.body;

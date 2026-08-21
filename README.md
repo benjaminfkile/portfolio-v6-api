@@ -1,6 +1,6 @@
 # portfolio-v6-api
 
-Express + TypeScript API for **Portfolio v6** — serves published content to the public
+Express + TypeScript API for **Portfolio v6**, serves published content to the public
 site (`portfolio-v6`) and the full editing surface to the admin (`portfolio-v6-admin`).
 Postgres via Knex, media on S3 behind a CDN, deployed as a Docker container behind the
 gateway. The authoritative content-model spec is `TECH_SPEC_V1.md` in the `portfolio-v6`
@@ -15,35 +15,35 @@ Four classes of route guard:
 
 | Guard | Accepts | Notes |
 |---|---|---|
-| none | — | Public reads + `POST /api/beacon`. |
-| `requireAdmin()` | Cognito **ID token** whose `cognito:groups` includes `admins` | 401 missing/invalid/expired token, **403** valid token without the group. No users table — identity is the token. Only the api-keys and integrations (incl. legacy `/spotify`) surfaces stay behind this — a machine key must never mint another key or read/write stored credentials. |
+| none |, | Public reads + `POST /api/beacon`. |
+| `requireAdmin()` | Cognito **ID token** whose `cognito:groups` includes `admins` | 401 missing/invalid/expired token, **403** valid token without the group. No users table, identity is the token. Only the api-keys and integrations (incl. legacy `/spotify`) surfaces stay behind this, a machine key must never mint another key or read/write stored credentials. |
 | `requireAdminOrMachine()` | Admin ID token **or** an API key (`Authorization: Bearer pv6k_…`) | Guards the full content-editing surface (pages, sections/items, posts, blogs, media, publish/versions/restore, preview-token, analytics, icons). Machine keys are minted/revoked in the admin (API Keys page). Only the SHA-256 hash is stored; `last_used_at` is stamped on use. Key-driven writes that record an actor persist it as `key:<name>`. A `pv6k_` bearer on a `requireAdmin()`-only route gets **401**. |
 | `requireAdminOrPreviewToken()` | Admin ID token **or** a short-lived preview token (`?token=`, `?preview=`, or `X-Preview-Token`) | Tokens minted via `POST /api/admin/preview-token`, ~15 min, read-only. |
 
 The two OAuth callback routes (`GET /api/admin/integrations/:key/callback` and the legacy
-`GET /api/admin/spotify/callback`) carry no bearer — they are guarded by a single-use
+`GET /api/admin/spotify/callback`) carry no bearer, they are guarded by a single-use
 10-minute `state` minted at connect time.
 
 **Response envelope (§4.3):** admin routes wrap results as
 `{ "status": "ok", "error": false, "data": { … } }`; errors everywhere are
 `{ "status": "error", "error": true, "errorMsg": "…" }`. Public reads return the resource
-**raw** (no envelope) — the one exception is `GET /api/health`, which uses the envelope.
+**raw** (no envelope), the one exception is `GET /api/health`, which uses the envelope.
 Every `/api/admin/*` response is `Cache-Control: no-store`. Express's automatic ETag is
 disabled; only `/api/content` and `/api/posts/:slug` set (weak) ETags by hand.
 
 **Optimistic concurrency (§4.5):** every PATCH (pages, sections, items, posts, blogs)
-requires `expected_updated_at` — 400 if absent, **409** on mismatch. Reorder and publish
+requires `expected_updated_at`, 400 if absent, **409** on mismatch. Reorder and publish
 routes are exempt.
 
-**Link URL validation (§3.4):** every `Link.url` — on portfolio items, on the `links`
-block, and on the contact section's `links` — is checked against a protocol allowlist.
+**Link URL validation (§3.4):** every `Link.url`, on portfolio items, on the `links`
+block, and on the contact section's `links`, is checked against a protocol allowlist.
 Only `http:`, `https:`, `mailto:`, and `tel:` pass; `javascript:`, `data:`, `file:`, and
 anything else are rejected with a 400. Contact-section email/phone links use `type:
 "other"` with `mailto:`/`tel:` URLs (no new `Link.type` enum values). The allowlist is
 enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/schema` +
 `npm run sync:types`.
 
-**Hero section — `background` presentation controls (§3.8).** In addition to
+**Hero section, `background` presentation controls (§3.8).** In addition to
 `title`/`tagline`/`background_media_id`, the hero `data` accepts an optional strict
 `background` object that tunes how the background media is rendered. All keys are
 optional; when absent the site renderer applies the default. Unknown keys are rejected.
@@ -65,13 +65,13 @@ optional; when absent the site renderer applies the default. Unknown keys are re
 
 ## Endpoints
 
-### Public — no auth
+### Public, no auth
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | Liveness string (`portfolio-v6-api`). |
 | GET | `/api/health` | Liveness, no DB. Envelope response. |
-| GET | `/api/schema` | JSON Schema of the whole content model (§8.4) — shapes only, not the HTTP surface. Raw, unauthenticated; `npm run sync:types` in both frontends consumes it. |
+| GET | `/api/schema` | JSON Schema of the whole content model (§8.4), shapes only, not the HTTP surface. Raw, unauthenticated; `npm run sync:types` in both frontends consumes it. |
 | GET | `/api/content` | Latest published document; media refs resolved to CDN URLs; `ETag`/304. |
 | GET | `/api/posts` | Published post summaries; keyset pagination via `?cursor=`; filters `?limit=`, `?tag=`, `?blog=`. |
 | GET | `/api/posts/:slug` | One published post (`published_body`); `ETag`/304; 404 for drafts. |
@@ -82,7 +82,7 @@ optional; when absent the site renderer applies the default. Unknown keys are re
 | GET | `/api/ops` | Daily-replay ops report (v1.7): `?date=YYYY-MM-DD` or latest; 400 malformed date, 404 none available. |
 | GET | `/api/resume` | Newest confirmed resume PDF as `{available,url,filename,bytes,uploaded_at}` (or `{available:false}`), `Cache-Control: no-store`; degrades, never 5xx. |
 | GET | `/api/resume/download` | Streams the newest confirmed resume PDF with `Content-Disposition: attachment` and `Content-Type: application/pdf`; 404 when none. |
-| POST | `/api/beacon` | Analytics ingest — **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
+| POST | `/api/beacon` | Analytics ingest, **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
 
 ### Admin
 
@@ -149,16 +149,16 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 
 `src/config/loadConfig.ts` has two mutually exclusive paths:
 
-- **`IS_LOCAL=true`** — everything from env (`.env`), zero AWS calls (the AWS SDK is never
+- **`IS_LOCAL=true`**, everything from env (`.env`), zero AWS calls (the AWS SDK is never
   imported). Wildcard CORS is enabled in this mode only.
-- **deployed** (`IS_LOCAL` unset) — app config from the Secrets Manager secret at
+- **deployed** (`IS_LOCAL` unset), app config from the Secrets Manager secret at
   `AWS_SECRET_ARN` (includes the listen `port`, currently `8000`) and DB
-  credentials from `AWS_DB_SECRET_ARN`. No CORS headers from this app — the gateway
+  credentials from `AWS_DB_SECRET_ARN`. No CORS headers from this app, the gateway
   supplies wildcard CORS on proxied traffic.
 
 `.env.example` documents every variable with its default. Migrations: `npm run
 migrate:latest` (Knex, env-driven `knexfile.ts`). Deployed containers auto-run migrations
-only when `node_env !== 'production'` — **prod migrations are run manually** against the
+only when `node_env !== 'production'`, **prod migrations are run manually** against the
 prod DB before deploying a schema change.
 
 ### Now-playing (task #84 shared snapshot + listener series #115-#123)
@@ -168,7 +168,7 @@ Spotify credentials and trip Spotify's per-client rate limits. A Redis leader le
 elects exactly one instance per environment as the sole writer of the shared
 now-playing snapshot; every other instance serves reads from that snapshot and pushes
 updates to browsers through the gateway realtime hub (see `REALTIME.md` in the gateway
-repo for the contract). Every variable in the table below is **optional** — leaving
+repo for the contract). Every variable in the table below is **optional**, leaving
 `REDIS_URL` unset falls back to per-instance in-memory caches and opens no Redis
 connection (so local dev and CI stay Redis-free).
 
@@ -213,7 +213,7 @@ row means the corresponding lane is silently disconnected (zero Spotify traffic)
 
 **Operational note: web-token minting.** The dealer listener mints a web-player
 access token by calling Spotify's `get_access_token` endpoint with the stored `sp_dc`
-cookie — a reverse-engineered endpoint the official mobile/web clients use, not part
+cookie, a reverse-engineered endpoint the official mobile/web clients use, not part
 of Spotify's public developer API. If Spotify changes the endpoint URL, expected
 headers, or response shape, update the constants at the top of
 `src/services/listener/webTokenMinter.ts` (URL, request headers, response parsing).
@@ -234,7 +234,7 @@ Only the leader publishes; changes are published on `portfolio-v6-api:now-playin
 `portfolio-v6-api:status` **only when the curated payload differs from the previous
 snapshot**, and a lightweight heartbeat rides `portfolio-v6-api:now-playing` roughly
 every 30s so clients can detect a stalled stream (per REALTIME.md's polling-floor
-pattern). Publish failures are logged and swallowed — they never affect the poll loop
+pattern). Publish failures are logged and swallowed, they never affect the poll loop
 or public HTTP serving. A Redis outage never breaks public reads either: routers fall
 back to the per-instance path with the existing in-memory caches.
 
@@ -246,7 +246,7 @@ the moving tag AND an immutable per-build tag `<short-sha>-prod`, then one
 authenticated call to the gateway's management API
 (`POST /mgmt/services/<service>/deploy` with that same immutable tag). The gateway
 resolves the tag to a digest, updates its service manifest, and blue-greens the container
-in place — no instance refresh, other services unaffected. Container-internal port is
+in place, no instance refresh, other services unaffected. Container-internal port is
 8000 (from the app secret); host ports are Docker-assigned by the gateway's reconciler.
 
 ## Local development

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { linkSchema } from "./link";
 
 /**
- * Per-section-type `data` schemas — TECH_SPEC_V1.md §3.4 (registry), §3.5 (live
+ * Per-section-type `data` schemas, TECH_SPEC_V1.md §3.4 (registry), §3.5 (live
  * sections), §3.8 (hero). `sections.type` is a string in the database and a
  * discriminated union in TypeScript; every type in the registry has a schema
  * for its `data` blob so the JSONB column cannot accept arbitrary garbage
@@ -73,11 +73,11 @@ export const heroBackground = z
 export type HeroBackground = z.infer<typeof heroBackground>;
 
 /**
- * §3.8 — retained as a static section: title, tagline, optional background
+ * §3.8, retained as a static section: title, tagline, optional background
  * media reference plus the optional `background` presentation controls above.
  *
  * Product rule (task #106): NO section requires a heading. `title` here is the
- * hero's header-copy field, so it is `.optional()` — a hero with no title is a
+ * hero's header-copy field, so it is `.optional()`, a hero with no title is a
  * valid section and simply renders without one. `min(1)` is retained so a
  * PRESENT-but-empty string is still rejected; absent is how the field is
  * omitted (the draft path strips `""` before validation for the same reason).
@@ -115,13 +115,13 @@ export const timelineData = itemSectionData;
 export const portfolioData = itemSectionData;
 
 /**
- * §3.4 (v1.5 Skills Sphere) — the skills section renders its items on a 3D
+ * §3.4 (v1.5 Skills Sphere), the skills section renders its items on a 3D
  * geodesic sphere (three.js `IcosahedronGeometry`). Besides the shared
  * heading/intro, it carries an optional `sphere_detail`: the icosahedron detail
- * parameter (0–4), where the face count is 20·(detail+1)² (0→20, 1→80, 2→180,
- * 3→320, 4→500). It is `.optional()`, NOT `.default()`: absent means AUTO — the
+ * parameter (0-4), where the face count is 20·(detail+1)² (0→20, 1→80, 2→180,
+ * 3→320, 4→500). It is `.optional()`, NOT `.default()`: absent means AUTO, the
  * renderer picks the smallest detail whose face count ≥ the number of skill
- * items (clamped to 4) — and absent must round-trip as absent.
+ * items (clamped to 4), and absent must round-trip as absent.
  */
 export const skillsData = z
   .object({
@@ -139,9 +139,9 @@ export const contactData = z
   })
   .strict();
 
-// Live sections — config only; data fetched at runtime (§3.5) ------------
+// Live sections, config only; data fetched at runtime (§3.5) ------------
 
-/** §3.5 — which services to show, whether to show response times. */
+/** §3.5, which services to show, whether to show response times. */
 export const statusData = z
   .object({
     services: z.array(z.string().min(1)),
@@ -150,14 +150,14 @@ export const statusData = z
   .strict();
 
 /**
- * §3.5 — the blog section, in two modes (Blog-as-a-page, task #101):
+ * §3.5, the blog section, in two modes (Blog-as-a-page, task #101):
  *
- * - `mode: 'teaser'` (DEFAULT) is the recent-posts card — pick the newest N
+ * - `mode: 'teaser'` (DEFAULT) is the recent-posts card, pick the newest N
  *   posts (optionally scoped by `tag` and/or `blog`) and render them inline.
  *   `limit` is the teaser's N.
  * - `mode: 'index'` renders the full paginated blog index (same blog/tag
  *   filtering) inline, so the blog listing can live inside a normal admin-
- *   composed page and inherit its `nav_position` — no hardcoded /blog nav
+ *   composed page and inherit its `nav_position`, no hardcoded /blog nav
  *   link. `page_size` is the index's per-page count.
  *
  * `mode` defaults to `'teaser'` so every section stored before this task (which
@@ -178,7 +178,7 @@ export const blogData = z
   })
   .strict();
 
-/** §3.5 — idle behavior (`hide` | `message`), whether to show album art. */
+/** §3.5, idle behavior (`hide` | `message`), whether to show album art. */
 export const nowPlayingData = z
   .object({
     idle: z.enum(["hide", "message"]),
@@ -188,7 +188,7 @@ export const nowPlayingData = z
   .strict();
 
 /**
- * §3.5 (v1.2 live section) — the Duolingo streak/course card. Config only; the
+ * §3.5 (v1.2 live section), the Duolingo streak/course card. Config only; the
  * live data is fetched at runtime from `GET /api/duolingo`. `language` is a
  * lowercase Duolingo course code (its `learningLanguage`, e.g. `es`, `fr`,
  * `zs`); the runtime picks the matching course out of the account's courses.
@@ -205,10 +205,10 @@ export const duolingoData = z
   .strict();
 
 /**
- * §3.5 (v1.10 GitHub Explorer) — the GitHub contribution-graph card. Config
+ * §3.5 (v1.10 GitHub Explorer), the GitHub contribution-graph card. Config
  * only; the live data (the contribution calendar) is fetched at runtime from
- * `GET /api/github[?year=YYYY]`. As of v1.10 the section is fully browsable —
- * the client always renders the full returned window and offers a year picker —
+ * `GET /api/github[?year=YYYY]`. As of v1.10 the section is fully browsable , 
+ * the client always renders the full returned window and offers a year picker , 
  * so the v1.2 `weeks` config (how many trailing weeks to render) is REMOVED;
  * only the header copy (`heading` / `intro`) is snapshotted. The end state
  * mirrors `opsData`: `{ heading?, intro? }`.
@@ -221,13 +221,13 @@ export const githubData = z
   .strict();
 
 /**
- * §3.5 (v1.7 Ops Replay) — the ops / CloudWatch metrics card. Config only; the
+ * §3.5 (v1.7 Ops Replay), the ops / CloudWatch metrics card. Config only; the
  * live data is the immutable DAILY REPLAY report fetched at runtime from
  * `GET /api/ops` (one report per UTC day, replayed client-side). As of the v1.7
- * replay rework the lookback is no longer configurable — a report always covers
- * one full UTC day — so `window_hours` is REMOVED; only the header copy
+ * replay rework the lookback is no longer configurable, a report always covers
+ * one full UTC day, so `window_hours` is REMOVED; only the header copy
  * (`heading` / `intro`) is snapshotted. NO infra identifiers (dashboard name,
- * resource names, ARNs) live in this config — the dashboard name is a deployed
+ * resource names, ARNs) live in this config, the dashboard name is a deployed
  * secret, resolved server-side (§4.7-style) and never in content.
  */
 export const opsData = z
@@ -238,10 +238,10 @@ export const opsData = z
   .strict();
 
 /**
- * §3.5 (Resume Versions, task #92) — the resume card. Config only; the live
+ * §3.5 (Resume Versions, task #92), the resume card. Config only; the live
  * data is the newest confirmed resume PDF fetched at runtime from
- * `GET /api/resume`. The section has NO items — a resume replaces itself,
- * versioning happens on the row, not as a list — so the shape mirrors the
+ * `GET /api/resume`. The section has NO items, a resume replaces itself,
+ * versioning happens on the row, not as a list, so the shape mirrors the
  * other intro-only live sections (`opsData`, `githubData`): `{ heading?, intro? }`.
  */
 export const resumeData = z
@@ -270,7 +270,7 @@ export const SECTION_DATA_SCHEMAS = {
 
 /**
  * Draft-lenient variants (§3.9: "Invalid content can reach a draft; it can
- * never reach production"). Admin WRITES validate against these — every
+ * never reach production"). Admin WRITES validate against these, every
  * provided field must be well-typed (and unknown keys are still rejected via
  * .strict()), but nothing is required, so the admin's create-empty-then-edit
  * flow works. Publish validates the canonical schemas above and is the gate
