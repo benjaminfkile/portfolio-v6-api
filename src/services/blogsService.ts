@@ -83,13 +83,22 @@ function timestampsMatch(rowUpdatedAt: Date, expected: string): boolean {
 // ---- Read: all blogs (GET /api/admin/blogs) ---------------------------------
 
 /**
- * All blogs ordered by `name`, each with the count of posts assigned to it.
- * A LEFT JOIN keeps blogs with zero posts (`post_count = 0`).
+ * All blogs ordered by `name`, each with the count of PUBLISHED posts assigned
+ * to it (task 133). A LEFT JOIN keyed on `blog_id AND published_at IS NOT NULL
+ * AND published_body IS NOT NULL` keeps blogs with zero published posts
+ * (`post_count = 0`) and excludes drafts/unpublished posts from the count so
+ * it mirrors what a public read would see. Both columns are required because a
+ * draft may carry an owner-set `published_at` (task 133) without yet being
+ * live; `published_body` is what publish fills.
  */
 export async function listBlogs(): Promise<BlogListItem[]> {
   const db = getDb();
   const rows = await db<BlogRow>(BLOGS)
-    .leftJoin(POSTS, `${POSTS}.blog_id`, `${BLOGS}.id`)
+    .leftJoin(POSTS, function () {
+      this.on(`${POSTS}.blog_id`, "=", `${BLOGS}.id`)
+        .andOnNotNull(`${POSTS}.published_at`)
+        .andOnNotNull(`${POSTS}.published_body`);
+    })
     .groupBy(`${BLOGS}.id`)
     .orderBy(`${BLOGS}.name`, "asc")
     .select(

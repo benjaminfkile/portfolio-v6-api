@@ -203,6 +203,24 @@ function validateBlogId(value: unknown): PostResult<string | null> {
   return ok(value);
 }
 
+/**
+ * Owner-editable public publish date (task 133). Accepted on create and PATCH
+ * as an ISO-8601 datetime string, or `null` to clear. Anything else (a bare
+ * date, a number, a string the Date parser cannot round-trip) is a validation
+ * failure so a bad value never silently reshapes ordering.
+ */
+function validatePublishedAt(value: unknown): PostResult<Date | null> {
+  if (value === null || value === undefined) return ok(null);
+  if (typeof value !== "string") {
+    return fail("validation", "published_at must be an ISO-8601 datetime string or null");
+  }
+  const ms = new Date(value).getTime();
+  if (!Number.isFinite(ms)) {
+    return fail("validation", "published_at must be an ISO-8601 datetime string or null");
+  }
+  return ok(new Date(ms));
+}
+
 async function assertBlogExists(
   db: Knex,
   blogId: string | null
@@ -316,8 +334,11 @@ export interface ResolvedPostRef {
 
 /**
  * Resolve a set of `posts.id`s to their read-time reference shape (§Post Refs
- * v1.14), keyed by id — ONLY currently-published posts (`published_at` not
- * null). Unpublished/deleted ids are simply absent from the map, so the caller's
+ * v1.14), keyed by id; ONLY currently-published posts. A draft with an
+ * owner-set `published_at` (task 133) is NOT public, so we require BOTH
+ * `published_at` and `published_body` to be non-null; unpublish still nulls
+ * `published_at`, so this hides unpublished posts as well.
+ * Unpublished/deleted ids are simply absent from the map, so the caller's
  * order-preserving lookup silently omits them. One query for the posts, one for
  * their owning blogs.
  */
@@ -332,6 +353,7 @@ export async function resolvePublishedPostRefs(
   const rows = await db<PostRow>(POSTS)
     .whereIn("id", unique)
     .whereNotNull("published_at")
+    .whereNotNull("published_body")
     .select("id", "slug", "title", "blog_id");
   const blogMap = await buildBlogMap(db, rows.map((r) => r.blog_id));
   for (const r of rows) {
@@ -427,6 +449,8 @@ export interface CreatePostInput {
   blog_id?: unknown;
   tags?: unknown;
   draft_body?: unknown;
+  /** Owner-editable public publish date (task 133); see `validatePublishedAt`. */
+  published_at?: unknown;
 }
 
 /**
@@ -455,6 +479,8 @@ export async function createPost(
   const body =
     input.draft_body === undefined ? ok([]) : validateDraftBody(input.draft_body);
   if (!body.ok) return body;
+  const publishedAt = validatePublishedAt(input.published_at);
+  if (!publishedAt.ok) return publishedAt;
 
   const db = getDb();
   // A supplied blog_id must reference an existing blog (Blogs v1.13) → 400.
@@ -476,6 +502,7 @@ export async function createPost(
       blog_id: blogId.data,
       tags: tags.data as never,
       draft_body: JSON.stringify(body.data) as never,
+      published_at: publishedAt.data,
     })
     .returning("*");
   return ok(row);
@@ -492,6 +519,8 @@ export interface UpdatePostInput {
   blog_id?: unknown;
   tags?: unknown;
   draft_body?: unknown;
+  /** Owner-editable public publish date (task 133); see `validatePublishedAt`. */
+  published_at?: unknown;
 }
 
 /**
@@ -514,7 +543,8 @@ export async function updatePost(
     !has("cover_media_id") &&
     !has("blog_id") &&
     !has("tags") &&
-    !has("draft_body")
+    !has("draft_body") &&
+    !has("published_at")
   ) {
     return fail("bad_request", "Provide at least one field to update");
   }
@@ -591,6 +621,11 @@ export async function updatePost(
       if (!body.ok) return body;
       patch.draft_body = JSON.stringify(body.data);
     }
+    if (has("published_at")) {
+      const publishedAt = validatePublishedAt(input.published_at);
+      if (!publishedAt.ok) return publishedAt;
+      patch.published_at = publishedAt.data;
+    }
 
     const [updated] = await trx<PostRow>(POSTS)
       .where({ id })
@@ -618,14 +653,19 @@ export async function deletePost(id: string): Promise<PostResult<null>> {
  * goes live. Editing the draft afterwards does not affect the published copy
  * until the next publish (§3.6). The media GC pass is triggered by the router
  * after a successful publish.
+ *
+ * Publish date preservation (task 133): if the row already has a non-null
+ * `published_at` (an owner-set date, or the timestamp from a previous first
+ * publish), it is KEPT. Only a first publish (or a publish after an unpublish)
+ * stamps now(). Republishing to push a body edit therefore never resets the
+ * public date, and the owner-set date on a draft becomes the live date on
+ * first publish.
  */
 export async function publishPost(
   id: string,
   opts: { publishedAt?: string; publishedBy?: string } = {}
 ): Promise<PostResult<PostRow>> {
   if (!UUID_RE.test(id)) return fail("not_found", "post not found");
-
-  const publishedAt = opts.publishedAt ?? new Date().toISOString();
 
   const db = getDb();
   return db.transaction(async (trx) => {
@@ -634,6 +674,13 @@ export async function publishPost(
 
     const body = validateBody(row.draft_body);
     if (!body.ok) return body;
+
+    // Preserve an existing published_at (task 133); otherwise fall back to the
+    // caller-supplied override (kept for tests that pin an exact value) or
+    // now().
+    const publishedAt =
+      row.published_at ??
+      (opts.publishedAt ? new Date(opts.publishedAt) : new Date());
 
     const [updated] = await trx<PostRow>(POSTS)
       .where({ id })
@@ -773,8 +820,13 @@ export async function listPublishedPosts(
     blogId = blogRow.id;
   }
 
+  // Public visibility: both `published_at` and `published_body` must be
+  // non-null. A draft with an owner-set `published_at` (task 133) is invisible
+  // until publish fills `published_body`; unpublish nulls `published_at` and
+  // hides the post as before.
   const query = db<PostRow>(POSTS)
     .whereNotNull("published_at")
+    .whereNotNull("published_body")
     .orderBy([
       { column: "published_at", order: "desc" },
       { column: "id", order: "desc" },
@@ -868,7 +920,10 @@ export interface PublicPostResult {
  * GET /api/posts/:slug (§4.1). One PUBLISHED post — `published_body` only, media
  * map resolved to CDN URLs (§6.8), cover resolved. A slug that is unknown OR
  * exists but has never been published (or was unpublished) is a 404: drafts are
- * invisible to the public API (§3.6).
+ * invisible to the public API (§3.6). Task 133 lets the owner store
+ * `published_at` on a draft, so we ALSO require `published_body` to be set
+ * before serving; unpublish still nulls `published_at`, so the unpublish path
+ * hides the post the same way.
  */
 export async function getPublishedPost(
   slug: string,
@@ -876,7 +931,7 @@ export async function getPublishedPost(
 ): Promise<PostResult<PublicPostResult>> {
   const db = getDb();
   const row = await db<PostRow>(POSTS).where({ slug }).first();
-  if (!row || row.published_at === null) {
+  if (!row || row.published_at === null || row.published_body === null) {
     return fail("not_found", "post not found");
   }
 

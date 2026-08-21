@@ -204,9 +204,11 @@ describe("admin blogs CRUD (envelope, post_count, name order)", () => {
     expect(code.slug).toBe("code");
     expect(code.name).toBe("Code");
 
-    // Two posts on Code, none on Food.
-    await createPost({ slug: "p1", title: "P1", blog_id: code.id });
+    // Two posts on Code (one published, one draft), none on Food. post_count
+    // reflects only PUBLISHED posts (task 133).
+    const p1 = await createPost({ slug: "p1", title: "P1", blog_id: code.id });
     await createPost({ slug: "p2", title: "P2", blog_id: code.id });
+    await publishPost(p1.body.data.id);
 
     const list = await request(app).get("/api/admin/blogs").set(...AUTH);
     expect(list.status).toBe(200);
@@ -214,7 +216,7 @@ describe("admin blogs CRUD (envelope, post_count, name order)", () => {
     const blogs = list.body.data.blogs;
     // Ordered by name: Code, Food.
     expect(blogs.map((b: { slug: string }) => b.slug)).toEqual(["code", "food"]);
-    expect(blogs[0]).toMatchObject({ slug: "code", name: "Code", post_count: 2 });
+    expect(blogs[0]).toMatchObject({ slug: "code", name: "Code", post_count: 1 });
     expect(blogs[1]).toMatchObject({ slug: "food", name: "Food", post_count: 0 });
 
     // Patch under the precondition.
