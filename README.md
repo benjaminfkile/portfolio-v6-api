@@ -43,6 +43,26 @@ anything else are rejected with a 400. Contact-section email/phone links use `ty
 enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/schema` +
 `npm run sync:types`.
 
+**Hero section — `background` presentation controls (§3.8).** In addition to
+`title`/`tagline`/`background_media_id`, the hero `data` accepts an optional strict
+`background` object that tunes how the background media is rendered. All keys are
+optional; when absent the site renderer applies the default. Unknown keys are rejected.
+
+| Field | Type | Range | Default | Purpose |
+|---|---|---|---|---|
+| `opacity_dark` | number | 0..1 | 0.1 | Background image alpha on the dark theme. |
+| `opacity_light` | number | 0..1 | 0.06 | Background image alpha on the light theme. |
+| `object_fit` | enum | `cover` \| `contain` \| `fill` \| `none` \| `scale-down` | `cover` | CSS `object-fit`. |
+| `object_position` | string | ≤40 chars, `[A-Za-z0-9 %.-]` | `50% 50%` | CSS `object-position` (e.g. `50% 30%`, `center top`). |
+| `blur_px` | number | 0..40 | 0 | CSS `filter: blur()` in px. |
+| `grayscale` | number | 0..1 | 0 | CSS `filter: grayscale()`. |
+| `brightness` | number | 0..2 | 1 | CSS `filter: brightness()`. |
+| `contrast` | number | 0..2 | 1 | CSS `filter: contrast()`. |
+| `saturate` | number | 0..2 | 1 | CSS `filter: saturate()`. |
+| `scale` | number | 1..2 | 1 | `transform: scale()`; lets a blurred image hide its soft edges. |
+| `overlay_dark` | number | 0..1 | 0 | Alpha of a `--ground`-coloured overlay on the dark theme. |
+| `overlay_light` | number | 0..1 | 0 | Same on the light theme. |
+
 ## Endpoints
 
 ### Public — no auth
