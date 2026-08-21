@@ -2,21 +2,19 @@ name: Build and Deploy Portfolio v6 API
 
 on:
   push:
-    branches: ["main", "dev"]
+    branches: ["main"]
     paths-ignore:
       - "**/*.md"
 
 env:
-  IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'dev' }}
-  # Branch-unique suffix for the immutable per-build tag so that a dev
-  # build of the same commit can never overwrite the :<sha> tag a prod
-  # deploy just pinned (and vice versa).
-  IMMUTABLE_TAG_SUFFIX: ${{ github.ref_name == 'main' && '-prod' || '-dev' }}
+  IMAGE_TAG: latest
+  # Suffix for the immutable per-build tag (<sha>-prod).
+  IMMUTABLE_TAG_SUFFIX: "-prod"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    environment: prod
 
     steps:
       - name: Checkout code
@@ -61,7 +59,7 @@ jobs:
         run: |
           GIT_SHA=$(git rev-parse --short HEAD)
           IMMUTABLE_TAG=${GIT_SHA}${{ env.IMMUTABLE_TAG_SUFFIX }}
-          SERVICE=${{ github.ref_name == 'main' && 'portfolio-v6-api' || 'portfolio-v6-api-dev' }}
+          SERVICE=portfolio-v6-api
 
           TOKEN=$(curl -sf -X POST "${{ secrets.MGMT_TOKEN_URL }}" \
             -H "Content-Type: application/x-www-form-urlencoded" \

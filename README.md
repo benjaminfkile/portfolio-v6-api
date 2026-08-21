@@ -6,10 +6,8 @@ Postgres via Knex, media on S3 behind a CDN, deployed as a Docker container behi
 gateway. The authoritative content-model spec is `TECH_SPEC_V1.md` in the `portfolio-v6`
 repo; section references below (§…) point into it.
 
-Base URLs through the gateway (path prefix is stripped before it reaches this app):
-
-- prod: `https://api.benkile.com/portfolio-v6-api`
-- dev: `https://api.benkile.com/portfolio-v6-api-dev`
+Base URL through the gateway (path prefix is stripped before it reaches this app):
+`https://api.benkile.com/portfolio-v6-api`.
 
 ## Auth model (§5)
 
@@ -51,7 +49,7 @@ enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/s
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/` | Liveness string (`portfolio-v6-api[-dev]`). |
+| GET | `/` | Liveness string (`portfolio-v6-api`). |
 | GET | `/api/health` | Liveness, no DB. Envelope response. |
 | GET | `/api/schema` | JSON Schema of the whole content model (§8.4) — shapes only, not the HTTP surface. Raw, unauthenticated; `npm run sync:types` in both frontends consumes it. |
 | GET | `/api/content` | Latest published document; media refs resolved to CDN URLs; `ETag`/304. |
@@ -134,7 +132,7 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 - **`IS_LOCAL=true`** — everything from env (`.env`), zero AWS calls (the AWS SDK is never
   imported). Wildcard CORS is enabled in this mode only.
 - **deployed** (`IS_LOCAL` unset) — app config from the Secrets Manager secret at
-  `AWS_SECRET_ARN` (includes the listen `port`, currently `8000` in both envs) and DB
+  `AWS_SECRET_ARN` (includes the listen `port`, currently `8000`) and DB
   credentials from `AWS_DB_SECRET_ARN`. No CORS headers from this app — the gateway
   supplies wildcard CORS on proxied traffic.
 
@@ -204,13 +202,13 @@ fallback continues to operate independently.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `REDIS_URL` | *(unset)* | Enables the subsystem when set. Prod and dev MUST NOT share a keyspace (use different DBs, e.g. `/0` and `/1`); keys are also prefixed with the env name. Placeholders only in the repo — the real value lives in the deployed secret. |
-| `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`, dev runs `10000`. Gateway status refreshes every tick; Spotify polling only fires when the listener is not connected AND the Spotify lane's predictive / idle deadline has elapsed; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
+| `REDIS_URL` | *(unset)* | Enables the subsystem when set. Separate deployments MUST NOT share a keyspace (use different DBs, e.g. `/0` and `/1`); keys are also prefixed with the env name. Placeholders only in the repo; the real value lives in the deployed secret. |
+| `POLL_INTERVAL_MS` | `10000` | Base tick for the leader poll loop, milliseconds. Prod runs `5000`. Gateway status refreshes every tick; Spotify polling only fires when the listener is not connected AND the Spotify lane's predictive / idle deadline has elapsed; slow-lane (Duolingo, GitHub) keep their long TTLs and refresh only when expired. |
 | `SPOTIFY_DAILY_CALL_BUDGET` | `4000` | Hard daily cap on outbound Spotify Web API + token-endpoint calls made by the polling fallback. Suspends polling once reached until the next window reset. |
 | `SPOTIFY_BUDGET_RESET_UTC` | `21:23` | UTC time of day (`HH:MM`) the daily Spotify call budget window resets; invalid strings silently fall back to the default. |
 | `GATEWAY_INTERNAL_URL` | `http://gateway:8080` | Internal base URL the container uses to reach the gateway's `POST /internal/publish` endpoint (realtime hub). |
 | `GATEWAY_REALTIME_TOKEN` | *(unset)* | Shared secret the gateway injects into every service container so the internal publish endpoint can authenticate this API. Sent as the `X-Gateway-Realtime-Token` header. Never returned to any response and never logged. |
-| `REALTIME_SERVICE_NAME` | `portfolio-v6-api` | Manifest service name that prefixes every published channel (`{service_name}:{topic}`). MUST match the service the gateway's publish token is scoped to. Prod runs `portfolio-v6-api`; the **dev deployment runs under `portfolio-v6-api-dev` and MUST set this** — a mismatched prefix is rejected with 403. Also settable via the `realtime_service_name` secret. |
+| `REALTIME_SERVICE_NAME` | `portfolio-v6-api` | Manifest service name that prefixes every published channel (`{service_name}:{topic}`). MUST match the service the gateway's publish token is scoped to. Defaults to `portfolio-v6-api`; only override if the API is deployed under a different manifest service name (a mismatched prefix is rejected with 403). Also settable via the `realtime_service_name` secret. |
 
 Only the leader publishes; changes are published on `portfolio-v6-api:now-playing` /
 `portfolio-v6-api:status` **only when the curated payload differs from the previous
@@ -222,12 +220,10 @@ back to the per-instance path with the existing in-memory caches.
 
 ## Deploy (§11)
 
-`.github/workflows/deploy.yaml` on pushes to `main` (→ service `portfolio-v6-api`, moving
-tag `latest`) and `dev` (→ `portfolio-v6-api-dev`, moving tag `dev`): buildx a multi-arch
-image, push to ECR under the moving tag AND an immutable per-build tag
-`<short-sha>-<env>` (`<sha>-prod` for main, `<sha>-dev` for dev — branch-suffixed so the
-two pipelines can never overwrite each other's :<sha> if the same commit is pushed to
-both), then one authenticated call to the gateway's management API
+`.github/workflows/deploy.yaml` on pushes to `main` (GitHub environment `prod`, service
+`portfolio-v6-api`, moving tag `latest`): buildx a multi-arch image, push to ECR under
+the moving tag AND an immutable per-build tag `<short-sha>-prod`, then one
+authenticated call to the gateway's management API
 (`POST /mgmt/services/<service>/deploy` with that same immutable tag). The gateway
 resolves the tag to a digest, updates its service manifest, and blue-greens the container
 in place — no instance refresh, other services unaffected. Container-internal port is

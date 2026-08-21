@@ -30,7 +30,7 @@ function loadLocalConfig(): LoadedConfig {
     node_env: nodeEnv,
     port: process.env.PORT || "3002",
     s3_bucket_name: process.env.S3_BUCKET_NAME || "bk-portfolio-v6-local",
-    cdn_domain: process.env.CDN_DOMAIN || "media-dev.benkile.com",
+    cdn_domain: process.env.CDN_DOMAIN || "media.benkile.com",
     cognito_user_pool_id: process.env.COGNITO_USER_POOL_ID || "local-user-pool",
     cognito_client_id: process.env.COGNITO_CLIENT_ID || "local-client-id",
     aws_region: process.env.AWS_REGION || "us-east-1",

@@ -38,7 +38,7 @@ describe("loadConfig — IS_LOCAL path", () => {
     process.env.DB_NAME = "portfolio_v6_local";
     process.env.DB_USER = "node";
     process.env.DB_PASSWORD = "";
-    process.env.CDN_DOMAIN = "media-dev.benkile.com";
+    process.env.CDN_DOMAIN = "media.benkile.com";
     process.env.COGNITO_USER_POOL_ID = "us-east-1_local";
     process.env.COGNITO_CLIENT_ID = "local-client";
     process.env.SPOTIFY_CLIENT_ID = "spid";
@@ -50,7 +50,7 @@ describe("loadConfig — IS_LOCAL path", () => {
       db_name: "portfolio_v6_local",
       node_env: "development",
       port: "3002",
-      cdn_domain: "media-dev.benkile.com",
+      cdn_domain: "media.benkile.com",
       cognito_user_pool_id: "us-east-1_local",
       cognito_client_id: "local-client",
       spotify_client_id: "spid",
