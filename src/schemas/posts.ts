@@ -6,9 +6,13 @@ import { blockArraySchema } from "./blocks";
  *
  * The editable, non-body fields of a `posts` row. The body itself is a
  * `Block[]` validated by `./blocks.ts` (`blockArraySchema`); `postSchema` below
- * composes the two. `published_body`/`published_at` are lifecycle-managed by the
- * publish pipeline (task 439/441), not client-supplied, so they are not part of
- * the write schema.
+ * composes the two. `published_body` is lifecycle-managed by the publish
+ * pipeline (task 439/441), not client-supplied, so it is not part of the write
+ * schema. `published_at` IS accepted here: the owner needs to control the
+ * displayed publish date (task 133). Storing it on a draft is fine; it only
+ * becomes public when the post is published. On publish, an already-set value
+ * is preserved so a republish (to push a body edit) does not reset the public
+ * date.
  */
 
 /**
@@ -36,6 +40,11 @@ export const postMetadataSchema = z
     // (see `blogRefSchema`), not a write field.
     blog_id: z.string().uuid().nullable().optional(),
     tags: z.array(z.string().min(1)).default([]),
+    // Owner-editable public publish date (task 133). Accepted on create and
+    // PATCH so the admin can set/backdate/change it. Storing it on a draft is
+    // fine; the post only becomes public once published. On publish, an
+    // already-set value is preserved (a republish never resets the date).
+    published_at: z.string().datetime().nullable().optional(),
   })
   .strict();
 

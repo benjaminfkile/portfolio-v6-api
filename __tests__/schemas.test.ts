@@ -1015,6 +1015,47 @@ describe("post metadata schema (§3.6)", () => {
       }).success
     ).toBe(false);
   });
+
+  it("accepts an ISO-8601 published_at (or null), rejects a bad value (task 133)", () => {
+    // Accepted: absent, null, and a full ISO datetime.
+    expect(
+      postMetadataSchema.safeParse({ slug: "p", title: "P" }).success
+    ).toBe(true);
+    expect(
+      postMetadataSchema.safeParse({ slug: "p", title: "P", published_at: null })
+        .success
+    ).toBe(true);
+    expect(
+      postMetadataSchema.safeParse({
+        slug: "p",
+        title: "P",
+        published_at: "2025-04-01T12:00:00.000Z",
+      }).success
+    ).toBe(true);
+
+    // Rejected: a bare date, junk string, wrong type.
+    expect(
+      postMetadataSchema.safeParse({
+        slug: "p",
+        title: "P",
+        published_at: "2025-04-01",
+      }).success
+    ).toBe(false);
+    expect(
+      postMetadataSchema.safeParse({
+        slug: "p",
+        title: "P",
+        published_at: "not-a-date",
+      }).success
+    ).toBe(false);
+    expect(
+      postMetadataSchema.safeParse({
+        slug: "p",
+        title: "P",
+        published_at: 12345,
+      }).success
+    ).toBe(false);
+  });
 });
 
 describe("page schema (§3.10)", () => {

@@ -514,6 +514,188 @@ describe("cursor pagination (§4.1)", () => {
   });
 });
 
+// ---- editable published_at (task 133) --------------------------------------
+
+describe("editable published_at (task 133)", () => {
+  it("accepts published_at on create and PATCH, rejects a bad value", async () => {
+    // Bad value on create is a 400.
+    const bad = await createPost({
+      slug: "bad-date",
+      title: "T",
+      published_at: "yesterday",
+    });
+    expect(bad.status).toBe(400);
+
+    // A valid ISO datetime is accepted; the draft carries it while unpublished.
+    const iso = "2024-06-01T09:30:00.000Z";
+    const good = await createPost({
+      slug: "with-date",
+      title: "T",
+      published_at: iso,
+    });
+    expect(good.status).toBe(201);
+    expect(good.body.data.published_at).toBeTruthy();
+    expect(new Date(good.body.data.published_at).toISOString()).toBe(iso);
+
+    // Storing published_at on a draft does NOT make it public; the post is
+    // only visible after publish (there is no scheduled semantics; the field is
+    // simply "the date we WILL show once you publish").
+    expect((await request(app).get("/api/posts/with-date")).status).toBe(404);
+
+    // PATCH can clear the stored value with null.
+    const cur = await request(app).get(`/api/admin/posts/${good.body.data.id}`).set(...AUTH);
+    const cleared = await request(app)
+      .patch(`/api/admin/posts/${good.body.data.id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: cur.body.data.updated_at, published_at: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.published_at).toBeNull();
+  });
+
+  it("first publish stamps now() when published_at is null, keeps the stored date when set", async () => {
+    // Never-set → publish stamps now().
+    const t0 = Date.now();
+    const a = await createPost({ slug: "stamp-me", title: "A", draft_body: [PARA("a")] });
+    const pubA = await publish(a.body.data.id);
+    expect(pubA.status).toBe(200);
+    const stampedMs = new Date(pubA.body.data.published_at).getTime();
+    expect(stampedMs).toBeGreaterThanOrEqual(t0);
+    expect(stampedMs).toBeLessThanOrEqual(Date.now() + 5_000);
+
+    // Owner-set date on the draft → publish PRESERVES it.
+    const backdated = "2020-01-15T00:00:00.000Z";
+    const b = await createPost({
+      slug: "backdated",
+      title: "B",
+      draft_body: [PARA("b")],
+      published_at: backdated,
+    });
+    const pubB = await publish(b.body.data.id);
+    expect(pubB.status).toBe(200);
+    expect(new Date(pubB.body.data.published_at).toISOString()).toBe(backdated);
+    const publicB = await request(app).get("/api/posts/backdated");
+    expect(publicB.body.published_at).toBe(backdated);
+  });
+
+  it("republish preserves the existing published_at (only refreshes published_body)", async () => {
+    const created = await createPost({
+      slug: "republish-me",
+      title: "T",
+      draft_body: [PARA("v1")],
+    });
+    const id = created.body.data.id;
+    const pub1 = await publish(id);
+    const firstDate = pub1.body.data.published_at;
+    expect(firstDate).toBeTruthy();
+
+    // Edit the draft and republish; date must not change, published_body must.
+    let cur = await request(app).get(`/api/admin/posts/${id}`).set(...AUTH);
+    await request(app)
+      .patch(`/api/admin/posts/${id}`)
+      .set(...AUTH)
+      .send({
+        expected_updated_at: cur.body.data.updated_at,
+        draft_body: [PARA("v2")],
+      });
+    const pub2 = await publish(id);
+    expect(pub2.status).toBe(200);
+    expect(pub2.body.data.published_at).toBe(firstDate);
+    expect(pub2.body.data.published_body).toEqual([{ type: "paragraph", text: "v2" }]);
+
+    // Public read reflects the new body under the SAME published_at.
+    const publicView = await request(app).get("/api/posts/republish-me");
+    expect(publicView.body.body).toEqual([{ type: "paragraph", text: "v2" }]);
+    expect(publicView.body.published_at).toBe(firstDate);
+  });
+
+  it("PATCH published_at on a published post changes the public date", async () => {
+    const created = await createPost({
+      slug: "moveable-date",
+      title: "T",
+      draft_body: [PARA("body")],
+    });
+    const id = created.body.data.id;
+    await publish(id);
+
+    const target = "2019-07-20T20:17:00.000Z";
+    let cur = await request(app).get(`/api/admin/posts/${id}`).set(...AUTH);
+    const patch = await request(app)
+      .patch(`/api/admin/posts/${id}`)
+      .set(...AUTH)
+      .send({ expected_updated_at: cur.body.data.updated_at, published_at: target });
+    expect(patch.status).toBe(200);
+    expect(new Date(patch.body.data.published_at).toISOString()).toBe(target);
+
+    const publicView = await request(app).get("/api/posts/moveable-date");
+    expect(publicView.body.published_at).toBe(target);
+  });
+
+  it("public list ordering follows the edited published_at (no scheduled semantics)", async () => {
+    // Three posts, published in chronological order but edited to a different
+    // display order (including a FUTURE date, which must still be shown).
+    const a = await createPost({ slug: "aaa", title: "A", draft_body: [PARA("a")] });
+    const b = await createPost({ slug: "bbb", title: "B", draft_body: [PARA("b")] });
+    const c = await createPost({ slug: "ccc", title: "C", draft_body: [PARA("c")] });
+    await publish(a.body.data.id);
+    await publish(b.body.data.id);
+    await publish(c.body.data.id);
+
+    // Edit dates: B oldest, A middle, C in the FUTURE.
+    const dates: Record<string, string> = {
+      [a.body.data.id]: "2023-06-01T00:00:00.000Z",
+      [b.body.data.id]: "2022-01-01T00:00:00.000Z",
+      [c.body.data.id]: "2999-01-01T00:00:00.000Z",
+    };
+    for (const [id, iso] of Object.entries(dates)) {
+      const cur = await request(app).get(`/api/admin/posts/${id}`).set(...AUTH);
+      const res = await request(app)
+        .patch(`/api/admin/posts/${id}`)
+        .set(...AUTH)
+        .send({ expected_updated_at: cur.body.data.updated_at, published_at: iso });
+      expect(res.status).toBe(200);
+    }
+
+    // Order: C (future), A, B; no scheduled hiding.
+    const list = await request(app).get("/api/posts");
+    expect(list.status).toBe(200);
+    expect(list.body.posts.map((p: { slug: string }) => p.slug)).toEqual([
+      "ccc",
+      "aaa",
+      "bbb",
+    ]);
+  });
+
+  it("PATCH published_at bumps the ETag / updated_at so 304 clients revalidate", async () => {
+    const created = await createPost({
+      slug: "etag-me",
+      title: "T",
+      draft_body: [PARA("body")],
+    });
+    const id = created.body.data.id;
+    await publish(id);
+    const before = await request(app).get("/api/posts/etag-me");
+    const etagBefore = before.headers.etag;
+
+    const cur = await request(app).get(`/api/admin/posts/${id}`).set(...AUTH);
+    await request(app)
+      .patch(`/api/admin/posts/${id}`)
+      .set(...AUTH)
+      .send({
+        expected_updated_at: cur.body.data.updated_at,
+        published_at: "2018-05-05T05:05:05.000Z",
+      });
+
+    const after = await request(app).get("/api/posts/etag-me");
+    expect(after.headers.etag).not.toBe(etagBefore);
+    // Stale If-None-Match no longer matches; client gets a 200 with the new date.
+    const revalidate = await request(app)
+      .get("/api/posts/etag-me")
+      .set("If-None-Match", etagBefore);
+    expect(revalidate.status).toBe(200);
+    expect(revalidate.body.published_at).toBe("2018-05-05T05:05:05.000Z");
+  });
+});
+
 // ---- draft preview (§4.2 † / §7) -------------------------------------------
 
 describe("GET /api/admin/preview/posts/:id — draft serialization (§4.2 / §7)", () => {

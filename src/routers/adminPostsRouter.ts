@@ -129,8 +129,16 @@ adminPostsRouter.post(
   requireAdminOrMachine(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { slug, title, excerpt, cover_media_id, blog_id, tags, draft_body } =
-        req.body ?? {};
+      const {
+        slug,
+        title,
+        excerpt,
+        cover_media_id,
+        blog_id,
+        tags,
+        draft_body,
+        published_at,
+      } = req.body ?? {};
       send(
         res,
         await createPost({
@@ -141,6 +149,7 @@ adminPostsRouter.post(
           blog_id,
           tags,
           draft_body,
+          published_at,
         }),
         201
       );
@@ -171,8 +180,16 @@ adminPostsRouter.patch(
     try {
       const expected = requireExpectedUpdatedAt(req, res);
       if (expected === null) return;
-      const { slug, title, excerpt, cover_media_id, blog_id, tags, draft_body } =
-        req.body ?? {};
+      const {
+        slug,
+        title,
+        excerpt,
+        cover_media_id,
+        blog_id,
+        tags,
+        draft_body,
+        published_at,
+      } = req.body ?? {};
       send(
         res,
         await updatePost(req.params.id, {
@@ -184,6 +201,7 @@ adminPostsRouter.patch(
           blog_id,
           tags,
           draft_body,
+          published_at,
         })
       );
     } catch (err) {
@@ -209,8 +227,10 @@ adminPostsRouter.delete(
 
 /**
  * POST /api/admin/posts/:id/publish (§4.2). Re-validates the draft body, refuses
- * an invalid one (400), then `published_body := draft_body` and stamps
- * `published_at`. Triggers the media GC pass after a successful publish (§6.9) —
+ * an invalid one (400), then `published_body := draft_body`. Stamps
+ * `published_at` ONLY when the row is unpublished (null); an already-set date is
+ * preserved so a republish (to push a body edit) never resets the public date
+ * (task 133). Triggers the media GC pass after a successful publish (§6.9);
  * fire-and-safe so a sweep failure never fails an already-committed publish.
  */
 adminPostsRouter.post(

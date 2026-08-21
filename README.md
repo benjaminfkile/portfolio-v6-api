@@ -121,13 +121,13 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 | GET | `/api/admin/resumes` | A\|K | All resume versions, newest first, each with a CDN url, filename, bytes, confirmed state. |
 | DELETE | `/api/admin/resumes/:id` | A\|K | Hard delete a version (S3 object + row); deleting the newest promotes the next-newest publicly. |
 | GET | `/api/admin/posts` | A\|K | All posts, drafts included. |
-| POST | `/api/admin/posts` | A\|K | Create post → 201. |
+| POST | `/api/admin/posts` | A\|K | Create post → 201. Accepts optional `published_at` (ISO-8601 datetime, or null); stored on the draft and used verbatim once the post is published. |
 | GET | `/api/admin/posts/:id` | A\|K | One post with `draft_body`. |
-| PATCH | `/api/admin/posts/:id` | A\|K | Update metadata / `draft_body`; requires `expected_updated_at`. |
+| PATCH | `/api/admin/posts/:id` | A\|K | Update metadata / `draft_body` / `published_at`; requires `expected_updated_at`. Editing `published_at` on a published post immediately changes the public date. |
 | DELETE | `/api/admin/posts/:id` | A\|K | Delete post. |
-| POST | `/api/admin/posts/:id/publish` | A\|K | Re-validate (400 if invalid) then publish; key-driven publishes attribute as `key:<name>`. |
+| POST | `/api/admin/posts/:id/publish` | A\|K | Re-validate (400 if invalid) then publish; key-driven publishes attribute as `key:<name>`. Preserves an already-set `published_at` (owner-set on the draft, or the timestamp from a previous first publish); only stamps `now()` when `published_at` is null, so a republish (to push a body edit) never resets the public date. Whatever is stored is what is shown; a future `published_at` is not "scheduled" and does not hide the post. |
 | POST | `/api/admin/posts/:id/unpublish` | A\|K | Null `published_at`, retain `published_body`. |
-| GET | `/api/admin/blogs` | A\|K | All blogs with `post_count`. |
+| GET | `/api/admin/blogs` | A\|K | All blogs with `post_count` (published posts only). |
 | POST | `/api/admin/blogs` | A\|K | Create blog `{slug,name}` → 201. |
 | PATCH | `/api/admin/blogs/:id` | A\|K | Update; requires `expected_updated_at`. |
 | DELETE | `/api/admin/blogs/:id` | A\|K | Delete; assigned posts get `blog_id = NULL`. |
