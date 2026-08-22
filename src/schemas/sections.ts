@@ -76,12 +76,12 @@ export type HeroBackground = z.infer<typeof heroBackground>;
  * §3.8, retained as a static section: title, tagline, optional background
  * media reference plus the optional `background` presentation controls above.
  *
- * Per-theme backdrops: `background_media_id` is the default image and is used
- * on both themes; `background_light_media_id` optionally replaces it on the
- * light theme only (absent = light reuses the default, exactly as before the
- * field existed). Both names end in `media_id`, so the publish media map and
- * media delete-protection (`collectMediaRefs`) pick the light one up with no
- * further plumbing.
+ * Per-theme backdrops, each optional and independent: `background_media_id`
+ * renders on the dark theme only, `background_light_media_id` on the light
+ * theme only. Either may be absent (that theme then has no backdrop); the same
+ * id in both gives a shared image. Both names end in `media_id`, so the publish
+ * media map and media delete-protection (`collectMediaRefs`) pick them up with
+ * no further plumbing.
  *
  * Product rule (task #106): NO section requires a heading. `title` here is the
  * hero's header-copy field, so it is `.optional()`, a hero with no title is a
