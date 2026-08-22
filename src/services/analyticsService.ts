@@ -8,7 +8,7 @@ import { resolveEncryptionKey } from "./serviceTokenStore";
  * §4.8). This service owns ALL of the ingest logic; the `/api/beacon` router is
  * a thin shell that extracts a few request fields and always answers 204.
  *
- * Load-bearing privacy properties (§4.8), enforced here:
+ * Load-bearing privacy + hardening properties (§4.8), enforced here:
  *   - No PII is ever stored OR logged. Raw client IP and user-agent are used
  *     ONLY as hash input for `session_key = sha256(day_salt | ip | ua)[:32]`.
  *     The salt derives from the token-encryption key material + the UTC date, so
@@ -18,15 +18,22 @@ import { resolveEncryptionKey } from "./serviceTokenStore";
  *   - Referrers are reduced to their ORIGIN (scheme+host); same-origin or
  *     unparseable referrers store null.
  *   - Known bots (coarse UA match) are dropped at ingest.
+ *   - Client IP is picked by TRUSTED hop count from `X-Forwarded-For` (see
+ *     beaconRouter.ts): client-supplied leading entries cannot influence
+ *     `session_key` or the per-IP rate limit (task #135).
+ *   - Origin allowlist (`BEACON_ALLOWED_ORIGINS`, task #135): when set, a
+ *     beacon whose `Origin` header is missing, unparseable, or not an exact
+ *     match against the allowlist is silently dropped. When unset/empty (dev),
+ *     every origin is accepted.
  *   - A light in-memory per-IP token bucket (~60 events/min) silently drops
  *     floods; stale buckets are pruned.
  *   - Events older than 365 days are pruned opportunistically (at most once per
  *     UTC day per process).
  *
  * ingestBeacon NEVER throws and NEVER logs request contents. Every failure —
- * invalid input, rate-limited, bot, DB down — resolves to a silent no-op so the
- * caller can unconditionally return 204 (§4.8: a broken beacon must never affect
- * a visitor, and probing it teaches nothing).
+ * invalid input, rate-limited, bot, disallowed Origin, DB down — resolves to a
+ * silent no-op so the caller can unconditionally return 204 (§4.8: a broken
+ * beacon must never affect a visitor, and probing it teaches nothing).
  */
 
 /** Hard event allowlist (§4.8). Anything else is dropped. */
@@ -228,21 +235,73 @@ async function maybePruneRetention(dayUtc: string): Promise<void> {
 // ---- ingest -----------------------------------------------------------------
 
 export interface BeaconInput {
-  /** The raw parsed JSON body (may be anything, including undefined). */
+  /**
+   * The raw parsed JSON body (may be anything, including undefined).
+   */
   body: unknown;
-  /** First X-Forwarded-For entry when present, else the socket address. */
+  /**
+   * Client IP picked by trusted-hop count from `X-Forwarded-For`, else the
+   * socket address (see beaconRouter.clientIpOf). Never a client-supplied
+   * XFF leading entry. Used as hash input for `session_key` and as the
+   * per-IP rate-limit key; never stored, never logged.
+   */
   clientIp: string;
   /** Raw user-agent header (hash input only — never stored or logged). */
   userAgent: string;
-  /** The request `Origin` header, used only for same-origin referrer detection. */
+  /**
+   * The request `Origin` header verbatim (or undefined when absent). Used
+   * both for same-origin referrer detection AND for the Origin allowlist
+   * check (§4.8, task #135).
+   */
   siteOrigin: string | undefined;
   secrets: IAppSecrets | undefined;
 }
 
 /**
+ * Parse `secrets.beacon_allowed_origins` into a set of exact-match origins.
+ * Empty / unset means "no allowlist configured" — accept every origin (dev
+ * behavior). Whitespace-only entries are skipped.
+ */
+function parseAllowedOrigins(
+  secrets: IAppSecrets | undefined
+): Set<string> | null {
+  const raw = secrets?.beacon_allowed_origins;
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  const entries = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (entries.length === 0) return null;
+  return new Set(entries);
+}
+
+/**
+ * True when the beacon should be admitted for this request Origin (§4.8):
+ * - allowlist null (unset/empty) → accept everything (dev).
+ * - allowlist set → the request Origin must be present, parseable as a URL,
+ *   and its origin must be an EXACT string match. A missing, malformed, or
+ *   non-matching Origin fails the check and the beacon is silently dropped.
+ */
+function isOriginAllowed(
+  origin: string | undefined,
+  allowlist: Set<string> | null
+): boolean {
+  if (!allowlist) return true;
+  if (typeof origin !== "string" || origin.length === 0) return false;
+  let normalized: string;
+  try {
+    normalized = new URL(origin).origin;
+  } catch {
+    return false;
+  }
+  if (!normalized || normalized === "null") return false;
+  return allowlist.has(normalized);
+}
+
+/**
  * Ingest one beacon. Returns silently on ANY drop condition (bot, rate limit,
- * invalid input, DB failure); the router always answers 204 regardless. Never
- * throws, never logs request contents.
+ * disallowed Origin, invalid input, DB failure); the router always answers 204
+ * regardless. Never throws, never logs request contents.
  */
 export async function ingestBeacon(input: BeaconInput): Promise<void> {
   try {
@@ -250,6 +309,10 @@ export async function ingestBeacon(input: BeaconInput): Promise<void> {
 
     // Bots first — they never fire interaction events; drop before doing work.
     if (BOT_UA.test(userAgent)) return;
+
+    // Origin allowlist (§4.8, task #135). Checked BEFORE the rate-limit
+    // bucket touch so a disallowed origin cannot fill up an IP's bucket.
+    if (!isOriginAllowed(siteOrigin, parseAllowedOrigins(secrets))) return;
 
     // Rate limit per client IP (before validation so a flood of garbage is cheap).
     if (!underRateLimit(clientIp, Date.now())) return;
