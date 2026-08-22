@@ -109,6 +109,26 @@ export interface IAppSecrets {
    * turn into a silent misconfiguration foot-gun).
    */
   spotify_budget_reset_utc?: string;
+  /**
+   * Number of TRUSTED proxy hops in front of this API for the analytics
+   * beacon's client-IP derivation (§4.8). With hops = N, the client IP is
+   * the entry at index `(length - N)` in the request's `X-Forwarded-For`
+   * list — i.e. the entry appended by the outermost trusted proxy, so any
+   * client-supplied leading entries are ignored. When 0 (default) or when
+   * the list is shorter than N, `req.socket.remoteAddress` is used instead;
+   * a client-supplied XFF entry is NEVER trusted as the client IP. Prod
+   * sits behind ALB -> YARP gateway -> this API (hops = 2). Dev/local
+   * defaults to 0.
+   */
+  beacon_trusted_proxy_hops?: number;
+  /**
+   * Comma-separated exact-match Origin allowlist for the analytics beacon
+   * (§4.8). When set (non-empty), a beacon whose `Origin` header is
+   * missing, unparseable, or not an exact match is silently dropped (still
+   * 204, nothing logged, nothing stored). When unset/empty (dev), every
+   * origin is accepted as today.
+   */
+  beacon_allowed_origins?: string;
 }
 
 // ---- DB secrets (separate Secrets Manager secret via getDBSecrets, §9.3) -----

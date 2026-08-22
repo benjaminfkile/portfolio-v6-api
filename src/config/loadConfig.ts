@@ -62,6 +62,14 @@ function loadLocalConfig(): LoadedConfig {
     ),
     spotify_budget_reset_utc:
       process.env.SPOTIFY_BUDGET_RESET_UTC || undefined,
+    // Analytics beacon hardening (§4.8, task #135). Both optional so IS_LOCAL
+    // + tests default to today's behaviour (0 trusted hops, no Origin
+    // allowlist) unless the deploy explicitly opts in.
+    beacon_trusted_proxy_hops: parseOptionalInt(
+      process.env.BEACON_TRUSTED_PROXY_HOPS
+    ),
+    beacon_allowed_origins:
+      process.env.BEACON_ALLOWED_ORIGINS || undefined,
   };
 
   const dbSecrets: IDBSecrets = {

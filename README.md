@@ -82,7 +82,7 @@ optional; when absent the site renderer applies the default. Unknown keys are re
 | GET | `/api/ops` | Daily-replay ops report (v1.7): `?date=YYYY-MM-DD` or latest; 400 malformed date, 404 none available. |
 | GET | `/api/resume` | Newest confirmed resume PDF as `{available,url,filename,bytes,uploaded_at}` (or `{available:false}`), `Cache-Control: no-store`; degrades, never 5xx. |
 | GET | `/api/resume/download` | Streams the newest confirmed resume PDF with `Content-Disposition: attachment` and `Content-Type: application/pdf`; 404 when none. |
-| POST | `/api/beacon` | Analytics ingest, **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
+| POST | `/api/beacon` | Analytics ingest, **always 204**; tolerant body parsing (mounted before `express.json()` so `text/plain` sendBeacon works); ~60 events/min per-IP. Client IP picked from `X-Forwarded-For` by TRUSTED hop count (`BEACON_TRUSTED_PROXY_HOPS`) — client-supplied leading entries never influence `session_key` or the rate-limit bucket; optional exact-match `Origin` allowlist (`BEACON_ALLOWED_ORIGINS`) silently drops beacons that do not match (still 204). Clients must POST to the **absolute API origin** (a relative path on the frontends hits the SPA rewrite). |
 
 ### Admin
 
@@ -160,6 +160,18 @@ Auth column: **A** = `requireAdmin()` only · **A|K** = admin or `pv6k_` API key
 migrate:latest` (Knex, env-driven `knexfile.ts`). Deployed containers auto-run migrations
 only when `node_env !== 'production'`, **prod migrations are run manually** against the
 prod DB before deploying a schema change.
+
+### Analytics beacon hardening (§4.8, task #135)
+
+`POST /api/beacon` derives its client IP from `X-Forwarded-For` by TRUSTED hop count
+instead of the naive first-entry read that Express `trust proxy` (still intentionally
+off) would give. Both variables below are optional and default to today's dev
+behaviour when unset; deployed prod containers set both in the stored secret.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BEACON_TRUSTED_PROXY_HOPS` | `0` | Number of trusted proxies that append to `X-Forwarded-For` in front of this API. With `hops = N` the client IP is the entry at `(list_length - N)` — the one appended by the outermost trusted proxy — so any client-supplied leading entries are ignored. When `0`, or when the list is shorter than `hops`, the socket address is used and no header entry is trusted. Prod chain is ALB → gateway → this API (both append), so prod runs `2`. |
+| `BEACON_ALLOWED_ORIGINS` | *(unset)* | Comma-separated exact-match `Origin` allowlist. When set (non-empty), a beacon whose `Origin` header is missing, unparseable, or not an exact match is silently dropped (still `204`, nothing logged, nothing stored). When unset/empty, every origin is accepted (dev). |
 
 ### Now-playing (task #84 shared snapshot + listener series #115-#123)
 
