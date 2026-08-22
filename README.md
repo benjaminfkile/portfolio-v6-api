@@ -47,6 +47,11 @@ enforced in `src/schemas/link.ts` and consumed by both frontends via `GET /api/s
 `title`/`tagline`/`background_media_id`, the hero `data` accepts an optional strict
 `background` object that tunes how the background media is rendered. All keys are
 optional; when absent the site renderer applies the default. Unknown keys are rejected.
+Backdrops are per theme and independent: `background_media_id` renders on the dark
+theme only and the optional `background_light_media_id` (uuid) on the light theme
+only. Either may be absent (no backdrop on that theme); use the same id in both for
+one shared image. Both ids are collected into the published media map and protected
+from media deletion like any other `*media_id` field.
 
 | Field | Type | Range | Default | Purpose |
 |---|---|---|---|---|
