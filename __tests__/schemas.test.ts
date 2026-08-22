@@ -599,6 +599,17 @@ describe("section data schemas (§3.4/§3.5/§3.8)", () => {
       expect("background" in bare.data).toBe(false);
     }
 
+    // Optional light-theme backdrop: a uuid is accepted, anything else is not.
+    expect(
+      heroData.safeParse({
+        background_media_id: "11111111-1111-1111-1111-111111111111",
+        background_light_media_id: "22222222-2222-2222-2222-222222222222",
+      }).success
+    ).toBe(true);
+    expect(
+      heroData.safeParse({ background_light_media_id: "not-a-uuid" }).success
+    ).toBe(false);
+
     // Every key can be provided at once and each one survives the round trip.
     const full = heroBackground.safeParse({
       opacity_dark: 0.2,
